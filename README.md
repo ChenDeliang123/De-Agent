@@ -152,7 +152,8 @@ M4 为 Node/浏览器前端提供 REST + SSE 网关：
 
 - `POST /api/v1/chat`：同步对话。
 - `POST /api/v1/chat/stream`：SSE 对话。
-- `GET /api/v1/sessions`：会话列表。
+- `GET /api/v1/sessions`：会话列表，返回 `id` 与从首条用户消息推导的
+  `title`。
 - `GET /api/v1/sessions/:id/messages`：某个会话的历史消息。
 - `GET /health`：健康检查。
 

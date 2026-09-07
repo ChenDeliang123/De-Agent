@@ -120,6 +120,10 @@ int main() {
         Expect(sessions.IsSuccess(), "sessions endpoint should succeed");
         const auto session_list = nlohmann::json::parse(sessions.body);
         Expect(session_list.size() == 1, "sessions should contain one session");
+        Expect(session_list[0].value("id", std::string()) == session_id,
+               "session object should contain its id");
+        Expect(!session_list[0].value("title", std::string()).empty(),
+               "session object should contain a derived title");
 
         const auto messages = http.Get(base + "/api/v1/sessions/" + session_id + "/messages");
         Expect(messages.IsSuccess(), "messages endpoint should succeed");

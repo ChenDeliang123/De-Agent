@@ -22,15 +22,19 @@ function renderHistory(messages) {
       appendMessage(message.role, message.content);
     }
   }
+  messagesBox.scrollTop = 0;
 }
 
 async function loadSessions() {
   const response = await fetch("/api/sessions");
   const sessions = await response.json();
   sessionList.replaceChildren();
-  for (const sessionId of sessions) {
+  for (const entry of sessions) {
+    const sessionId = typeof entry === "string" ? entry : entry.id;
+    const title = typeof entry === "string" ? `对话 ${sessionId.slice(0, 8)}` : entry.title || "新对话";
     const item = document.createElement("li");
-    item.textContent = sessionId.slice(0, 8);
+    item.textContent = title;
+    item.title = title;
     item.addEventListener("click", async () => {
       currentSessionId = sessionId;
       document.querySelectorAll("#session-list li").forEach((node) => node.classList.remove("active"));
@@ -38,6 +42,9 @@ async function loadSessions() {
       const historyResponse = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
       renderHistory(await historyResponse.json());
     });
+    if (sessionId === currentSessionId) {
+      item.classList.add("active");
+    }
     sessionList.appendChild(item);
   }
 }

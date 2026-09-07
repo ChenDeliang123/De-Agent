@@ -62,6 +62,30 @@ std::string StringValue(const nlohmann::json& object, const char* key) {
     return object[key].get<std::string>();
 }
 
+std::string ShortTitle(std::string text) {
+    constexpr std::size_t kMaxBytes = 48;
+    if (text.size() <= kMaxBytes) {
+        return text;
+    }
+    std::size_t end = kMaxBytes;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    return text.substr(0, end) + "…";
+}
+
+std::string SessionTitleFromHistory(const std::vector<a2a::models::Message>& history) {
+    for (const auto& message : history) {
+        if (message.role == a2a::models::Role::kUser) {
+            const std::string text = FirstText(message);
+            if (!text.empty()) {
+                return ShortTitle(text);
+            }
+        }
+    }
+    return "新对话";
+}
+
 void SetCommonHeaders(httplib::Response& response) {
     response.set_header("Access-Control-Allow-Origin", "*");
     response.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -139,7 +163,10 @@ private:
                         }
                         nlohmann::json payload = nlohmann::json::array();
                         for (const auto& context : contexts) {
-                            payload.push_back(context);
+                            payload.push_back(
+                                    {{"id", context},
+                                     {"title", SessionTitleFromHistory(
+                                                       LatestHistory(task_store_, context))}});
                         }
                         response.set_content(payload.dump(), "application/json");
                     });
