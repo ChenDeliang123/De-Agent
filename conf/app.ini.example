@@ -1,0 +1,14 @@
+[deepseek]
+api_key = your-deepseek-api-key
+base_url = https://api.deepseek.com
+model = deepseek-v4-flash
+reasoning_model = deepseek-v4-pro
+timeout_seconds = 60
+max_retries = 3
+
+[mcp]
+; M0 暂不接入；M3 阶段再填写。
+binary = /absolute/path/to/mcp_server
+plugins = /absolute/path/to/plugins
+python_path = python3
+transport = stdio
