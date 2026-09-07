@@ -61,7 +61,10 @@ async function sendMessage(content) {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ session_id: currentSessionId, message: content }),
+    body: JSON.stringify({
+      ...(currentSessionId ? { session_id: currentSessionId } : {}),
+      message: content,
+    }),
   });
 
   if (!response.ok || !response.body) {

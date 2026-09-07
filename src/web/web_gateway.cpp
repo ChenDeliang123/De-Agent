@@ -55,6 +55,13 @@ std::string RoleName(a2a::models::Role role) {
     }
 }
 
+std::string StringValue(const nlohmann::json& object, const char* key) {
+    if (!object.contains(key) || !object[key].is_string()) {
+        return {};
+    }
+    return object[key].get<std::string>();
+}
+
 void SetCommonHeaders(httplib::Response& response) {
     response.set_header("Access-Control-Allow-Origin", "*");
     response.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -161,7 +168,7 @@ private:
                          SetCommonHeaders(response);
                          try {
                              const auto body = nlohmann::json::parse(request.body);
-                             const std::string content = body.value("message", std::string());
+                             const std::string content = StringValue(body, "message");
                              if (content.empty()) {
                                  response.status = 400;
                                  response.set_content(R"({"error":"message is required"})",
@@ -169,7 +176,7 @@ private:
                                  return;
                              }
 
-                             std::string session_id = body.value("session_id", std::string());
+                             std::string session_id = StringValue(body, "session_id");
                              if (session_id.empty()) {
                                  session_id = std::string(a2a::core::NewUuid());
                              }
@@ -195,14 +202,14 @@ private:
                          SetCommonHeaders(response);
                          try {
                              const auto body = nlohmann::json::parse(request.body);
-                             const std::string content = body.value("message", std::string());
+                             const std::string content = StringValue(body, "message");
                              if (content.empty()) {
                                  response.status = 400;
                                  response.set_content(R"({"error":"message is required"})",
                                                       "application/json");
                                  return;
                              }
-                             std::string session_id = body.value("session_id", std::string());
+                             std::string session_id = StringValue(body, "session_id");
                              if (session_id.empty()) {
                                  session_id = std::string(a2a::core::NewUuid());
                              }

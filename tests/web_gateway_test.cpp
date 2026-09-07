@@ -107,7 +107,7 @@ int main() {
         Expect(health.IsSuccess(), "health endpoint should succeed");
 
         const auto chat = http.Post(base + "/api/v1/chat",
-                                    R"({"message":"hello"})",
+                                    R"({"session_id":null,"message":"hello"})",
                                     "application/json");
         Expect(chat.IsSuccess(), "chat endpoint should succeed");
         const auto chat_json = nlohmann::json::parse(chat.body);
@@ -129,7 +129,7 @@ int main() {
         std::string stream_body;
         const auto stream = http.PostStream(
                 base + "/api/v1/chat/stream",
-                R"({"session_id":")" + session_id + R"(","message":"stream-hello"})",
+                R"({"session_id":null,"message":"stream-hello"})",
                 "application/json",
                 [&stream_body](std::string_view chunk) {
                     stream_body.append(chunk.data(), chunk.size());
