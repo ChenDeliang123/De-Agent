@@ -3,3 +3,4 @@ docs
 vendor_demo
 conf/conf.ini
 build/
+.cache/

@@ -145,3 +145,29 @@ request_timeout_seconds = 60
 ```
 
 测试使用 fake MCP Server 和 fake model，验证 stdio 通信与完整工具调用循环。
+
+## M4：Web Gateway
+
+M4 为 Node/浏览器前端提供 REST + SSE 网关：
+
+- `POST /api/v1/chat`：同步对话。
+- `POST /api/v1/chat/stream`：SSE 对话。
+- `GET /api/v1/sessions`：会话列表。
+- `GET /api/v1/sessions/:id/messages`：某个会话的历史消息。
+- `GET /health`：健康检查。
+
+`aiagent_app` 启动时默认同时监听两个端口：
+
+```bash
+./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
+```
+
+- A2A：`http://127.0.0.1:18080/`
+- Web Gateway：`http://127.0.0.1:18081/`
+
+Web 端口可用 `--web-port` 或 `AIAGENT_WEB_PORT` 修改。当前 SSE 端点采用
+SSE 协议，但内容仍在模型完成后一次性推送；逐 token 流式输出留到 Node
+前端联调时再做。
+
+`aiagent_web_gateway` 测试使用 fake model 验证健康检查、同步对话、会话列表、
+历史消息与 SSE 事件。

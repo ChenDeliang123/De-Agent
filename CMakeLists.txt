@@ -103,12 +103,33 @@ else()
   target_compile_options(aiagent_mcp PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(aiagent_web STATIC src/web/web_gateway.cpp)
+if(DEFINED FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB AND EXISTS
+   "${FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB}/httplib.h")
+  set(AIAGENT_HTTPLIB_INCLUDE_DIR "${FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB}")
+else()
+  set(AIAGENT_HTTPLIB_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/cpp_httplib-src")
+endif()
+target_include_directories(
+  aiagent_web
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+  PRIVATE ${AIAGENT_HTTPLIB_INCLUDE_DIR}
+)
+target_link_libraries(aiagent_web PUBLIC aiagent_agent a2a::a2a Threads::Threads)
+
+if(MSVC)
+  target_compile_options(aiagent_web PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_web PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # ---------------------------------------------------------------------------
 # 本项目可执行文件
 # ---------------------------------------------------------------------------
 add_executable(aiagent_app src/main.cpp)
 target_include_directories(aiagent_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(aiagent_app PRIVATE aiagent_agent aiagent_mcp aiagent_llm a2a::a2a)
+target_link_libraries(aiagent_app PRIVATE
+                      aiagent_agent aiagent_mcp aiagent_web aiagent_llm a2a::a2a)
 
 if(MSVC)
   target_compile_options(aiagent_app PRIVATE /W4 /permissive-)
@@ -144,6 +165,10 @@ if(AIAGENT_BUILD_TESTS)
   target_compile_definitions(mcp_bridge_test PRIVATE
                              AIAGENT_FAKE_MCP_BINARY="$<TARGET_FILE:fake_mcp_server>")
   add_test(NAME aiagent_mcp_bridge COMMAND mcp_bridge_test)
+
+  add_executable(web_gateway_test tests/web_gateway_test.cpp)
+  target_link_libraries(web_gateway_test PRIVATE aiagent_web aiagent_agent)
+  add_test(NAME aiagent_web_gateway COMMAND web_gateway_test)
 endif()
 
 # ---------------------------------------------------------------------------

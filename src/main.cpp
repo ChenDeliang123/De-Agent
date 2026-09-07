@@ -23,6 +23,7 @@
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
 #include "aiagent/version.hpp"
+#include "aiagent/web/web_gateway.hpp"
 
 namespace {
 
@@ -34,6 +35,7 @@ void OnSignal(int) {
 
 struct AppOptions {
     int port = 18080;
+    int web_port = 18081;
     std::string config_path = "conf/conf.ini";
     std::string db_path = "build/db/aiagent_tasks.db";
     std::string mcp_binary;
@@ -45,6 +47,9 @@ AppOptions ParseOptions(int argc, char** argv) {
     AppOptions options;
     if (const char* value = std::getenv("AIAGENT_PORT")) {
         options.port = std::stoi(value);
+    }
+    if (const char* value = std::getenv("AIAGENT_WEB_PORT")) {
+        options.web_port = std::stoi(value);
     }
     if (const char* value = std::getenv("AIAGENT_CONFIG")) {
         options.config_path = value;
@@ -70,6 +75,8 @@ AppOptions ParseOptions(int argc, char** argv) {
             options.db_path = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             options.port = std::stoi(argv[++i]);
+        } else if (arg == "--web-port" && i + 1 < argc) {
+            options.web_port = std::stoi(argv[++i]);
         } else if (arg == "--mcp-binary" && i + 1 < argc) {
             options.mcp_binary = argv[++i];
         } else if (arg == "--mcp-plugins" && i + 1 < argc) {
@@ -191,6 +198,12 @@ int main(int argc, char** argv) {
                     return runtime.HandleMessage(request.message, history, context_id);
                 });
 
+        aiagent::web::WebGateway web_gateway(agent_server, *task_store);
+        if (!web_gateway.Start("127.0.0.1", options.web_port)) {
+            std::cerr << "failed to start Web Gateway on port " << options.web_port << '\n';
+            return 1;
+        }
+
         a2a::server::AgentHttpServer http_server(agent_server);
         if (!http_server.Start("127.0.0.1", options.port)) {
             std::cerr << "failed to start A2A HTTP server on port " << options.port << '\n';
@@ -201,6 +214,7 @@ int main(int argc, char** argv) {
         std::signal(SIGTERM, OnSignal);
 
         std::cout << "ai-agent-cpp listening on http://127.0.0.1:" << options.port << "/\n";
+        std::cout << "Web Gateway: http://127.0.0.1:" << options.web_port << "/\n";
         std::cout << "Agent Card: http://127.0.0.1:" << options.port
                   << "/.well-known/agent-card.json\n";
         std::cout << "Model: " << config->model << '\n';
@@ -212,6 +226,7 @@ int main(int argc, char** argv) {
         }
 
         http_server.Stop();
+        web_gateway.Stop();
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "aiagent_app failed: " << e.what() << '\n';
