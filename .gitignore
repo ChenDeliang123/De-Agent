@@ -4,3 +4,4 @@ vendor_demo
 conf/conf.ini
 build/
 .cache/
+node_modules/

@@ -171,3 +171,40 @@ SSE 协议，但内容仍在模型完成后一次性推送；逐 token 流式输
 
 `aiagent_web_gateway` 测试使用 fake model 验证健康检查、同步对话、会话列表、
 历史消息与 SSE 事件。
+
+## M5：Node.js 前端
+
+M5 提供一个零 npm 依赖的 Node BFF + 前端，用于测试完整链路：
+
+- `web/node_frontend/server.js`：Node HTTP 服务，负责静态页面与 API 转发。
+- 前端路径 `/api/sessions`、`/api/sessions/:id/messages`、`/api/chat/stream`
+  会补成 C++ Web Gateway 的 `/api/v1/...` 路径。
+- 浏览器页面包含会话列表、聊天消息区、SSE 流式输出处理。
+
+先启动 C++ 后端：
+
+```bash
+./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
+```
+
+再启动 Node 前端（默认代理到 `http://127.0.0.1:18081`）：
+
+```bash
+cd web/node_frontend
+npm start
+```
+
+浏览器打开 `http://127.0.0.1:3000/`。若 C++ Web Gateway 不是 18081 端口：
+
+```bash
+AIAGENT_BACKEND_URL=http://127.0.0.1:18082 npm start
+```
+
+Node 侧测试：
+
+```bash
+cd web/node_frontend && npm test
+```
+
+`server.test.mjs` 用内置 fake backend 验证静态页面、会话代理与 SSE 转发，
+无需安装任何 npm 依赖。
