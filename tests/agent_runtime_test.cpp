@@ -64,6 +64,33 @@ public:
     }
 };
 
+class StreamingFakeModel final : public aiagent::llm::IModelClient {
+public:
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "unused";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        aiagent::llm::StreamEvent first;
+        first.content = "hel";
+        on_event(first);
+        aiagent::llm::StreamEvent second;
+        second.content = "lo";
+        on_event(second);
+    }
+};
+
 a2a::models::AgentCard BuildCard() {
     using a2a::models::AgentCard;
 
@@ -152,6 +179,24 @@ int main() {
                "last history message should be the fake assistant reply");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<StreamingFakeModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "stream", "text/plain");
+        std::string streamed_tokens;
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, {user}, "ctx-stream", [&](const std::string& token) {
+                    streamed_tokens += token;
+                });
+        Expect(streamed_tokens == "hello", "streaming callback should receive tokens");
+        Expect(reply == "hello", "streaming method should return the assembled reply");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime streaming test failed: " << e.what() << '\n';
         return 1;
     }
 

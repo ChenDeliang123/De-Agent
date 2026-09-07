@@ -87,6 +87,13 @@ int main() {
                 });
 
         aiagent::web::WebGateway gateway(agent_server, *task_store);
+        gateway.SetStreamHandler(
+                [](const std::string&,
+                   const std::string&,
+                   const aiagent::web::WebGateway::TokenCallback& on_token) {
+                    on_token("你");
+                    on_token("好");
+                });
         if (!gateway.Start("127.0.0.1", 0)) {
             std::cerr << "web gateway failed to start\n";
             return 1;
@@ -130,6 +137,10 @@ int main() {
         Expect(stream.IsSuccess(), "stream endpoint should succeed");
         Expect(stream_body.find("event: done") != std::string::npos,
                "stream body should contain done event");
+        Expect(stream_body.find(R"({"content":"你"})") != std::string::npos,
+               "stream body should contain the first token");
+        Expect(stream_body.find(R"({"content":"好"})") != std::string::npos,
+               "stream body should contain the second token");
 
         gateway.Stop();
     } catch (const std::exception& e) {

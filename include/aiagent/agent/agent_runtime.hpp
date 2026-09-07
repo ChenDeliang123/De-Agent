@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,13 @@ public:
             const a2a::models::Message& incoming,
             const std::vector<a2a::models::Message>& history,
             const std::string& context_id = {});
+
+    // 流式版本：逐 token 回调，支持工具调用循环；返回最终回复文本。
+    std::string HandleMessageStreaming(
+            const a2a::models::Message& incoming,
+            const std::vector<a2a::models::Message>& history,
+            const std::string& context_id,
+            const std::function<void(const std::string& token)>& on_token);
 
 private:
     std::shared_ptr<llm::IModelClient> model_;

@@ -105,6 +105,10 @@ public:
 
     int bound_port() const noexcept { return port_; }
 
+    void SetStreamHandler(WebGateway::StreamChatHandler handler) {
+        stream_handler_ = std::move(handler);
+    }
+
 private:
     void SetupRoutes() {
         server_.Options("/.*", [](const httplib::Request&, httplib::Response& response) {
@@ -250,10 +254,20 @@ private:
                     };
                     try {
                         write("started", {{"session_id", session_id}});
-                        const auto result = ChatOnce(session_id, content);
-                        write("content", {{"content", result.value("content", "")}});
-                        write("done", {{"task_id", result.value("task_id", "")},
-                                       {"session_id", session_id}});
+                        nlohmann::json done_payload = {{"session_id", session_id}};
+                        if (stream_handler_) {
+                            stream_handler_(
+                                    session_id,
+                                    content,
+                                    [&write](const std::string& token) {
+                                        write("content", {{"content", token}});
+                                    });
+                        } else {
+                            const auto result = ChatOnce(session_id, content);
+                            write("content", {{"content", result.value("content", "")}});
+                            done_payload["task_id"] = result.value("task_id", "");
+                        }
+                        write("done", done_payload);
                     } catch (const std::exception& e) {
                         write("error", {{"error", e.what()}});
                     }
@@ -268,6 +282,7 @@ private:
     std::thread thread_;
     int port_ = 0;
     bool running_ = false;
+    WebGateway::StreamChatHandler stream_handler_;
 };
 
 WebGateway::WebGateway(a2a::server::AgentServer& agent_server,
@@ -281,5 +296,8 @@ bool WebGateway::Start(const std::string& host, int port) {
 }
 void WebGateway::Stop() { impl_->Stop(); }
 int WebGateway::bound_port() const noexcept { return impl_->bound_port(); }
+void WebGateway::SetStreamHandler(WebGateway::StreamChatHandler handler) {
+    impl_->SetStreamHandler(std::move(handler));
+}
 
 }  // namespace aiagent::web

@@ -165,9 +165,9 @@ M4 为 Node/浏览器前端提供 REST + SSE 网关：
 - A2A：`http://127.0.0.1:18080/`
 - Web Gateway：`http://127.0.0.1:18081/`
 
-Web 端口可用 `--web-port` 或 `AIAGENT_WEB_PORT` 修改。当前 SSE 端点采用
-SSE 协议，但内容仍在模型完成后一次性推送；逐 token 流式输出留到 Node
-前端联调时再做。
+Web 端口可用 `--web-port` 或 `AIAGENT_WEB_PORT` 修改。
+`/api/v1/chat/stream` 已支持真正的逐 token 流式输出：DeepSeek 的 SSE
+增量会经过 AgentRuntime、Web Gateway、Node BFF 实时到达浏览器。
 
 `aiagent_web_gateway` 测试使用 fake model 验证健康检查、同步对话、会话列表、
 历史消息与 SSE 事件。
@@ -207,4 +207,5 @@ cd web/node_frontend && npm test
 ```
 
 `server.test.mjs` 用内置 fake backend 验证静态页面、会话代理与 SSE 转发，
-无需安装任何 npm 依赖。
+无需安装任何 npm 依赖。AgentRuntime 与 Web Gateway 测试分别验证了逐 token
+回调与多个 `event: content` 帧。

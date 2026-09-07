@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "a2a/core/version.hpp"
+#include "a2a/core/id.hpp"
 #include "a2a/models/agent_card.hpp"
 #include "a2a/models/message.hpp"
 #include "a2a/models/requests.hpp"
@@ -199,6 +200,37 @@ int main(int argc, char** argv) {
                 });
 
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
+        web_gateway.SetStreamHandler(
+                [&](const std::string& session_id,
+                    const std::string& content,
+                    const aiagent::web::WebGateway::TokenCallback& on_token) {
+                    std::vector<a2a::models::Message> history;
+                    std::size_t latest_history_size = 0;
+                    for (const auto& task : task_store->ListAll()) {
+                        if (task.context_id == session_id &&
+                            task.history.size() > latest_history_size) {
+                            history = task.history;
+                            latest_history_size = task.history.size();
+                        }
+                    }
+
+                    a2a::models::Message user = a2a::models::MakeTextMessage(
+                            a2a::models::Role::kUser, content, "text/plain");
+                    history.push_back(user);
+
+                    const std::string reply = runtime.HandleMessageStreaming(
+                            user, history, session_id, on_token);
+
+                    a2a::models::Task task;
+                    task.id = std::string(a2a::core::NewUuid());
+                    task.context_id = session_id;
+                    task.status =
+                            a2a::models::MakeTaskStatus(a2a::models::TaskState::kCompleted);
+                    task.history = std::move(history);
+                    task.history.push_back(a2a::models::MakeTextMessage(
+                            a2a::models::Role::kAgent, reply, "text/plain"));
+                    task_store->Put(std::move(task));
+                });
         if (!web_gateway.Start("127.0.0.1", options.web_port)) {
             std::cerr << "failed to start Web Gateway on port " << options.web_port << '\n';
             return 1;
