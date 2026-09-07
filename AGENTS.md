@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是 A2A（Agent-to-Agent）协议 v1.0 的 C++ 实现项目。任何在本仓库中
+本仓库是 AI Agent 的 C++ 实现项目。任何在本仓库中
 工作的 agent 或协作者都必须遵守以下工作约定。
 
 ## 工作约定
@@ -26,20 +26,3 @@
    - 由这类提问产生的 `docs/` 文件改动**不需要 git commit**，也无需在
      `项目改动内容.md` 记录（与约定 1、3 冲突时以本条为准；`docs/` 已在
      `.gitignore` 中，属本地笔记性质）。
-
-## 代码约定：JSON 序列化
-
-模型层的 `to_json` / `from_json` 采用分层选型，避免风格反复摇摆：
-
-- **纯值对象**（`Part`、`Artifact`、`AgentInterface`、`AgentSkill` 等）：保持
-  `struct` + 命名空间内自由 `to_json` / `from_json`。nlohmann 通过 ADL 找到
-  它们，嵌套组合（如 `Task` 内的 `history`、`Message` 内的 `parts`）依赖此机制。
-- **行为实体**（需要封装状态/不变量时，如未来长出生命周期逻辑的 `Task`）：
-  升级为 `class`，提供成员 `ToJson()` / `Parse()`，同时在 `.cpp` 保留一行转发的
-  自由 `to_json` / `from_json`，保证嵌套序列化与既有调用不受破坏。
-- **信封/聚合根**（`JsonRpcRequest` / `JsonRpcResponse` / `AgentCard`）：
-  `class` + 成员 `Parse()` / `ToJson()`，不提供自由函数。
-- 新字段遵循 ProtoJSON camelCase，枚举使用 SCREAMING_SNAKE_CASE，时间戳使用
-  ISO 8601 UTC；解析不合法输入抛 `core::JsonRpcException`（kInvalidParams）。
-- 不为“风格统一”做一次性大规模迁移；某个类型出现行为需求时，再按上述规则
-  单独升级并提交。
