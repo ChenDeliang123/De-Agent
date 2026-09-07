@@ -1,212 +1,245 @@
 # ai-agent-cpp
 
-AI Agent 的 C++ 实现项目。第一版规划见
-`docs/项目实现规划.md`（本地笔记，不入库）。
+一个基于 C++ 的 AI Agent 项目，支持通过 DeepSeek 进行对话、按需调用 MCP
+工具，并以 A2A（Agent-to-Agent）协议对外提供服务；同时附带一个轻量的
+Node.js Web 前端用于快速体验。
 
-依赖仓库以 Git submodule 方式引入：
+## 特性
 
-- `vendor/a2a-protocol`
-- `vendor/mcp-extension-platform`
+- 基于 C++20 实现 Agent Runtime，复用 [a2a-protocol] 作为 A2A v1.0 协议库。
+- 接入 DeepSeek Chat Completions：
+  - 同步对话
+  - SSE 逐 token 流式输出
+  - `tools` / `tool_calls` 支持
+- 接入 [mcp-extension-platform]：
+  - 自动发现并加载 MCP 工具
+  - 模型发起 `tool_calls` 后自动执行并回填结果
+- 任务与消息历史通过 SQLite 持久化。
+- 内置 Web Gateway（REST + SSE）与零 npm 依赖的 Node BFF 前端。
 
-## M0：最小 A2A Agent 骨架
+[a2a-protocol]: https://gitee.com/chen_dl/a2a-protocol
+[mcp-extension-platform]: https://gitee.com/chen_dl/mcp-extension-platform
 
-M0 复用 `vendor/a2a-protocol` submodule，通过 `AgentServer` +
-`AgentHttpServer` 暴露一个最小的 A2A Agent。
+## 系统架构
 
-### 依赖
+```text
+┌──────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│   Browser    │ ───▶ │    Node BFF      │ ───▶ │   Web Gateway    │
+│              │      │  web/node_frontend│      │  C++ REST + SSE  │
+└──────────────┘      └──────────────────┘      └────────┬─────────┘
+                                                         │
+┌──────────────┐                                          │
+│ A2A Client   │ ─────────────────────────────────────┐   │
+└──────────────┘                                      │   │
+                                                      ▼   ▼
+                                          ┌──────────────────────────┐
+                                          │      AgentRuntime         │
+                                          │  消息历史 / 工具调用循环   │
+                                          └──────┬──────────┬─────────┘
+                                                 │          │
+                                    ┌────────────▼────┐  ┌──▼────────────┐
+                                    │    DeepSeek     │  │  MCP Server   │
+                                    │ Chat Completions│  │ stdio JSON-RPC│
+                                    └─────────────────┘  └───────────────┘
 
-- CMake >= 3.21
-- C++20 编译器（GCC 11+ / Clang 14+）
+                                    SQLite TaskStore
+                                    （任务与会话历史）
+```
+
+核心链路：
+
+```text
+用户输入
+  → AgentRuntime
+  → DeepSeek 流式生成
+  → 若模型请求 tool_calls
+  → 调用 MCP 工具并回填
+  → 继续生成，直到输出最终回答
+  → 写入 SQLite
+```
+
+## 目录结构
+
+```text
+.
+├── CMakeLists.txt              # 顶层 C++ 构建
+├── conf/
+│   ├── app.ini.example         # 公开配置模板
+│   └── conf.ini                # 本地密钥配置（gitignore）
+├── include/aiagent/
+│   ├── agent/                  # Agent Runtime
+│   ├── llm/                    # DeepSeek Client
+│   ├── mcp/                    # MCP stdio 客户端桥
+│   ├── tools/                  # 工具抽象接口
+│   └── web/                    # Web Gateway
+├── src/                        # 对应实现
+├── tests/                      # C++ 测试
+├── examples/                   # CLI 示例
+├── web/node_frontend/          # Node BFF + 静态前端
+├── vendor/
+│   ├── a2a-protocol/           # Git submodule
+│   └── mcp-extension-platform/ # Git submodule
+└── third_party/
+```
+
+## 环境要求
+
+- Linux（当前开发与测试环境）
+- CMake ≥ 3.21
+- 支持 C++20 的编译器（GCC 11+ / Clang 14+）
 - libcurl 开发库
-- 已初始化的 submodule
+- Node.js ≥ 18（仅运行 Web 前端时）
+- Python 3（可选，MCP Python 插件需要）
 
-### 构建与运行
+CMake 配置阶段会自动获取 `cpp-httplib` 与 SQLite，需要可用的网络连接。
 
-首次 clone 后先拉取子仓库：
+## 快速开始
+
+### 1. 初始化 submodule
 
 ```bash
 git submodule update --init --recursive
 ```
 
-然后构建：
+### 2. 构建 C++
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ```
 
-M2 起 `aiagent_app` 已经是 DeepSeek Agent，启动需要读取密钥配置：
+### 3. 配置 DeepSeek API Key
+
+复制配置模板并填写：
 
 ```bash
-./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
+cp conf/app.ini.example conf/conf.ini
 ```
 
-默认监听 `http://127.0.0.1:18080/`，可用参数或环境变量覆盖端口：
-
-```bash
-./build/aiagent_app --config conf/conf.ini --port 18081
-# 或
-AIAGENT_PORT=18081 ./build/aiagent_app
-```
-
-启动后可访问：
-
-- Agent Card：`http://127.0.0.1:18080/.well-known/agent-card.json`
-- A2A JSON-RPC 端点：`POST http://127.0.0.1:18080/`
-
-### 测试
-
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-M0 smoke test 会启动一个随机端口 HTTP Server，验证 Agent Card
-发现和 `SendMessage` 往返链路。
-
-## M1：DeepSeek Client
-
-M1 实现了 OpenAI/DeepSeek Chat Completions 客户端，支持：
-
-- 非流式对话与 SSE 流式对话
-- `tools` / `tool_calls` 序列化与解析
-- DeepSeek `reasoning_content` 保留
-- 配置解析，密钥不进入代码
-
-### 配置
-
-私有配置放在 `conf/conf.ini`，该文件已被 `.gitignore` 屏蔽；
-仓库内的 `conf/app.ini.example` 是公开模板。也支持用环境变量
-`DEEPSEEK_API_KEY` 覆盖或通过 `AIAGENT_CONFIG` 指定其他配置文件。
-
-### 命令行示例
-
-```bash
-./build/aiagent_deepseek_cli --config conf/conf.ini "你好"
-./build/aiagent_deepseek_cli --config conf/conf.ini --stream "用一句话介绍自己"
-```
-
-### 测试
-
-`aiagent_llm_client` 覆盖配置解析、请求体构造、非流式响应解析与
-流式 chunk 解析，不依赖真实 DeepSeek API。
-
-## M2：DeepSeek Agent Runtime
-
-M2 把 M1 的 DeepSeek Client 接到 A2A `SendMessage`：
-
-- 新增 `AgentRuntime`，把 A2A 历史翻译成 LLM messages 并调用模型。
-- 使用 SQLite `TaskStore` 持久化任务与消息历史。
-- 同一 `contextId` 可继续多轮对话；A2A 终态任务不允许续写，
-  因此后续轮次以新 task + 相同 `contextId` 发送。
-- Agent Card 的技能改为 `deepseek-chat`。
-
-启动：
-
-```bash
-./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
-```
-
-可用 `AIAGENT_DB` 环境变量指定数据库路径。
-
-`aiagent_agent_runtime` 测试使用 fake model 验证首轮/第二轮历史拼接与
-模型调用，不依赖真实 DeepSeek API。
-
-## M3：MCP 工具调用
-
-M3 把已有的 MCP Extension Platform 作为子进程接入 Agent：
-
-- `MCPClientBridge` 通过 stdio JSON-RPC 启动并管理 MCP Server。
-- 自动执行 MCP 握手、`tools/list` 和 `tools/call`。
-- `AgentRuntime` 支持完整工具循环：模型返回 `tool_calls` → 执行 MCP 工具 →
-  回填 `tool` 消息 → 再次请求模型。
-- `aiagent_app` 启动时若检测到 MCP Server 可执行文件，会自动加载工具。
-
-先构建 MCP Server（产物在 submodule 内，已被其 gitignore 屏蔽）：
-
-```bash
-cmake -S vendor/mcp-extension-platform -B vendor/mcp-extension-platform/build -DCMAKE_BUILD_TYPE=Debug
-cmake --build vendor/mcp-extension-platform/build -j
-```
-
-再启动 AI Agent，终端会打印 `MCP tools loaded: N`：
-
-```bash
-./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
-```
-
-也可在 `conf/conf.ini` 的 `[mcp]` 段自定义：
+在 `conf/conf.ini` 中设置：
 
 ```ini
-[mcp]
-binary = /path/to/mcp_server
-plugins = /path/to/plugins
-python_path = python3
-request_timeout_seconds = 60
+[deepseek]
+api_key = sk-your-deepseek-api-key
+base_url = https://api.deepseek.com
+model = deepseek-v4-flash
+reasoning_model = deepseek-v4-pro
 ```
 
-测试使用 fake MCP Server 和 fake model，验证 stdio 通信与完整工具调用循环。
+也可以不写文件，改用环境变量：
 
-## M4：Web Gateway
+```bash
+export DEEPSEEK_API_KEY=sk-your-deepseek-api-key
+```
 
-M4 为 Node/浏览器前端提供 REST + SSE 网关：
-
-- `POST /api/v1/chat`：同步对话。
-- `POST /api/v1/chat/stream`：SSE 对话。
-- `GET /api/v1/sessions`：会话列表，返回 `id` 与从首条用户消息推导的
-  `title`。
-- `GET /api/v1/sessions/:id/messages`：某个会话的历史消息。
-- `GET /health`：健康检查。
-
-`aiagent_app` 启动时默认同时监听两个端口：
+### 4. 启动 C++ 后端
 
 ```bash
 ./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
 ```
+
+默认端口：
 
 - A2A：`http://127.0.0.1:18080/`
 - Web Gateway：`http://127.0.0.1:18081/`
 
-Web 端口可用 `--web-port` 或 `AIAGENT_WEB_PORT` 修改。
-`/api/v1/chat/stream` 已支持真正的逐 token 流式输出：DeepSeek 的 SSE
-增量会经过 AgentRuntime、Web Gateway、Node BFF 实时到达浏览器。
-
-`aiagent_web_gateway` 测试使用 fake model 验证健康检查、同步对话、会话列表、
-历史消息与 SSE 事件。
-
-## M5：Node.js 前端
-
-M5 提供一个零 npm 依赖的 Node BFF + 前端，用于测试完整链路：
-
-- `web/node_frontend/server.js`：Node HTTP 服务，负责静态页面与 API 转发。
-- 前端路径 `/api/sessions`、`/api/sessions/:id/messages`、`/api/chat/stream`
-  会补成 C++ Web Gateway 的 `/api/v1/...` 路径。
-- 浏览器页面包含会话列表、聊天消息区、SSE 流式输出处理。
-
-先启动 C++ 后端：
-
-```bash
-./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
-```
-
-再启动 Node 前端（默认代理到 `http://127.0.0.1:18081`）：
+### 5. 启动 Web 前端
 
 ```bash
 cd web/node_frontend
 npm start
 ```
 
-浏览器打开 `http://127.0.0.1:3000/`。若 C++ Web Gateway 不是 18081 端口：
+浏览器打开：
+
+```text
+http://127.0.0.1:3000/
+```
+
+如果 C++ Web Gateway 不是 `18081`：
 
 ```bash
 AIAGENT_BACKEND_URL=http://127.0.0.1:18082 npm start
 ```
 
-Node 侧测试：
+### 6.（可选）启用 MCP 工具
+
+构建 MCP Server：
+
+```bash
+cmake -S vendor/mcp-extension-platform \
+  -B vendor/mcp-extension-platform/build \
+  -DCMAKE_BUILD_TYPE=Debug
+cmake --build vendor/mcp-extension-platform/build -j
+```
+
+再次启动 `aiagent_app`，终端出现 `MCP tools loaded: N` 即表示已启用。
+
+## Web API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/chat` | 同步对话 |
+| `POST` | `/api/v1/chat/stream` | SSE 逐 token 流式对话 |
+| `GET` | `/api/v1/sessions` | 会话列表（`id` + 可读 `title`） |
+| `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
+| `GET` | `/health` | 健康检查 |
+
+同步对话示例：
+
+```bash
+curl -X POST http://127.0.0.1:18081/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"你好"}'
+```
+
+## A2A
+
+Agent 通过 A2A v1.0 JSON-RPC 暴露能力：
+
+- Agent Card：`http://127.0.0.1:18080/.well-known/agent-card.json`
+- JSON-RPC 端点：`POST http://127.0.0.1:18080/`
+
+支持 `SendMessage`、`GetTask`、`ListTasks`、`CancelTask` 等协议方法。
+
+## 测试
+
+运行 C++ 测试：
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+运行 Node 前端测试：
 
 ```bash
 cd web/node_frontend && npm test
 ```
 
-`server.test.mjs` 用内置 fake backend 验证静态页面、会话代理与 SSE 转发，
-无需安装任何 npm 依赖。AgentRuntime 与 Web Gateway 测试分别验证了逐 token
-回调与多个 `event: content` 帧。
+当前测试不依赖真实 DeepSeek API：模型与 MCP 均使用 fake 实现验证链路。
+
+## 命令行示例
+
+直接与 DeepSeek 对话：
+
+```bash
+./build/aiagent_deepseek_cli --config conf/conf.ini "你好"
+./build/aiagent_deepseek_cli --config conf/conf.ini --stream "介绍一下自己"
+```
+
+## 开发状态
+
+当前已完成：
+
+- A2A Agent 骨架与 HTTP/SSE 服务端
+- DeepSeek 同步/流式客户端
+- MCP 工具桥接与工具调用循环
+- Web Gateway
+- Node 前端
+
+后续可继续完善：
+
+- 鉴权与多用户
+- 结构化日志与监控
+- 更完善的会话管理（删除/重命名）
+- 多 Agent 编排
