@@ -2,20 +2,25 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
-#include "a2a/core/id.hpp"
 #include "a2a/core/version.hpp"
 #include "a2a/models/agent_card.hpp"
 #include "a2a/models/message.hpp"
-#include "a2a/models/operations.hpp"
 #include "a2a/models/requests.hpp"
 #include "a2a/models/task.hpp"
 #include "a2a/server/agent_http_server.hpp"
 #include "a2a/server/agent_server.hpp"
+#include "a2a/server/sqlite_task_store.hpp"
 
+#include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/config.hpp"
+#include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/version.hpp"
 
 namespace {
@@ -23,111 +28,140 @@ namespace {
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void OnSignal(int) {
-  g_stop_requested = 1;
+    g_stop_requested = 1;
 }
 
-a2a::models::AgentCard BuildM0AgentCard() {
-  using a2a::models::AgentCapabilities;
-  using a2a::models::AgentCard;
-  using a2a::models::AgentInterface;
-  using a2a::models::AgentSkill;
+struct AppOptions {
+    int port = 18080;
+    std::string config_path = "conf/conf.ini";
+    std::string db_path = "build/db/aiagent_tasks.db";
+};
 
-  AgentInterface iface;
-  iface.url = "http://127.0.0.1:18080/";
-  iface.protocol_binding = std::string(a2a::models::kBindingJsonRpc);
-  iface.protocol_version = std::string(a2a::core::kProtocolVersion);
-
-  AgentCapabilities capabilities;
-  capabilities.streaming = false;
-  capabilities.push_notifications = false;
-
-  AgentSkill skill;
-  skill.id = "m0-echo";
-  skill.name = "M0 Echo";
-  skill.description = "M0 骨架：把收到的文本作为 artifact 原样返回。";
-  skill.tags = {"m0", "echo"};
-
-  AgentCard card("ai-agent-cpp M0",
-                 "Minimal AI Agent skeleton built on a2a-protocol.",
-                 aiagent::kVersion);
-  card.WithInterface(std::move(iface))
-      .WithCapabilities(std::move(capabilities))
-      .WithDefaultInputModes({"text/plain"})
-      .WithDefaultOutputModes({"text/plain"})
-      .WithSkill(std::move(skill));
-  return card;
-}
-
-std::string FirstText(const a2a::models::Message& message) {
-  for (const auto& part : message.parts) {
-    if (part.text.has_value()) {
-      return *part.text;
+AppOptions ParseOptions(int argc, char** argv) {
+    AppOptions options;
+    if (const char* value = std::getenv("AIAGENT_PORT")) {
+        options.port = std::stoi(value);
     }
-  }
-  return {};
+    if (const char* value = std::getenv("AIAGENT_CONFIG")) {
+        options.config_path = value;
+    }
+    if (const char* value = std::getenv("AIAGENT_DB")) {
+        options.db_path = value;
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            options.config_path = argv[++i];
+        } else if (arg == "--db" && i + 1 < argc) {
+            options.db_path = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            options.port = std::stoi(argv[++i]);
+        } else {
+            options.port = std::stoi(arg);
+        }
+    }
+    return options;
 }
 
-int ParsePort(int argc, char** argv) {
-  int port = 18080;
-  if (const char* env_port = std::getenv("AIAGENT_PORT")) {
-    port = std::stoi(env_port);
-  }
-  if (argc > 1) {
-    port = std::stoi(argv[1]);
-  }
-  return port;
+a2a::models::AgentCard BuildAgentCard(int port) {
+    using a2a::models::AgentCapabilities;
+    using a2a::models::AgentCard;
+    using a2a::models::AgentInterface;
+    using a2a::models::AgentSkill;
+
+    AgentInterface iface;
+    iface.url = "http://127.0.0.1:" + std::to_string(port) + "/";
+    iface.protocol_binding = std::string(a2a::models::kBindingJsonRpc);
+    iface.protocol_version = std::string(a2a::core::kProtocolVersion);
+
+    AgentCapabilities capabilities;
+    capabilities.streaming = false;
+    capabilities.push_notifications = false;
+
+    AgentSkill skill;
+    skill.id = "deepseek-chat";
+    skill.name = "DeepSeek Chat";
+    skill.description = "多轮对话，使用 DeepSeek 模型回复用户消息。";
+    skill.tags = {"chat", "deepseek"};
+
+    AgentCard card("ai-agent-cpp DeepSeek Agent",
+                   "A2A agent backed by DeepSeek Chat Completions.",
+                   aiagent::kVersion);
+    card.WithInterface(std::move(iface))
+            .WithCapabilities(std::move(capabilities))
+            .WithDefaultInputModes({"text/plain"})
+            .WithDefaultOutputModes({"text/plain"})
+            .WithSkill(std::move(skill));
+    return card;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  try {
-    const int port = ParsePort(argc, argv);
-    const auto card = BuildM0AgentCard();
+    try {
+        const AppOptions options = ParseOptions(argc, argv);
 
-    a2a::server::AgentServer agent_server(card);
+        std::string config_error;
+        const auto config = aiagent::LoadDeepSeekConfigFile(options.config_path, &config_error);
+        if (!config.has_value()) {
+            std::cerr << "配置错误: " << config_error << '\n';
+            return 1;
+        }
 
-    // M0 最小业务回调：把收到的文本包进一个已完成 task 的 artifact。
-    agent_server.task_manager().SetMessageHandler(
-        [](const a2a::models::SendMessageRequest& request) {
-          const std::string text = FirstText(request.message);
+        const std::filesystem::path db_path(options.db_path);
+        if (db_path.has_parent_path()) {
+            std::filesystem::create_directories(db_path.parent_path());
+        }
 
-          a2a::models::Artifact artifact;
-          artifact.artifact_id = "artifact-" + request.message.message_id;
-          artifact.name = "echo";
-          artifact.parts.push_back(a2a::models::Part::Text(text));
+        auto task_store =
+                std::make_shared<a2a::server::SqliteTaskStore>(db_path.string());
+        auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
+        aiagent::agent::AgentRuntime runtime(model);
+        a2a::server::AgentServer agent_server(BuildAgentCard(options.port), task_store);
 
-          a2a::models::Task task;
-          task.WithState(a2a::models::TaskState::kCompleted)
-              .WithArtifact(std::move(artifact));
+        agent_server.task_manager().SetMessageHandler(
+                [&](const a2a::models::SendMessageRequest& request) {
+                    std::vector<a2a::models::Message> history;
+                    std::string context_id = request.message.context_id;
+                    if (!context_id.empty()) {
+                        std::size_t latest_history_size = 0;
+                        for (const auto& task : task_store->ListAll()) {
+                            if (task.context_id == context_id &&
+                                task.history.size() > latest_history_size) {
+                                history = task.history;
+                                latest_history_size = task.history.size();
+                            }
+                        }
+                    }
+                    history.push_back(request.message);
+                    return runtime.HandleMessage(request.message, history, context_id);
+                });
 
-          a2a::models::SendMessageResponse response;
-          response.task = std::move(task);
-          return response;
-        });
+        a2a::server::AgentHttpServer http_server(agent_server);
+        if (!http_server.Start("127.0.0.1", options.port)) {
+            std::cerr << "failed to start A2A HTTP server on port " << options.port << '\n';
+            return 1;
+        }
 
-    a2a::server::AgentHttpServer http_server(agent_server);
-    if (!http_server.Start("127.0.0.1", port)) {
-      std::cerr << "failed to start A2A HTTP server on port " << port << '\n';
-      return 1;
+        std::signal(SIGINT, OnSignal);
+        std::signal(SIGTERM, OnSignal);
+
+        std::cout << "ai-agent-cpp listening on http://127.0.0.1:" << options.port << "/\n";
+        std::cout << "Agent Card: http://127.0.0.1:" << options.port
+                  << "/.well-known/agent-card.json\n";
+        std::cout << "Model: " << config->model << '\n';
+        std::cout << "Task DB: " << options.db_path << '\n';
+        std::cout << "Press Ctrl+C to stop.\n";
+
+        while (!g_stop_requested) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        http_server.Stop();
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "aiagent_app failed: " << e.what() << '\n';
+        return 1;
     }
-
-    std::signal(SIGINT, OnSignal);
-    std::signal(SIGTERM, OnSignal);
-
-    std::cout << "ai-agent-cpp M0 listening on http://127.0.0.1:" << port << "/\n";
-    std::cout << "Agent Card: http://127.0.0.1:" << port
-              << "/.well-known/agent-card.json\n";
-    std::cout << "Press Ctrl+C to stop.\n";
-
-    while (!g_stop_requested) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    http_server.Stop();
-    return 0;
-  } catch (const std::exception& e) {
-    std::cerr << "aiagent_app failed: " << e.what() << '\n';
-    return 1;
-  }
 }

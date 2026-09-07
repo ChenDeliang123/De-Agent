@@ -33,13 +33,18 @@ git submodule update --init --recursive
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
-./build/aiagent_app
+```
+
+M2 起 `aiagent_app` 已经是 DeepSeek Agent，启动需要读取密钥配置：
+
+```bash
+./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
 ```
 
 默认监听 `http://127.0.0.1:18080/`，可用参数或环境变量覆盖端口：
 
 ```bash
-./build/aiagent_app 18081
+./build/aiagent_app --config conf/conf.ini --port 18081
 # 或
 AIAGENT_PORT=18081 ./build/aiagent_app
 ```
@@ -84,3 +89,24 @@ M1 实现了 OpenAI/DeepSeek Chat Completions 客户端，支持：
 
 `aiagent_llm_client` 覆盖配置解析、请求体构造、非流式响应解析与
 流式 chunk 解析，不依赖真实 DeepSeek API。
+
+## M2：DeepSeek Agent Runtime
+
+M2 把 M1 的 DeepSeek Client 接到 A2A `SendMessage`：
+
+- 新增 `AgentRuntime`，把 A2A 历史翻译成 LLM messages 并调用模型。
+- 使用 SQLite `TaskStore` 持久化任务与消息历史。
+- 同一 `contextId` 可继续多轮对话；A2A 终态任务不允许续写，
+  因此后续轮次以新 task + 相同 `contextId` 发送。
+- Agent Card 的技能改为 `deepseek-chat`。
+
+启动：
+
+```bash
+./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
+```
+
+可用 `AIAGENT_DB` 环境变量指定数据库路径。
+
+`aiagent_agent_runtime` 测试使用 fake model 验证首轮/第二轮历史拼接与
+模型调用，不依赖真实 DeepSeek API。

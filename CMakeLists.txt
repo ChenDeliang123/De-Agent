@@ -38,9 +38,9 @@ endif()
 # 子项目只贡献库，不重复构建其示例/测试。
 set(A2A_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(A2A_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-# M0 只需要 HTTP/SSE 服务端；SQLite 持久化在 M2/M6 再打开。
+# HTTP/SSE 服务端与 SQLite 任务持久化。
 set(A2A_BUILD_HTTP_SERVER ON CACHE BOOL "" FORCE)
-set(A2A_BUILD_SQLITE_STORE OFF CACHE BOOL "" FORCE)
+set(A2A_BUILD_SQLITE_STORE ON CACHE BOOL "" FORCE)
 
 # 若本机已有 cpp-httplib 的历史构建缓存，优先复用源码，
 # 避免每次配置都重新下载依赖。
@@ -51,6 +51,15 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/_deps/cpp_httplib-src/httplib.h")
   set(FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB
       "${CMAKE_CURRENT_BINARY_DIR}/_deps/cpp_httplib-src"
+      CACHE PATH "" FORCE)
+endif()
+if(DEFINED FETCHCONTENT_SOURCE_DIR_SQLITE3 AND NOT EXISTS
+   "${FETCHCONTENT_SOURCE_DIR_SQLITE3}/sqlite3.c")
+  unset(FETCHCONTENT_SOURCE_DIR_SQLITE3 CACHE)
+endif()
+if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/_deps/sqlite3-src/sqlite3.c")
+  set(FETCHCONTENT_SOURCE_DIR_SQLITE3
+      "${CMAKE_CURRENT_BINARY_DIR}/_deps/sqlite3-src"
       CACHE PATH "" FORCE)
 endif()
 
@@ -72,12 +81,22 @@ else()
   target_compile_options(aiagent_llm PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(aiagent_agent STATIC src/agent/agent_runtime.cpp)
+target_include_directories(aiagent_agent PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(aiagent_agent PUBLIC aiagent_llm a2a::a2a)
+
+if(MSVC)
+  target_compile_options(aiagent_agent PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_agent PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # ---------------------------------------------------------------------------
 # 本项目可执行文件
 # ---------------------------------------------------------------------------
 add_executable(aiagent_app src/main.cpp)
 target_include_directories(aiagent_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(aiagent_app PRIVATE a2a::a2a)
+target_link_libraries(aiagent_app PRIVATE aiagent_agent aiagent_llm a2a::a2a)
 
 if(MSVC)
   target_compile_options(aiagent_app PRIVATE /W4 /permissive-)
@@ -100,6 +119,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(llm_client_test tests/llm_client_test.cpp)
   target_link_libraries(llm_client_test PRIVATE aiagent_llm)
   add_test(NAME aiagent_llm_client COMMAND llm_client_test)
+
+  add_executable(agent_runtime_test tests/agent_runtime_test.cpp)
+  target_link_libraries(agent_runtime_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_agent_runtime COMMAND agent_runtime_test)
 endif()
 
 # ---------------------------------------------------------------------------
