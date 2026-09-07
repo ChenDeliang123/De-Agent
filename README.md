@@ -110,3 +110,38 @@ M2 把 M1 的 DeepSeek Client 接到 A2A `SendMessage`：
 
 `aiagent_agent_runtime` 测试使用 fake model 验证首轮/第二轮历史拼接与
 模型调用，不依赖真实 DeepSeek API。
+
+## M3：MCP 工具调用
+
+M3 把已有的 MCP Extension Platform 作为子进程接入 Agent：
+
+- `MCPClientBridge` 通过 stdio JSON-RPC 启动并管理 MCP Server。
+- 自动执行 MCP 握手、`tools/list` 和 `tools/call`。
+- `AgentRuntime` 支持完整工具循环：模型返回 `tool_calls` → 执行 MCP 工具 →
+  回填 `tool` 消息 → 再次请求模型。
+- `aiagent_app` 启动时若检测到 MCP Server 可执行文件，会自动加载工具。
+
+先构建 MCP Server（产物在 submodule 内，已被其 gitignore 屏蔽）：
+
+```bash
+cmake -S vendor/mcp-extension-platform -B vendor/mcp-extension-platform/build -DCMAKE_BUILD_TYPE=Debug
+cmake --build vendor/mcp-extension-platform/build -j
+```
+
+再启动 AI Agent，终端会打印 `MCP tools loaded: N`：
+
+```bash
+./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
+```
+
+也可在 `conf/conf.ini` 的 `[mcp]` 段自定义：
+
+```ini
+[mcp]
+binary = /path/to/mcp_server
+plugins = /path/to/plugins
+python_path = python3
+request_timeout_seconds = 60
+```
+
+测试使用 fake MCP Server 和 fake model，验证 stdio 通信与完整工具调用循环。

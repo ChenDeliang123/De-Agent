@@ -146,6 +146,98 @@ std::optional<DeepSeekConfig> LoadDeepSeekConfigFile(const std::string& path,
     return ParseDeepSeekConfig(content.str(), error);
 }
 
+std::optional<MCPConfig> ParseMCPConfig(const std::string& content, std::string* error) {
+    MCPConfig config;
+    bool in_mcp = false;
+    bool saw_mcp_section = false;
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_mcp = (section == "mcp");
+            saw_mcp_section = saw_mcp_section || in_mcp;
+            continue;
+        }
+        if (!in_mcp) {
+            continue;
+        }
+
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "binary") {
+            config.binary = value;
+        } else if (key == "plugins") {
+            config.plugins_dir = value;
+        } else if (key == "python_path") {
+            config.python_path = value;
+        } else if (key == "log_dir") {
+            config.log_dir = value;
+        } else if (key == "request_timeout_seconds") {
+            try {
+                const long parsed = std::stol(value);
+                if (parsed <= 0) {
+                    if (error != nullptr) {
+                        *error = "request_timeout_seconds must be positive";
+                    }
+                    return std::nullopt;
+                }
+                config.request_timeout_seconds = parsed;
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid request_timeout_seconds: " + value;
+                }
+                return std::nullopt;
+            }
+        }
+    }
+
+    if (!saw_mcp_section) {
+        return config;
+    }
+
+    const char* env_binary = std::getenv("AIAGENT_MCP_BINARY");
+    if ((config.binary.empty() || config.binary == "/absolute/path/to/mcp_server") &&
+        env_binary != nullptr && *env_binary != '\0') {
+        config.binary = env_binary;
+    }
+    const char* env_plugins = std::getenv("AIAGENT_MCP_PLUGINS");
+    if (config.plugins_dir.empty() && env_plugins != nullptr && *env_plugins != '\0') {
+        config.plugins_dir = env_plugins;
+    }
+
+    if (config.binary.empty() || config.binary == "/absolute/path/to/mcp_server") {
+        config.enabled = false;
+        return config;
+    }
+    config.enabled = true;
+    return config;
+}
+
+std::optional<MCPConfig> LoadMCPConfigFile(const std::string& path, std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseMCPConfig(content.str(), error);
+}
+
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config) {
     constexpr const char* kSuffix = "/chat/completions";
     if (config.base_url.size() >= 18 &&

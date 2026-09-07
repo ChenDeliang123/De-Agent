@@ -14,6 +14,15 @@ struct DeepSeekConfig {
     int max_retries = 3;
 };
 
+struct MCPConfig {
+    bool enabled = false;
+    std::string binary;
+    std::string plugins_dir;
+    std::string python_path = "python3";
+    std::string log_dir = "/tmp/mcp_logs";
+    long request_timeout_seconds = 60;
+};
+
 // 解析 INI 文本中的 [deepseek] 段。api_key 缺失或为占位值时，
 // 若环境变量 DEEPSEEK_API_KEY 存在则回退使用。
 std::optional<DeepSeekConfig> ParseDeepSeekConfig(const std::string& content,
@@ -21,6 +30,13 @@ std::optional<DeepSeekConfig> ParseDeepSeekConfig(const std::string& content,
 
 std::optional<DeepSeekConfig> LoadDeepSeekConfigFile(const std::string& path,
                                                      std::string* error = nullptr);
+
+// 解析 INI 文本中的 [mcp] 段；没有该段时返回 enabled=false。
+std::optional<MCPConfig> ParseMCPConfig(const std::string& content,
+                                        std::string* error = nullptr);
+
+std::optional<MCPConfig> LoadMCPConfigFile(const std::string& path,
+                                           std::string* error = nullptr);
 
 // 返回实际请求地址：base_url 已带 /chat/completions 时原样使用，否则补全。
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config);

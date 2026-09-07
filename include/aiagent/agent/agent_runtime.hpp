@@ -9,6 +9,7 @@
 #include "a2a/models/requests.hpp"
 
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/tools/tool_provider.hpp"
 
 namespace aiagent::agent {
 
@@ -20,6 +21,9 @@ public:
                           std::string system_prompt =
                                   "You are a helpful AI agent implemented in C++.");
 
+    // 可选：注入 MCP/工具提供者后，Agent 会自动执行 model 的 tool_calls。
+    void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);
+
     // history 应包含本次用户消息（续聊时由调用方从 TaskStore 取回）。
     // 返回一个已完成 Task，其 history 追加了 assistant 回复。
     a2a::models::SendMessageResponse HandleMessage(
@@ -29,6 +33,7 @@ public:
 
 private:
     std::shared_ptr<llm::IModelClient> model_;
+    std::shared_ptr<tools::IToolProvider> tools_;
     std::string system_prompt_;
 };
 

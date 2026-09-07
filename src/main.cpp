@@ -21,6 +21,7 @@
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/mcp/mcp_client_bridge.hpp"
 #include "aiagent/version.hpp"
 
 namespace {
@@ -35,6 +36,9 @@ struct AppOptions {
     int port = 18080;
     std::string config_path = "conf/conf.ini";
     std::string db_path = "build/db/aiagent_tasks.db";
+    std::string mcp_binary;
+    std::string mcp_plugins;
+    std::string mcp_python_path;
 };
 
 AppOptions ParseOptions(int argc, char** argv) {
@@ -48,6 +52,15 @@ AppOptions ParseOptions(int argc, char** argv) {
     if (const char* value = std::getenv("AIAGENT_DB")) {
         options.db_path = value;
     }
+    if (const char* value = std::getenv("AIAGENT_MCP_BINARY")) {
+        options.mcp_binary = value;
+    }
+    if (const char* value = std::getenv("AIAGENT_MCP_PLUGINS")) {
+        options.mcp_plugins = value;
+    }
+    if (const char* value = std::getenv("AIAGENT_MCP_PYTHON_PATH")) {
+        options.mcp_python_path = value;
+    }
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -57,6 +70,12 @@ AppOptions ParseOptions(int argc, char** argv) {
             options.db_path = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             options.port = std::stoi(argv[++i]);
+        } else if (arg == "--mcp-binary" && i + 1 < argc) {
+            options.mcp_binary = argv[++i];
+        } else if (arg == "--mcp-plugins" && i + 1 < argc) {
+            options.mcp_plugins = argv[++i];
+        } else if (arg == "--mcp-python-path" && i + 1 < argc) {
+            options.mcp_python_path = argv[++i];
         } else {
             options.port = std::stoi(arg);
         }
@@ -118,6 +137,40 @@ int main(int argc, char** argv) {
                 std::make_shared<a2a::server::SqliteTaskStore>(db_path.string());
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         aiagent::agent::AgentRuntime runtime(model);
+
+        // MCP：优先读 [mcp] 配置；没有时尝试根目录 vendor 的本地构建。
+        aiagent::MCPConfig mcp_config;
+        std::string mcp_error;
+        const auto parsed_mcp = aiagent::LoadMCPConfigFile(options.config_path, &mcp_error);
+        if (parsed_mcp.has_value() && parsed_mcp->enabled) {
+            mcp_config = *parsed_mcp;
+        } else {
+            mcp_config.binary = options.mcp_binary.empty()
+                                        ? "vendor/mcp-extension-platform/build/mcp_server/mcp_server"
+                                        : options.mcp_binary;
+            mcp_config.plugins_dir = options.mcp_plugins.empty()
+                                             ? "vendor/mcp-extension-platform/mcp_server/plugins"
+                                             : options.mcp_plugins;
+            if (!options.mcp_python_path.empty()) {
+                mcp_config.python_path = options.mcp_python_path;
+            }
+            mcp_config.enabled = std::filesystem::exists(mcp_config.binary);
+        }
+
+        auto mcp_bridge = std::make_shared<aiagent::mcp::MCPClientBridge>();
+        if (mcp_config.enabled) {
+            try {
+                mcp_bridge->Start(mcp_config);
+                runtime.SetToolProvider(mcp_bridge);
+                std::cout << "MCP tools loaded: " << mcp_bridge->ListTools().size() << '\n';
+            } catch (const std::exception& e) {
+                std::cerr << "MCP disabled: " << e.what() << '\n';
+                mcp_bridge.reset();
+            }
+        } else {
+            std::cout << "MCP disabled (binary not found)\n";
+        }
+
         a2a::server::AgentServer agent_server(BuildAgentCard(options.port), task_store);
 
         agent_server.task_manager().SetMessageHandler(

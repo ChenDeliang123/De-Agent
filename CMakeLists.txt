@@ -11,6 +11,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(Threads REQUIRED)
+
 option(AIAGENT_BUILD_TESTS "Build AI Agent smoke/integration tests" ON)
 option(AIAGENT_BUILD_EXAMPLES "Build AI Agent example programs" ON)
 
@@ -91,12 +93,22 @@ else()
   target_compile_options(aiagent_agent PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(aiagent_mcp STATIC src/mcp/mcp_client_bridge.cpp)
+target_include_directories(aiagent_mcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(aiagent_mcp PUBLIC aiagent_llm a2a::a2a Threads::Threads)
+
+if(MSVC)
+  target_compile_options(aiagent_mcp PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_mcp PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # ---------------------------------------------------------------------------
 # 本项目可执行文件
 # ---------------------------------------------------------------------------
 add_executable(aiagent_app src/main.cpp)
 target_include_directories(aiagent_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(aiagent_app PRIVATE aiagent_agent aiagent_llm a2a::a2a)
+target_link_libraries(aiagent_app PRIVATE aiagent_agent aiagent_mcp aiagent_llm a2a::a2a)
 
 if(MSVC)
   target_compile_options(aiagent_app PRIVATE /W4 /permissive-)
@@ -123,6 +135,15 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(agent_runtime_test tests/agent_runtime_test.cpp)
   target_link_libraries(agent_runtime_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_agent_runtime COMMAND agent_runtime_test)
+
+  add_executable(fake_mcp_server tests/fake_mcp_server.cpp)
+  target_link_libraries(fake_mcp_server PRIVATE aiagent_llm a2a::a2a)
+
+  add_executable(mcp_bridge_test tests/mcp_bridge_test.cpp)
+  target_link_libraries(mcp_bridge_test PRIVATE aiagent_mcp aiagent_agent)
+  target_compile_definitions(mcp_bridge_test PRIVATE
+                             AIAGENT_FAKE_MCP_BINARY="$<TARGET_FILE:fake_mcp_server>")
+  add_test(NAME aiagent_mcp_bridge COMMAND mcp_bridge_test)
 endif()
 
 # ---------------------------------------------------------------------------

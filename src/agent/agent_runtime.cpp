@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace aiagent::agent {
 namespace {
@@ -35,6 +36,10 @@ AgentRuntime::AgentRuntime(std::shared_ptr<llm::IModelClient> model, std::string
     if (!model_) {
         throw std::invalid_argument("AgentRuntime requires a model client");
     }
+}
+
+void AgentRuntime::SetToolProvider(std::shared_ptr<tools::IToolProvider> tools) {
+    tools_ = std::move(tools);
 }
 
 a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
@@ -69,7 +74,53 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         chat_messages.push_back(std::move(user));
     }
 
-    const auto result = model_->Chat(chat_messages);
+    constexpr int kMaxToolRounds = 8;
+    llm::ChatResult result;
+    for (int round = 0; round < kMaxToolRounds; ++round) {
+        const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
+        result = model_->Chat(chat_messages, tool_specs);
+        if (result.choices.empty()) {
+            throw std::runtime_error("model returned no choices");
+        }
+
+        const auto& choice = result.choices.front();
+        if (choice.tool_calls.empty()) {
+            break;
+        }
+        if (!tools_) {
+            throw std::runtime_error("model requested tools but no tool provider is configured");
+        }
+
+        llm::ChatMessage assistant;
+        assistant.role = "assistant";
+        assistant.content = choice.content;
+        assistant.reasoning_content = choice.reasoning_content;
+        assistant.tool_calls = choice.tool_calls;
+        chat_messages.push_back(std::move(assistant));
+
+        for (const auto& call : choice.tool_calls) {
+            tools::ToolExecutionResult execution_result;
+            try {
+                nlohmann::json arguments = nlohmann::json::object();
+                if (!call.arguments.empty()) {
+                    arguments = nlohmann::json::parse(call.arguments);
+                }
+                execution_result = tools_->Execute(call.name, arguments);
+            } catch (const std::exception& e) {
+                execution_result.ok = false;
+                execution_result.error = e.what();
+            }
+
+            llm::ChatMessage tool_result;
+            tool_result.role = "tool";
+            tool_result.tool_call_id = call.id;
+            tool_result.content = execution_result.ok
+                                          ? execution_result.text
+                                          : std::string("tool error: ") + execution_result.error;
+            chat_messages.push_back(std::move(tool_result));
+        }
+    }
+
     if (result.choices.empty()) {
         throw std::runtime_error("model returned no choices");
     }

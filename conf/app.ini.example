@@ -7,8 +7,9 @@ timeout_seconds = 60
 max_retries = 3
 
 [mcp]
-; M0 暂不接入；M3 阶段再填写。
-binary = /absolute/path/to/mcp_server
-plugins = /absolute/path/to/plugins
+; M3 使用；不填时 aiagent_app 会尝试 vendor 下的本地构建。
+binary = /absolute/path/to/mcp_server/mcp_server
+plugins = /absolute/path/to/mcp_server/plugins
 python_path = python3
 transport = stdio
+request_timeout_seconds = 60
