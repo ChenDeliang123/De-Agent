@@ -57,3 +57,30 @@ ctest --test-dir build --output-on-failure
 
 M0 smoke test 会启动一个随机端口 HTTP Server，验证 Agent Card
 发现和 `SendMessage` 往返链路。
+
+## M1：DeepSeek Client
+
+M1 实现了 OpenAI/DeepSeek Chat Completions 客户端，支持：
+
+- 非流式对话与 SSE 流式对话
+- `tools` / `tool_calls` 序列化与解析
+- DeepSeek `reasoning_content` 保留
+- 配置解析，密钥不进入代码
+
+### 配置
+
+私有配置放在 `conf/conf.ini`，该文件已被 `.gitignore` 屏蔽；
+仓库内的 `conf/app.ini.example` 是公开模板。也支持用环境变量
+`DEEPSEEK_API_KEY` 覆盖或通过 `AIAGENT_CONFIG` 指定其他配置文件。
+
+### 命令行示例
+
+```bash
+./build/aiagent_deepseek_cli --config conf/conf.ini "你好"
+./build/aiagent_deepseek_cli --config conf/conf.ini --stream "用一句话介绍自己"
+```
+
+### 测试
+
+`aiagent_llm_client` 覆盖配置解析、请求体构造、非流式响应解析与
+流式 chunk 解析，不依赖真实 DeepSeek API。

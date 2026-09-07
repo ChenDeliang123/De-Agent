@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(AIAGENT_BUILD_TESTS "Build AI Agent smoke/integration tests" ON)
+option(AIAGENT_BUILD_EXAMPLES "Build AI Agent example programs" ON)
 
 # ---------------------------------------------------------------------------
 # a2a-protocol 复用
@@ -56,6 +57,22 @@ endif()
 add_subdirectory("${AIAGENT_A2A_SOURCE_DIR}" a2a-protocol)
 
 # ---------------------------------------------------------------------------
+# 本项目核心库
+# ---------------------------------------------------------------------------
+add_library(aiagent_llm STATIC
+  src/config.cpp
+  src/llm/deepseek_client.cpp
+)
+target_include_directories(aiagent_llm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(aiagent_llm PUBLIC a2a::a2a)
+
+if(MSVC)
+  target_compile_options(aiagent_llm PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_llm PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
 # 本项目可执行文件
 # ---------------------------------------------------------------------------
 add_executable(aiagent_app src/main.cpp)
@@ -79,4 +96,16 @@ if(AIAGENT_BUILD_TESTS)
                              ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(m0_smoke_test PRIVATE a2a::a2a)
   add_test(NAME aiagent_m0_smoke COMMAND m0_smoke_test)
+
+  add_executable(llm_client_test tests/llm_client_test.cpp)
+  target_link_libraries(llm_client_test PRIVATE aiagent_llm)
+  add_test(NAME aiagent_llm_client COMMAND llm_client_test)
+endif()
+
+# ---------------------------------------------------------------------------
+# 示例
+# ---------------------------------------------------------------------------
+if(AIAGENT_BUILD_EXAMPLES)
+  add_executable(aiagent_deepseek_cli examples/deepseek_chat.cpp)
+  target_link_libraries(aiagent_deepseek_cli PRIVATE aiagent_llm)
 endif()
