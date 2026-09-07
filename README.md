@@ -3,9 +3,14 @@
 AI Agent 的 C++ 实现项目。第一版规划见
 `docs/项目实现规划.md`（本地笔记，不入库）。
 
+依赖仓库以 Git submodule 方式引入：
+
+- `vendor/a2a-protocol`
+- `vendor/mcp-extension-platform`
+
 ## M0：最小 A2A Agent 骨架
 
-M0 复用本地 `vendor/a2a-protocol`，通过 `AgentServer` +
+M0 复用 `vendor/a2a-protocol` submodule，通过 `AgentServer` +
 `AgentHttpServer` 暴露一个最小的 A2A Agent。
 
 ### 依赖
@@ -13,9 +18,17 @@ M0 复用本地 `vendor/a2a-protocol`，通过 `AgentServer` +
 - CMake >= 3.21
 - C++20 编译器（GCC 11+ / Clang 14+）
 - libcurl 开发库
-- 本地 `vendor/a2a-protocol` 仓库
+- 已初始化的 submodule
 
 ### 构建与运行
+
+首次 clone 后先拉取子仓库：
+
+```bash
+git submodule update --init --recursive
+```
+
+然后构建：
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug

@@ -1,0 +1,8 @@
+[submodule "vendor/a2a-protocol"]
+	path = vendor/a2a-protocol
+	url = https://gitee.com/chen_dl/a2a-protocol.git
+	branch = master
+[submodule "vendor/mcp-extension-platform"]
+	path = vendor/mcp-extension-platform
+	url = https://gitee.com/chen_dl/mcp-extension-platform.git
+	branch = master

@@ -16,8 +16,8 @@ option(AIAGENT_BUILD_TESTS "Build AI Agent smoke/integration tests" ON)
 # ---------------------------------------------------------------------------
 # a2a-protocol 复用
 #
-# M0 阶段直接复用本地 vendor/a2a-protocol（独立仓库），不复制源码。
-# 后续发布前可再切换为 Git submodule / FetchContent。
+# vendor/a2a-protocol 是根仓库的 Git submodule（Gitee 独立仓库），
+# 这里直接作为子项目编译，不复制源码。
 # ---------------------------------------------------------------------------
 set(AIAGENT_A2A_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/vendor/a2a-protocol"
@@ -41,11 +41,15 @@ set(A2A_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(A2A_BUILD_HTTP_SERVER ON CACHE BOOL "" FORCE)
 set(A2A_BUILD_SQLITE_STORE OFF CACHE BOOL "" FORCE)
 
-# 若本机已有 a2a-protocol 的历史构建缓存，优先复用 cpp-httplib 源码，
+# 若本机已有 cpp-httplib 的历史构建缓存，优先复用源码，
 # 避免每次配置都重新下载依赖。
-if(EXISTS "${AIAGENT_A2A_SOURCE_DIR}/build/_deps/cpp_httplib-src/httplib.h")
+if(DEFINED FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB AND NOT EXISTS
+   "${FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB}/httplib.h")
+  unset(FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB CACHE)
+endif()
+if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/_deps/cpp_httplib-src/httplib.h")
   set(FETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB
-      "${AIAGENT_A2A_SOURCE_DIR}/build/_deps/cpp_httplib-src"
+      "${CMAKE_CURRENT_BINARY_DIR}/_deps/cpp_httplib-src"
       CACHE PATH "" FORCE)
 endif()
 
