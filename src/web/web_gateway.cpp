@@ -102,6 +102,42 @@ void SetCommonHeaders(httplib::Response& response) {
     response.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 }
 
+// 将 AgentEvent 序列化为 SSE 帧（event + data）。arguments 原始 JSON 若能
+// 解析则作为对象嵌入，否则按字符串透传。
+void WriteAgentEventFrame(
+        const std::function<void(const std::string&, const nlohmann::json&)>& write,
+        const aiagent::agent::AgentEvent& event) {
+    using aiagent::agent::AgentEventKind;
+    switch (event.kind) {
+        case AgentEventKind::kToken:
+            write("content", {{"content", event.content}});
+            break;
+        case AgentEventKind::kToolStart: {
+            nlohmann::json arguments = nlohmann::json::object();
+            if (!event.arguments.empty()) {
+                try {
+                    arguments = nlohmann::json::parse(event.arguments);
+                } catch (const nlohmann::json::exception&) {
+                    arguments = event.arguments;
+                }
+            }
+            write("tool_start", {{"id", event.tool_call_id},
+                                {"name", event.tool_name},
+                                {"arguments", arguments}});
+            break;
+        }
+        case AgentEventKind::kToolOutput:
+            write("tool_output", {{"id", event.tool_call_id},
+                                  {"content", event.content}});
+            break;
+        case AgentEventKind::kToolEnd:
+            write("tool_end", {{"id", event.tool_call_id},
+                               {"ok", event.ok},
+                               {"text", event.text}});
+            break;
+    }
+}
+
 }  // namespace
 
 class WebGateway::Impl {
@@ -152,6 +188,10 @@ public:
 
     void SetHistoryCache(aiagent::agent::HistoryCache* history_cache) {
         history_cache_ = history_cache;
+    }
+
+    void SetStreamEventHandler(WebGateway::StreamEventHandler handler) {
+        stream_event_handler_ = std::move(handler);
     }
 
 private:
@@ -304,7 +344,14 @@ private:
                     try {
                         write("started", {{"session_id", session_id}});
                         nlohmann::json done_payload = {{"session_id", session_id}};
-                        if (stream_handler_) {
+                        if (stream_event_handler_) {
+                            stream_event_handler_(
+                                    session_id,
+                                    content,
+                                    [&write](const aiagent::agent::AgentEvent& event) {
+                                        WriteAgentEventFrame(write, event);
+                                    });
+                        } else if (stream_handler_) {
                             stream_handler_(
                                     session_id,
                                     content,
@@ -333,6 +380,7 @@ private:
     int port_ = 0;
     bool running_ = false;
     WebGateway::StreamChatHandler stream_handler_;
+    WebGateway::StreamEventHandler stream_event_handler_;
 };
 
 WebGateway::WebGateway(a2a::server::AgentServer& agent_server,
@@ -348,6 +396,10 @@ void WebGateway::Stop() { impl_->Stop(); }
 int WebGateway::bound_port() const noexcept { return impl_->bound_port(); }
 void WebGateway::SetStreamHandler(WebGateway::StreamChatHandler handler) {
     impl_->SetStreamHandler(std::move(handler));
+}
+
+void WebGateway::SetStreamEventHandler(WebGateway::StreamEventHandler handler) {
+    impl_->SetStreamEventHandler(std::move(handler));
 }
 
 void WebGateway::SetHistoryCache(aiagent::agent::HistoryCache* history_cache) {

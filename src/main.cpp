@@ -20,11 +20,14 @@
 #include "a2a/server/sqlite_task_store.hpp"
 #include "a2a/server/task_store.hpp"
 
+#include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
+#include "aiagent/tools/composite_tool_provider.hpp"
+#include "aiagent/tools/local_tools.hpp"
 #include "aiagent/version.hpp"
 #include "aiagent/web/web_gateway.hpp"
 
@@ -171,9 +174,20 @@ int main(int argc, char** argv) {
         auto task_store =
                 std::make_shared<a2a::server::SqliteTaskStore>(db_path.string());
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
-        aiagent::agent::AgentRuntime runtime(model);
+        const std::string coding_system_prompt =
+                "You are a terminal coding agent implemented in C++. You help the user by "
+                "reading, editing, and writing files and running bash commands. Use the read "
+                "tool to inspect files before editing them. After making changes, summarize "
+                "what you did concisely.";
+        aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
         // 会话最新历史内存缓存：避免每次请求 ListAll() 全表扫描（长会话 O(n²)）。
         aiagent::agent::HistoryCache history_cache;
+
+        // 内置 coding 工具（read/write/edit/bash）+ 可选的 MCP 工具，合并为一个 provider。
+        auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
+        tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
+                std::filesystem::current_path().string()));
+        runtime.SetToolProvider(tools);
 
         // MCP：优先读 [mcp] 配置；没有时尝试根目录 vendor 的本地构建。
         aiagent::MCPConfig mcp_config;
@@ -198,7 +212,7 @@ int main(int argc, char** argv) {
         if (mcp_config.enabled) {
             try {
                 mcp_bridge->Start(mcp_config);
-                runtime.SetToolProvider(mcp_bridge);
+                tools->Add(mcp_bridge);
                 std::cout << "MCP tools loaded: " << mcp_bridge->ListTools().size() << '\n';
             } catch (const std::exception& e) {
                 std::cerr << "MCP disabled: " << e.what() << '\n';
@@ -228,10 +242,10 @@ int main(int argc, char** argv) {
 
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
         web_gateway.SetHistoryCache(&history_cache);
-        web_gateway.SetStreamHandler(
+        web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,
-                    const aiagent::web::WebGateway::TokenCallback& on_token) {
+                    const aiagent::agent::AgentEventCallback& on_event) {
                     std::vector<a2a::models::Message> history =
                             LoadLatestHistory(history_cache, *task_store, session_id);
 
@@ -239,8 +253,8 @@ int main(int argc, char** argv) {
                             a2a::models::Role::kUser, content, "text/plain");
                     history.push_back(user);
 
-                    const std::string reply = runtime.HandleMessageStreaming(
-                            user, history, session_id, on_token);
+                    const std::string reply = runtime.HandleMessageStreamingEvents(
+                            user, history, session_id, on_event);
 
                     a2a::models::Task task;
                     task.id = std::string(a2a::core::NewUuid());

@@ -9,6 +9,7 @@
 #include "a2a/models/operations.hpp"
 #include "a2a/models/requests.hpp"
 
+#include "aiagent/agent/agent_event.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -39,7 +40,20 @@ public:
             const std::string& context_id,
             const std::function<void(const std::string& token)>& on_token);
 
+    // 流式版本（结构化事件）：逐 token 与工具调用起止均以 AgentEvent 回调。
+    std::string HandleMessageStreamingEvents(
+            const a2a::models::Message& incoming,
+            const std::vector<a2a::models::Message>& history,
+            const std::string& context_id,
+            const AgentEventCallback& on_event);
+
 private:
+    // 流式主循环的公共实现：产出 AgentEvent 事件流，返回最终回复文本。
+    std::string RunStreaming(const a2a::models::Message& incoming,
+                             const std::vector<a2a::models::Message>& history,
+                             const std::string& context_id,
+                             const AgentEventCallback& on_event);
+
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
     std::string system_prompt_;

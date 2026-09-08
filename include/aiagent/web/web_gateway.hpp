@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+#include "aiagent/agent/agent_event.hpp"
+
 namespace a2a::server {
 class AgentServer;
 class ITaskStore;
@@ -25,6 +27,12 @@ public:
                                const std::string& message,
                                const TokenCallback& on_token)>;
 
+    // 新：结构化事件版流式回调（token + tool_start/tool_output/tool_end）。
+    using StreamEventHandler = std::function<void(
+            const std::string& session_id,
+            const std::string& message,
+            const aiagent::agent::AgentEventCallback& on_event)>;
+
     WebGateway(a2a::server::AgentServer& agent_server,
                a2a::server::ITaskStore& task_store);
     ~WebGateway();
@@ -38,6 +46,10 @@ public:
 
     // 注入真正的逐 token 流式处理逻辑（由 main 接线到 AgentRuntime）。
     void SetStreamHandler(StreamChatHandler handler);
+
+    // 注入结构化事件版流式处理逻辑（token + 工具事件）。设置后优先于
+    // SetStreamHandler 使用；未设置时保留旧的 token-only 行为。
+    void SetStreamEventHandler(StreamEventHandler handler);
 
     // 注入会话历史内存缓存（可选）。命中后，读取会话历史/标题的 REST 接口
     // 不再每次全表扫描 task store；未注入时行为与旧实现一致。

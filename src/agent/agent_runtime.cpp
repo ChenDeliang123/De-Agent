@@ -144,11 +144,11 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     return response;
 }
 
-std::string AgentRuntime::HandleMessageStreaming(
+std::string AgentRuntime::RunStreaming(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id,
-        const std::function<void(const std::string& token)>& on_token) {
+        const AgentEventCallback& on_event) {
     (void)context_id;
 
     std::vector<llm::ChatMessage> chat_messages;
@@ -190,8 +190,11 @@ std::string AgentRuntime::HandleMessageStreaming(
                 [&](const llm::StreamEvent& event) {
                     if (!event.content.empty()) {
                         reply += event.content;
-                        if (on_token) {
-                            on_token(event.content);
+                        if (on_event) {
+                            AgentEvent agent_event;
+                            agent_event.kind = AgentEventKind::kToken;
+                            agent_event.content = event.content;
+                            on_event(agent_event);
                         }
                     }
                     if (!event.tool_calls.empty()) {
@@ -213,6 +216,15 @@ std::string AgentRuntime::HandleMessageStreaming(
         chat_messages.push_back(std::move(assistant));
 
         for (const auto& call : streamed_tool_calls) {
+            if (on_event) {
+                AgentEvent agent_event;
+                agent_event.kind = AgentEventKind::kToolStart;
+                agent_event.tool_call_id = call.id;
+                agent_event.tool_name = call.name;
+                agent_event.arguments = call.arguments;
+                on_event(agent_event);
+            }
+
             tools::ToolExecutionResult execution_result;
             try {
                 nlohmann::json arguments = nlohmann::json::object();
@@ -223,6 +235,17 @@ std::string AgentRuntime::HandleMessageStreaming(
             } catch (const std::exception& e) {
                 execution_result.ok = false;
                 execution_result.error = e.what();
+            }
+
+            if (on_event) {
+                AgentEvent agent_event;
+                agent_event.kind = AgentEventKind::kToolEnd;
+                agent_event.tool_call_id = call.id;
+                agent_event.ok = execution_result.ok;
+                agent_event.text = execution_result.ok
+                                           ? execution_result.text
+                                           : std::string("tool error: ") + execution_result.error;
+                on_event(agent_event);
             }
 
             llm::ChatMessage tool_result;
@@ -239,6 +262,27 @@ std::string AgentRuntime::HandleMessageStreaming(
         throw std::runtime_error("model returned an empty reply");
     }
     return reply;
+}
+
+std::string AgentRuntime::HandleMessageStreaming(
+        const a2a::models::Message& incoming,
+        const std::vector<a2a::models::Message>& history,
+        const std::string& context_id,
+        const std::function<void(const std::string& token)>& on_token) {
+    return RunStreaming(incoming, history, context_id,
+                        [&on_token](const AgentEvent& event) {
+                            if (event.kind == AgentEventKind::kToken && on_token) {
+                                on_token(event.content);
+                            }
+                        });
+}
+
+std::string AgentRuntime::HandleMessageStreamingEvents(
+        const a2a::models::Message& incoming,
+        const std::vector<a2a::models::Message>& history,
+        const std::string& context_id,
+        const AgentEventCallback& on_event) {
+    return RunStreaming(incoming, history, context_id, on_event);
 }
 
 }  // namespace aiagent::agent
