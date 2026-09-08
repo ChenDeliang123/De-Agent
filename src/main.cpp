@@ -18,8 +18,10 @@
 #include "a2a/server/agent_http_server.hpp"
 #include "a2a/server/agent_server.hpp"
 #include "a2a/server/sqlite_task_store.hpp"
+#include "a2a/server/task_store.hpp"
 
 #include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/agent/history_cache.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
@@ -91,6 +93,31 @@ AppOptions ParseOptions(int argc, char** argv) {
     return options;
 }
 
+// 缓存优先地取某个会话的最新完整历史；缓存未命中时回退存储层（允许一次
+// 全表扫描），并在结果非空时回填缓存，避免冷启动反复扫描。
+std::vector<a2a::models::Message> LoadLatestHistory(
+        aiagent::agent::HistoryCache& cache, a2a::server::ITaskStore& store,
+        const std::string& context_id) {
+    std::vector<a2a::models::Message> history;
+    if (context_id.empty()) {
+        return history;
+    }
+    if (cache.TryGet(context_id, history)) {
+        return history;
+    }
+    std::size_t latest_history_size = 0;
+    for (const auto& task : store.ListAll()) {
+        if (task.context_id == context_id && task.history.size() > latest_history_size) {
+            history = task.history;
+            latest_history_size = task.history.size();
+        }
+    }
+    if (!history.empty()) {
+        cache.Put(context_id, history);
+    }
+    return history;
+}
+
 a2a::models::AgentCard BuildAgentCard(int port) {
     using a2a::models::AgentCapabilities;
     using a2a::models::AgentCard;
@@ -145,6 +172,8 @@ int main(int argc, char** argv) {
                 std::make_shared<a2a::server::SqliteTaskStore>(db_path.string());
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         aiagent::agent::AgentRuntime runtime(model);
+        // 会话最新历史内存缓存：避免每次请求 ListAll() 全表扫描（长会话 O(n²)）。
+        aiagent::agent::HistoryCache history_cache;
 
         // MCP：优先读 [mcp] 配置；没有时尝试根目录 vendor 的本地构建。
         aiagent::MCPConfig mcp_config;
@@ -183,36 +212,28 @@ int main(int argc, char** argv) {
 
         agent_server.task_manager().SetMessageHandler(
                 [&](const a2a::models::SendMessageRequest& request) {
-                    std::vector<a2a::models::Message> history;
-                    std::string context_id = request.message.context_id;
-                    if (!context_id.empty()) {
-                        std::size_t latest_history_size = 0;
-                        for (const auto& task : task_store->ListAll()) {
-                            if (task.context_id == context_id &&
-                                task.history.size() > latest_history_size) {
-                                history = task.history;
-                                latest_history_size = task.history.size();
-                            }
-                        }
-                    }
+                    std::vector<a2a::models::Message> history =
+                            LoadLatestHistory(history_cache, *task_store,
+                                              request.message.context_id);
                     history.push_back(request.message);
-                    return runtime.HandleMessage(request.message, history, context_id);
+                    auto response = runtime.HandleMessage(
+                            request.message, history, request.message.context_id);
+                    if (!request.message.context_id.empty() && response.IsTask()) {
+                        // 响应携带的 task.history 即本次落库内容，同步更新缓存。
+                        history_cache.Put(request.message.context_id,
+                                          response.GetTask().history);
+                    }
+                    return response;
                 });
 
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
+        web_gateway.SetHistoryCache(&history_cache);
         web_gateway.SetStreamHandler(
                 [&](const std::string& session_id,
                     const std::string& content,
                     const aiagent::web::WebGateway::TokenCallback& on_token) {
-                    std::vector<a2a::models::Message> history;
-                    std::size_t latest_history_size = 0;
-                    for (const auto& task : task_store->ListAll()) {
-                        if (task.context_id == session_id &&
-                            task.history.size() > latest_history_size) {
-                            history = task.history;
-                            latest_history_size = task.history.size();
-                        }
-                    }
+                    std::vector<a2a::models::Message> history =
+                            LoadLatestHistory(history_cache, *task_store, session_id);
 
                     a2a::models::Message user = a2a::models::MakeTextMessage(
                             a2a::models::Role::kUser, content, "text/plain");
@@ -229,7 +250,8 @@ int main(int argc, char** argv) {
                     task.history = std::move(history);
                     task.history.push_back(a2a::models::MakeTextMessage(
                             a2a::models::Role::kAgent, reply, "text/plain"));
-                    task_store->Put(std::move(task));
+                    task_store->Put(task);
+                    history_cache.Put(session_id, std::move(task.history));
                 });
         if (!web_gateway.Start("127.0.0.1", options.web_port)) {
             std::cerr << "failed to start Web Gateway on port " << options.web_port << '\n';

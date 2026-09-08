@@ -19,6 +19,8 @@
 #include "a2a/server/agent_server.hpp"
 #include "a2a/server/task_store.hpp"
 
+#include "aiagent/agent/history_cache.hpp"
+
 namespace aiagent::web {
 namespace {
 
@@ -32,14 +34,22 @@ std::string FirstText(const a2a::models::Message& message) {
 }
 
 std::vector<a2a::models::Message> LatestHistory(a2a::server::ITaskStore& store,
+                                                aiagent::agent::HistoryCache* history_cache,
                                                 const std::string& context_id) {
     std::vector<a2a::models::Message> history;
+    if (history_cache != nullptr && history_cache->TryGet(context_id, history)) {
+        return history;
+    }
     std::size_t latest_size = 0;
     for (const auto& task : store.ListAll()) {
         if (task.context_id == context_id && task.history.size() > latest_size) {
             history = task.history;
             latest_size = task.history.size();
         }
+    }
+    if (history_cache != nullptr && !history.empty()) {
+        // 冷启动回填，避免每个会话都重复全表扫描。
+        history_cache->Put(context_id, history);
     }
     return history;
 }
@@ -140,6 +150,10 @@ public:
         stream_handler_ = std::move(handler);
     }
 
+    void SetHistoryCache(aiagent::agent::HistoryCache* history_cache) {
+        history_cache_ = history_cache;
+    }
+
 private:
     void SetupRoutes() {
         server_.Options("/.*", [](const httplib::Request&, httplib::Response& response) {
@@ -166,7 +180,8 @@ private:
                             payload.push_back(
                                     {{"id", context},
                                      {"title", SessionTitleFromHistory(
-                                                       LatestHistory(task_store_, context))}});
+                                                       LatestHistory(task_store_,
+                                                                     history_cache_, context))}});
                         }
                         response.set_content(payload.dump(), "application/json");
                     });
@@ -181,7 +196,7 @@ private:
                                                  "application/json");
                             return;
                         }
-                        const auto history = LatestHistory(task_store_, it->second);
+                        const auto history = LatestHistory(task_store_, history_cache_, it->second);
                         nlohmann::json payload = nlohmann::json::array();
                         for (const auto& message : history) {
                             payload.push_back({{"role", RoleName(message.role)},
@@ -312,6 +327,7 @@ private:
 
     a2a::server::AgentServer& agent_server_;
     a2a::server::ITaskStore& task_store_;
+    aiagent::agent::HistoryCache* history_cache_ = nullptr;
     httplib::Server server_;
     std::thread thread_;
     int port_ = 0;
@@ -332,6 +348,10 @@ void WebGateway::Stop() { impl_->Stop(); }
 int WebGateway::bound_port() const noexcept { return impl_->bound_port(); }
 void WebGateway::SetStreamHandler(WebGateway::StreamChatHandler handler) {
     impl_->SetStreamHandler(std::move(handler));
+}
+
+void WebGateway::SetHistoryCache(aiagent::agent::HistoryCache* history_cache) {
+    impl_->SetHistoryCache(history_cache);
 }
 
 }  // namespace aiagent::web

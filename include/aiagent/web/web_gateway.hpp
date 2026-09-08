@@ -9,6 +9,10 @@ class AgentServer;
 class ITaskStore;
 }  // namespace a2a::server
 
+namespace aiagent::agent {
+class HistoryCache;
+}  // namespace aiagent::agent
+
 namespace aiagent::web {
 
 // 面向 Node/浏览器前端的 REST + SSE Gateway。
@@ -34,6 +38,10 @@ public:
 
     // 注入真正的逐 token 流式处理逻辑（由 main 接线到 AgentRuntime）。
     void SetStreamHandler(StreamChatHandler handler);
+
+    // 注入会话历史内存缓存（可选）。命中后，读取会话历史/标题的 REST 接口
+    // 不再每次全表扫描 task store；未注入时行为与旧实现一致。
+    void SetHistoryCache(aiagent::agent::HistoryCache* history_cache);
 
 private:
     class Impl;

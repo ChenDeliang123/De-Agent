@@ -83,7 +83,10 @@ else()
   target_compile_options(aiagent_llm PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-add_library(aiagent_agent STATIC src/agent/agent_runtime.cpp)
+add_library(aiagent_agent STATIC
+  src/agent/agent_runtime.cpp
+  src/agent/history_cache.cpp
+)
 target_include_directories(aiagent_agent PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aiagent_agent PUBLIC aiagent_llm a2a::a2a)
 
@@ -156,6 +159,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(agent_runtime_test tests/agent_runtime_test.cpp)
   target_link_libraries(agent_runtime_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_agent_runtime COMMAND agent_runtime_test)
+
+  add_executable(history_cache_test tests/history_cache_test.cpp)
+  target_link_libraries(history_cache_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_history_cache COMMAND history_cache_test)
 
   add_executable(fake_mcp_server tests/fake_mcp_server.cpp)
   target_link_libraries(fake_mcp_server PRIVATE aiagent_llm a2a::a2a)
