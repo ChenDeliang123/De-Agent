@@ -1,10 +1,15 @@
 #include <json.hpp>
 
+#include <httplib.h>
+
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "aiagent/config.hpp"
+#include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/llm/deepseek_types.hpp"
 
 namespace {
@@ -193,12 +198,144 @@ void TestResponseParsing() {
            "error message should be extracted");
 }
 
+// 起一个本地 HTTP server，POST /chat/completions 返回 status（handler 决定），
+// 记录命中次数。返回 (server, hits) 的简单封装交给调用方 stop/join。
+struct LocalServer {
+    httplib::Server server;
+    std::atomic<int> hits{0};
+    int port = 0;
+    std::thread listener;
+
+    bool Start() {
+        port = server.bind_to_any_port("127.0.0.1", 0);
+        if (port <= 0) {
+            return false;
+        }
+        listener = std::thread([this] { server.listen_after_bind(); });
+        return true;
+    }
+
+    void Stop() {
+        server.stop();
+        if (listener.joinable()) {
+            listener.join();
+        }
+    }
+
+    std::string BaseUrl() const {
+        return "http://127.0.0.1:" + std::to_string(port);
+    }
+};
+
+const char* kOkBody =
+        R"({"id":"chatcmpl-ok","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]})";
+const char* kErrorBody = R"({"error":{"message":"boom"}})";
+
+aiagent::DeepSeekConfig TestConfig(const std::string& base_url) {
+    aiagent::DeepSeekConfig config;
+    config.api_key = "sk-test";
+    config.base_url = base_url;
+    config.model = "test-model";
+    config.max_retries = 3;
+    config.timeout_seconds = 5;
+    return config;
+}
+
+// 5xx 前两次失败、第三次成功：应重试并最终成功，server 命中 3 次。
+void TestRetryOnTransientServerErrors() {
+    LocalServer local;
+    local.server.Post("/chat/completions",
+                      [&](const httplib::Request&, httplib::Response& response) {
+                          if (local.hits.fetch_add(1) < 2) {
+                              response.status = 500;
+                              response.set_content(kErrorBody, "application/json");
+                              return;
+                          }
+                          response.status = 200;
+                          response.set_content(kOkBody, "application/json");
+                      });
+    if (!local.Start()) {
+        Expect(false, "retry server should bind");
+        return;
+    }
+
+    try {
+        aiagent::llm::DeepSeekClient client(TestConfig(local.BaseUrl()));
+        const auto result = client.Chat({});
+        Expect(result.choices.size() == 1, "retry should eventually succeed");
+        Expect(local.hits.load() == 3,
+               "server should be hit 3 times (2 failures + 1 success)");
+    } catch (const std::exception& e) {
+        Expect(false, std::string("retry chat should not throw: ") + e.what());
+    }
+    local.Stop();
+}
+
+// 4xx（客户端错误）不应重试：只命中一次并抛出 401。
+void TestNoRetryOnClientError() {
+    LocalServer local;
+    local.server.Post("/chat/completions",
+                      [&](const httplib::Request&, httplib::Response& response) {
+                          local.hits.fetch_add(1);
+                          response.status = 401;
+                          response.set_content(kErrorBody, "application/json");
+                      });
+    if (!local.Start()) {
+        Expect(false, "401 server should bind");
+        return;
+    }
+
+    try {
+        aiagent::llm::DeepSeekClient client(TestConfig(local.BaseUrl()));
+        (void)client.Chat({});
+        Expect(false, "401 chat should throw");
+    } catch (const aiagent::llm::DeepSeekException& e) {
+        Expect(e.status_code() == 401, "401 should surface its status code");
+        Expect(local.hits.load() == 1, "401 should not be retried");
+    } catch (const std::exception& e) {
+        Expect(false, std::string("unexpected exception: ") + e.what());
+    }
+    local.Stop();
+}
+
+// max_retries = 0：即使 5xx 也不重试，命中一次后抛出。
+void TestNoRetryWhenDisabled() {
+    LocalServer local;
+    local.server.Post("/chat/completions",
+                      [&](const httplib::Request&, httplib::Response& response) {
+                          local.hits.fetch_add(1);
+                          response.status = 500;
+                          response.set_content(kErrorBody, "application/json");
+                      });
+    if (!local.Start()) {
+        Expect(false, "500 server should bind");
+        return;
+    }
+
+    try {
+        auto config = TestConfig(local.BaseUrl());
+        config.max_retries = 0;
+        aiagent::llm::DeepSeekClient client(config);
+        (void)client.Chat({});
+        Expect(false, "500 chat with max_retries=0 should throw");
+    } catch (const aiagent::llm::DeepSeekException& e) {
+        Expect(e.status_code() == 500, "500 should surface its status code");
+        Expect(local.hits.load() == 1, "max_retries=0 should disable retry");
+    } catch (const std::exception& e) {
+        Expect(false, std::string("unexpected exception: ") + e.what());
+    }
+    local.Stop();
+}
+
 }  // namespace
 
 int main() {
     TestConfigParsing();
     TestRequestBody();
     TestResponseParsing();
+    TestRetryOnTransientServerErrors();
+    TestNoRetryOnClientError();
+    TestNoRetryWhenDisabled();
 
     if (g_failures != 0) {
         std::cerr << "llm client test failed with " << g_failures << " failure(s)\n";

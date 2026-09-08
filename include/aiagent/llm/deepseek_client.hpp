@@ -44,6 +44,11 @@ private:
                             bool stream,
                             const std::optional<std::string>& tool_choice) const;
 
+    // 单次非流式请求（不含重试逻辑）。
+    ChatResult DoChat(const std::vector<ChatMessage>& messages,
+                      const std::vector<ToolSpec>& tools,
+                      const std::optional<std::string>& tool_choice);
+
     DeepSeekConfig config_;
 };
 

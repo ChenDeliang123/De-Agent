@@ -153,7 +153,8 @@ if(AIAGENT_BUILD_TESTS)
   add_test(NAME aiagent_m0_smoke COMMAND m0_smoke_test)
 
   add_executable(llm_client_test tests/llm_client_test.cpp)
-  target_link_libraries(llm_client_test PRIVATE aiagent_llm)
+  target_link_libraries(llm_client_test PRIVATE aiagent_llm Threads::Threads)
+  target_include_directories(llm_client_test PRIVATE ${AIAGENT_HTTPLIB_INCLUDE_DIR})
   add_test(NAME aiagent_llm_client COMMAND llm_client_test)
 
   add_executable(agent_runtime_test tests/agent_runtime_test.cpp)

@@ -1,11 +1,14 @@
 #include "aiagent/llm/deepseek_client.hpp"
 
 #include <a2a/core/http_client.hpp>
+#include <a2a/core/json_rpc_error.hpp>
 #include <a2a/core/sse_parser.hpp>
 #include <json.hpp>
 
+#include <chrono>
 #include <map>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace aiagent::llm {
@@ -79,6 +82,22 @@ int JsonInt(const nlohmann::json& object, const char* key) {
         return 0;
     }
     return object[key].get<int>();
+}
+
+// 429 限流与 5xx 服务端错误值得重试；4xx（认证/参数）与本地错误重试无意义。
+bool IsRetryableStatusCode(int status_code) {
+    return status_code == 429 || status_code >= 500;
+}
+
+// 指数退避：500ms * 2^attempt，封顶 5s。
+void SleepBackoff(int attempt) {
+    constexpr long kBaseDelayMs = 500;
+    constexpr long kMaxDelayMs = 5000;
+    long delay = kBaseDelayMs * (1L << attempt);
+    if (delay > kMaxDelayMs) {
+        delay = kMaxDelayMs;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 }
 
 }  // namespace
@@ -197,6 +216,28 @@ std::string DeepSeekClient::RequestBody(const std::vector<ChatMessage>& messages
 ChatResult DeepSeekClient::Chat(const std::vector<ChatMessage>& messages,
                                 const std::vector<ToolSpec>& tools,
                                 const std::optional<std::string>& tool_choice) {
+    int attempt = 0;
+    while (true) {
+        try {
+            return DoChat(messages, tools, tool_choice);
+        } catch (const DeepSeekException& e) {
+            if (!IsRetryableStatusCode(e.status_code()) || attempt >= config_.max_retries) {
+                throw;
+            }
+        } catch (const a2a::core::JsonRpcException&) {
+            // HttpClient 抛出的网络层错误（连接失败/超时等），可重试。
+            if (attempt >= config_.max_retries) {
+                throw;
+            }
+        }
+        SleepBackoff(attempt);
+        ++attempt;
+    }
+}
+
+ChatResult DeepSeekClient::DoChat(const std::vector<ChatMessage>& messages,
+                                  const std::vector<ToolSpec>& tools,
+                                  const std::optional<std::string>& tool_choice) {
     if (config_.api_key.empty()) {
         throw DeepSeekException(0, "DeepSeek api_key is not configured");
     }
@@ -218,74 +259,96 @@ ChatResult DeepSeekClient::Chat(const std::vector<ChatMessage>& messages,
 void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
                                 const std::vector<ToolSpec>& tools,
                                 const std::function<void(const StreamEvent&)>& on_event) {
-    if (config_.api_key.empty()) {
-        throw DeepSeekException(0, "DeepSeek api_key is not configured");
-    }
-
-    a2a::core::HttpClient http;
-    http.SetTimeoutSeconds(config_.timeout_seconds);
-    http.AddHeader("Authorization", "Bearer " + config_.api_key);
-    http.AddHeader("Content-Type", "application/json");
-
-    std::map<std::size_t, ToolCall> pending_tool_calls;
-    bool parse_failed = false;
-    std::string parse_error;
-
-    a2a::core::SseParser parser([&](const std::string& data) {
-        if (parse_failed || data == "[DONE]") {
-            return;
-        }
+    // 一旦已向调用方派发过事件，中途失败不再重试——否则会产生重复的
+    // token/工具调用片段，破坏 Agent 侧的消息拼接。
+    bool delivered_any = false;
+    int attempt = 0;
+    while (true) {
         try {
-            const StreamChunk chunk = ParseStreamChunk(data);
-            if (!chunk.role.empty() || !chunk.content.empty() ||
-                !chunk.reasoning_content.empty() || !chunk.finish_reason.empty()) {
-                StreamEvent event;
-                event.role = chunk.role;
-                event.content = chunk.content;
-                event.reasoning_content = chunk.reasoning_content;
-                event.finish_reason = chunk.finish_reason;
-                if (on_event) {
-                    on_event(event);
-                }
+            if (config_.api_key.empty()) {
+                throw DeepSeekException(0, "DeepSeek api_key is not configured");
             }
-            for (const ToolCall& call : chunk.tool_calls) {
-                const std::size_t call_index =
-                        call.has_index ? static_cast<std::size_t>(call.index)
-                                       : pending_tool_calls.size();
-                ToolCall& pending = pending_tool_calls[call_index];
-                if (!call.id.empty()) {
-                    pending.id = call.id;
-                }
-                if (!call.name.empty()) {
-                    pending.name = call.name;
-                }
-                pending.arguments += call.arguments;
-            }
-            if (chunk.finish_reason == "tool_calls" && !pending_tool_calls.empty()) {
-                StreamEvent event;
-                event.finish_reason = chunk.finish_reason;
-                for (auto& [index, call] : pending_tool_calls) {
-                    event.tool_calls.push_back(std::move(call));
-                }
-                pending_tool_calls.clear();
-                if (on_event) {
-                    on_event(event);
-                }
-            }
-        } catch (const std::exception& e) {
-            parse_failed = true;
-            parse_error = e.what();
-        }
-    });
 
-    const auto response = http.PostStream(
-            DeepSeekChatEndpoint(config_), RequestBody(messages, tools, true, std::nullopt),
-            "application/json", [&](std::string_view chunk) { parser.Feed(chunk); });
-    if (!response.IsSuccess()) {
-        throw DeepSeekException(response.status_code, DeepSeekErrorMessage(response.body));
-    }
-    if (parse_failed) {
-        throw DeepSeekException(0, "failed to parse DeepSeek stream: " + parse_error);
+            a2a::core::HttpClient http;
+            http.SetTimeoutSeconds(config_.timeout_seconds);
+            http.AddHeader("Authorization", "Bearer " + config_.api_key);
+            http.AddHeader("Content-Type", "application/json");
+
+            std::map<std::size_t, ToolCall> pending_tool_calls;
+            bool parse_failed = false;
+            std::string parse_error;
+
+            a2a::core::SseParser parser([&](const std::string& data) {
+                if (parse_failed || data == "[DONE]") {
+                    return;
+                }
+                try {
+                    const StreamChunk chunk = ParseStreamChunk(data);
+                    if (!chunk.role.empty() || !chunk.content.empty() ||
+                        !chunk.reasoning_content.empty() || !chunk.finish_reason.empty()) {
+                        StreamEvent event;
+                        event.role = chunk.role;
+                        event.content = chunk.content;
+                        event.reasoning_content = chunk.reasoning_content;
+                        event.finish_reason = chunk.finish_reason;
+                        delivered_any = true;
+                        if (on_event) {
+                            on_event(event);
+                        }
+                    }
+                    for (const ToolCall& call : chunk.tool_calls) {
+                        const std::size_t call_index =
+                                call.has_index ? static_cast<std::size_t>(call.index)
+                                               : pending_tool_calls.size();
+                        ToolCall& pending = pending_tool_calls[call_index];
+                        if (!call.id.empty()) {
+                            pending.id = call.id;
+                        }
+                        if (!call.name.empty()) {
+                            pending.name = call.name;
+                        }
+                        pending.arguments += call.arguments;
+                    }
+                    if (chunk.finish_reason == "tool_calls" && !pending_tool_calls.empty()) {
+                        StreamEvent event;
+                        event.finish_reason = chunk.finish_reason;
+                        for (auto& [index, call] : pending_tool_calls) {
+                            event.tool_calls.push_back(std::move(call));
+                        }
+                        pending_tool_calls.clear();
+                        delivered_any = true;
+                        if (on_event) {
+                            on_event(event);
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    parse_failed = true;
+                    parse_error = e.what();
+                }
+            });
+
+            const auto response = http.PostStream(
+                    DeepSeekChatEndpoint(config_), RequestBody(messages, tools, true, std::nullopt),
+                    "application/json", [&](std::string_view chunk) { parser.Feed(chunk); });
+            if (!response.IsSuccess()) {
+                throw DeepSeekException(response.status_code, DeepSeekErrorMessage(response.body));
+            }
+            if (parse_failed) {
+                throw DeepSeekException(0, "failed to parse DeepSeek stream: " + parse_error);
+            }
+            return;
+        } catch (const DeepSeekException& e) {
+            if (delivered_any || !IsRetryableStatusCode(e.status_code()) ||
+                attempt >= config_.max_retries) {
+                throw;
+            }
+        } catch (const a2a::core::JsonRpcException&) {
+            if (delivered_any || attempt >= config_.max_retries) {
+                throw;
+            }
+        }
+        SleepBackoff(attempt);
+        ++attempt;
     }
 }
 
