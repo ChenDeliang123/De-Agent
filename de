@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 解析真实脚本路径：支持软链到 PATH 后从任意目录调用。
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -L "${SCRIPT_SOURCE}" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+  SCRIPT_SOURCE="$(readlink "${SCRIPT_SOURCE}")"
+  case "${SCRIPT_SOURCE}" in
+    /*) ;;
+    *) SCRIPT_SOURCE="${SCRIPT_DIR}/${SCRIPT_SOURCE}" ;;
+  esac
+done
+ROOT_DIR="$(cd -P "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+
+RUNTIME_DIR="${AIAGENT_RUNTIME_DIR:-${ROOT_DIR}/.runtime}"
+PID_FILE="${RUNTIME_DIR}/backend.pid"
+LOG_FILE="${RUNTIME_DIR}/backend.log"
+
+A2A_PORT="${AIAGENT_PORT:-18080}"
+WEB_PORT="${AIAGENT_WEB_PORT:-18081}"
+CONFIG_FILE="${AIAGENT_CONFIG:-${ROOT_DIR}/conf/conf.ini}"
+DB_PATH="${AIAGENT_DB:-${ROOT_DIR}/build/db/aiagent_tasks.db}"
+BACKEND_BIN="${ROOT_DIR}/build/aiagent_app"
+
+ACTION="cli"
+NO_BACKEND=0
+CLI_ARGS=()
+
+usage() {
+  cat <<'EOF'
+usage: de [command] [options]
+
+commands:
+  (no command)     ensure backend daemon is running, then start CLI
+  stop             stop the daemonized backend
+  status           show backend status
+  restart          stop then start backend
+  logs             tail backend log
+  help             show this help
+
+options:
+  --no-backend     only run CLI, do not start backend
+  --a2a-port N     A2A port (default 18080)
+  --web-port N     Web Gateway port (default 18081)
+  --config FILE    DeepSeek config file
+  --db FILE        SQLite database path
+  --               pass remaining arguments to cli.mjs
+
+environment:
+  AIAGENT_PORT / AIAGENT_WEB_PORT / AIAGENT_CONFIG / AIAGENT_DB
+  AIAGENT_RUNTIME_DIR
+EOF
+}
+
+ensure_runtime_dir() {
+  mkdir -p "${RUNTIME_DIR}"
+}
+
+health_check() {
+  curl -sf "http://127.0.0.1:${WEB_PORT}/health" >/dev/null 2>&1
+}
+
+pid_alive() {
+  local pid
+  pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+stop_backend() {
+  ensure_runtime_dir
+  if [ -f "${PID_FILE}" ]; then
+    local pid
+    pid="$(cat "${PID_FILE}")"
+    if kill -0 "${pid}" 2>/dev/null; then
+      echo "stopping backend (pid ${pid})..."
+      kill -TERM "${pid}" 2>/dev/null || true
+      for _ in $(seq 1 40); do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+          break
+        fi
+        sleep 0.25
+      done
+      if kill -0 "${pid}" 2>/dev/null; then
+        kill -KILL "${pid}" 2>/dev/null || true
+      fi
+    else
+      echo "removing stale pid file"
+    fi
+    rm -f "${PID_FILE}"
+    return 0
+  fi
+
+  if health_check; then
+    echo "backend is running but not managed by de; stop it in its own terminal"
+  else
+    echo "backend is not running"
+  fi
+}
+
+start_backend() {
+  ensure_runtime_dir
+  if health_check; then
+    echo "backend already running on http://127.0.0.1:${WEB_PORT}"
+    return 0
+  fi
+
+  if [ -f "${PID_FILE}" ] && pid_alive; then
+    echo "waiting for backend to become healthy..."
+    for _ in $(seq 1 40); do
+      if health_check; then
+        echo "backend already running on http://127.0.0.1:${WEB_PORT}"
+        return 0
+      fi
+      sleep 0.25
+    done
+    echo "backend pid is alive but not healthy; restarting it" >&2
+    stop_backend
+  fi
+
+  if [ ! -x "${BACKEND_BIN}" ]; then
+    echo "backend binary not found: ${BACKEND_BIN}" >&2
+    echo "build it first with: cmake --build build -j" >&2
+    return 1
+  fi
+
+  rm -f "${PID_FILE}"
+  echo "starting backend daemon (log: ${LOG_FILE})..."
+  (
+    cd "${ROOT_DIR}"
+    nohup "${BACKEND_BIN}" \
+      --config "${CONFIG_FILE}" \
+      --db "${DB_PATH}" \
+      --port "${A2A_PORT}" \
+      --web-port "${WEB_PORT}" \
+      >>"${LOG_FILE}" 2>&1 &
+    echo $! >"${PID_FILE}"
+  )
+
+  for _ in $(seq 1 120); do
+    if health_check; then
+      echo "backend ready on http://127.0.0.1:${WEB_PORT}"
+      return 0
+    fi
+    if ! pid_alive; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  echo "backend failed to become healthy; last log:" >&2
+  tail -n 20 "${LOG_FILE}" >&2 || true
+  return 1
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    stop)
+      ACTION="stop"
+      shift
+      ;;
+    status)
+      ACTION="status"
+      shift
+      ;;
+    restart)
+      ACTION="restart"
+      shift
+      ;;
+    logs)
+      ACTION="logs"
+      shift
+      ;;
+    help|--help|-h)
+      ACTION="help"
+      shift
+      ;;
+    --no-backend)
+      NO_BACKEND=1
+      shift
+      ;;
+    --a2a-port)
+      A2A_PORT="$2"
+      shift 2
+      ;;
+    --web-port)
+      WEB_PORT="$2"
+      shift 2
+      ;;
+    --config)
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
+    --db)
+      DB_PATH="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      CLI_ARGS+=("$@")
+      break
+      ;;
+    *)
+      CLI_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "${ACTION}" in
+  help)
+    usage
+    ;;
+  status)
+    ensure_runtime_dir
+    if health_check; then
+      if [ -f "${PID_FILE}" ]; then
+        echo "running (pid $(cat "${PID_FILE}")) on http://127.0.0.1:${WEB_PORT}"
+      else
+        echo "running (external) on http://127.0.0.1:${WEB_PORT}"
+      fi
+    else
+      echo "stopped"
+    fi
+    ;;
+  stop)
+    stop_backend
+    ;;
+  restart)
+    stop_backend
+    start_backend
+    ;;
+  logs)
+    ensure_runtime_dir
+    tail -f "${LOG_FILE}"
+    ;;
+  cli)
+    if [ "${NO_BACKEND}" -eq 0 ]; then
+      start_backend
+    fi
+
+    NODE_BIN="${NODE_BIN:-$(command -v node)}"
+    if [ -z "${NODE_BIN}" ]; then
+      echo "node not found; install Node.js >= 18" >&2
+      exit 1
+    fi
+
+    echo "starting CLI (backend http://127.0.0.1:${WEB_PORT})..."
+    "${NODE_BIN}" "${ROOT_DIR}/cli/cli.mjs" \
+      --backend "http://127.0.0.1:${WEB_PORT}" \
+      "${CLI_ARGS[@]}"
+    cli_status=$?
+
+    echo
+    echo "CLI exited. Backend is still running; use 'de stop' to stop it."
+    exit "${cli_status}"
+    ;;
+esac

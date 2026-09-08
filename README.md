@@ -76,6 +76,8 @@ Node.js Web 前端用于快速体验。
 ├── tests/                      # C++ 测试
 ├── examples/                   # CLI 示例
 ├── cli/                        # 终端 coding 客户端（Node，零依赖）
+├── de                          # 一键启动器（守护后端 + CLI）
+├── scripts/                    # install/uninstall de
 ├── web/node_frontend/          # Node BFF + 静态前端
 ├── vendor/
 │   ├── a2a-protocol/           # Git submodule
@@ -178,11 +180,28 @@ cmake --build vendor/mcp-extension-platform/build -j
 
 ### 7. 终端 coding 客户端
 
-终端客户端连接 C++ Web Gateway，支持流式对话、工具调用过程展示与断点续聊：
+安装 `de` 快捷命令（只需一次）：
 
 ```bash
-cd cli
-node cli.mjs --backend http://127.0.0.1:18081
+scripts/install-de.sh
+```
+
+之后从任意目录输入 `de`：
+
+```bash
+de
+```
+
+首次运行会自动把 C++ 后端作为守护进程启动，然后进入终端客户端。后端保持后台运行，
+可以再开多个终端分别输入 `de` 连接同一个后端；某个 CLI 退出不会影响其他终端。
+
+服务管理：
+
+```bash
+de stop      # 停止后端守护进程
+de status    # 查看后端状态
+de restart   # 重启后端
+de logs      # 查看后端日志
 ```
 
 常用命令：
@@ -197,7 +216,14 @@ node cli.mjs --backend http://127.0.0.1:18081
 也可以直接指定会话进入：
 
 ```bash
-node cli.mjs --backend http://127.0.0.1:18081 --session <session-id>
+de --session <session-id>
+```
+
+不使用 `de` 时，仍可手动启动后端和 CLI：
+
+```bash
+./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
+node cli/cli.mjs --backend http://127.0.0.1:18081
 ```
 
 ## Web API
