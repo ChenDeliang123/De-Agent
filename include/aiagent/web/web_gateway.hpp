@@ -31,6 +31,7 @@ public:
     using StreamEventHandler = std::function<void(
             const std::string& session_id,
             const std::string& message,
+            const std::string& cwd,
             const aiagent::agent::AgentEventCallback& on_event)>;
 
     WebGateway(a2a::server::AgentServer& agent_server,

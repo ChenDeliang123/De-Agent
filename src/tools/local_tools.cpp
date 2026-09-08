@@ -93,12 +93,14 @@ std::string ReadFile(const std::string& path, bool* ok, std::string* error) {
 LocalCodingTools::LocalCodingTools(std::string working_directory)
     : cwd_(std::move(working_directory)) {}
 
-std::string LocalCodingTools::ResolvePath(const std::string& path) const {
+std::string LocalCodingTools::ResolvePath(const std::string& path,
+                                          const std::string& working_directory) const {
     const std::filesystem::path target(path);
     if (target.is_absolute()) {
         return path;
     }
-    return (std::filesystem::path(cwd_) / target).string();
+    const std::string base = working_directory.empty() ? cwd_ : working_directory;
+    return (std::filesystem::path(base) / target).string();
 }
 
 std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
@@ -163,11 +165,13 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
 }
 
 ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
-                                              const nlohmann::json& arguments) {
+                                              const nlohmann::json& arguments,
+                                              const std::string& working_directory) {
     ToolExecutionResult result;
 
     if (name == "read") {
-        const std::string path = ResolvePath(arguments.value("path", std::string()));
+        const std::string path =
+                ResolvePath(arguments.value("path", std::string()), working_directory);
         if (path.empty()) {
             result.error = "read requires a path";
             return result;
@@ -190,7 +194,8 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
     }
 
     if (name == "write") {
-        const std::string path = ResolvePath(arguments.value("path", std::string()));
+        const std::string path =
+                ResolvePath(arguments.value("path", std::string()), working_directory);
         const std::string content = arguments.value("content", std::string());
         if (path.empty()) {
             result.error = "write requires a path";
@@ -213,7 +218,8 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
     }
 
     if (name == "edit") {
-        const std::string path = ResolvePath(arguments.value("path", std::string()));
+        const std::string path =
+                ResolvePath(arguments.value("path", std::string()), working_directory);
         const std::string old_text = arguments.value("oldText", std::string());
         const std::string new_text = arguments.value("newText", std::string());
         if (path.empty() || old_text.empty()) {
@@ -260,7 +266,8 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         if (arguments.contains("timeout") && arguments["timeout"].is_number_integer()) {
             timeout = arguments["timeout"].get<long>();
         }
-        const CommandResult command_result = RunCommand(command, cwd_, timeout);
+        const std::string run_cwd = working_directory.empty() ? cwd_ : working_directory;
+        const CommandResult command_result = RunCommand(command, run_cwd, timeout);
         result.ok = command_result.ok;
         result.text = command_result.output;
         result.error = command_result.error;

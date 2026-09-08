@@ -224,7 +224,8 @@ public:
     }
 
     tools::ToolExecutionResult Execute(const std::string& name,
-                                       const nlohmann::json& arguments) {
+                                       const nlohmann::json& arguments,
+                                       const std::string&) {
         const nlohmann::json response = Call("tools/call",
                                              {{"name", name}, {"arguments", arguments}});
         tools::ToolExecutionResult result;
@@ -355,8 +356,9 @@ bool MCPClientBridge::IsRunning() const { return impl_->IsRunning(); }
 
 std::vector<llm::ToolSpec> MCPClientBridge::ListTools() { return impl_->ListTools(); }
 tools::ToolExecutionResult MCPClientBridge::Execute(const std::string& name,
-                                                    const nlohmann::json& arguments) {
-    return impl_->Execute(name, arguments);
+                                                    const nlohmann::json& arguments,
+                                                    const std::string& working_directory) {
+    return impl_->Execute(name, arguments, working_directory);
 }
 
 }  // namespace aiagent::mcp

@@ -15,6 +15,7 @@ function close(server) {
 }
 
 test("cli session client lists, resumes, and streams", async () => {
+  let chatBody = null;
   const backend = http.createServer((request, response) => {
     if (request.url === "/api/v1/sessions") {
       response.writeHead(200, { "content-type": "application/json" });
@@ -30,8 +31,10 @@ test("cli session client lists, resumes, and streams", async () => {
     }
     if (request.url === "/api/v1/chat/stream") {
       response.writeHead(200, { "content-type": "text/event-stream" });
-      request.resume();
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
       request.on("end", () => {
+        chatBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         response.write('event: content\ndata: {"content":"hel"}\n\n');
         response.write(
           'event: tool_start\ndata: {"id":"call_1","name":"bash","arguments":{"command":"echo hi"}}\n\n',
@@ -59,6 +62,9 @@ test("cli session client lists, resumes, and streams", async () => {
       events.push({ event, data });
     });
     assert.equal(done.session_id, "s1");
+    assert.equal(chatBody.message, "hi");
+    assert.equal(typeof chatBody.cwd, "string");
+    assert.ok(chatBody.cwd.length > 0);
     assert.deepEqual(
       events.map((entry) => entry.event),
       ["content", "tool_start", "tool_end", "content", "done"],

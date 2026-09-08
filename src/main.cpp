@@ -245,6 +245,7 @@ int main(int argc, char** argv) {
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,
+                    const std::string& cwd,
                     const aiagent::agent::AgentEventCallback& on_event) {
                     std::vector<a2a::models::Message> history =
                             LoadLatestHistory(history_cache, *task_store, session_id);
@@ -254,7 +255,7 @@ int main(int argc, char** argv) {
                     history.push_back(user);
 
                     const std::string reply = runtime.HandleMessageStreamingEvents(
-                            user, history, session_id, on_event);
+                            user, history, session_id, on_event, cwd);
 
                     a2a::models::Task task;
                     task.id = std::string(a2a::core::NewUuid());

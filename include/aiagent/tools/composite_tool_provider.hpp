@@ -15,7 +15,8 @@ public:
 
     std::vector<llm::ToolSpec> ListTools() override;
     ToolExecutionResult Execute(const std::string& name,
-                                const nlohmann::json& arguments) override;
+                                const nlohmann::json& arguments,
+                                const std::string& working_directory = {}) override;
 
 private:
     std::vector<std::shared_ptr<IToolProvider>> providers_;

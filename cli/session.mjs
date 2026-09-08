@@ -23,7 +23,7 @@ export async function loadHistory(backendUrl, sessionId) {
   return response.json();
 }
 
-export async function streamChat(backendUrl, sessionId, message, onEvent) {
+export async function streamChat(backendUrl, sessionId, message, onEvent, cwd = process.cwd()) {
   const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/chat/stream`,
     {
@@ -32,6 +32,7 @@ export async function streamChat(backendUrl, sessionId, message, onEvent) {
       body: encoder.encode(
         JSON.stringify({
           ...(sessionId ? { session_id: sessionId } : {}),
+          cwd,
           message,
         }),
       ),

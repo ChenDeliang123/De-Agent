@@ -295,7 +295,8 @@ private:
                              if (session_id.empty()) {
                                  session_id = std::string(a2a::core::NewUuid());
                              }
-                             StreamChat(session_id, content, response);
+                             const std::string cwd = StringValue(body, "cwd");
+                             StreamChat(session_id, content, cwd, response);
                          } catch (const std::exception& e) {
                              response.status = 400;
                              response.set_content(
@@ -326,11 +327,11 @@ private:
     }
 
     void StreamChat(const std::string& session_id, const std::string& content,
-                    httplib::Response& response) {
+                    const std::string& cwd, httplib::Response& response) {
         response.status = 200;
         response.set_chunked_content_provider(
                 "text/event-stream",
-                [this, session_id, content](size_t offset, httplib::DataSink& sink) {
+                [this, session_id, content, cwd](size_t offset, httplib::DataSink& sink) {
                     if (offset != 0) {
                         sink.done();
                         return false;
@@ -348,6 +349,7 @@ private:
                             stream_event_handler_(
                                     session_id,
                                     content,
+                                    cwd,
                                     [&write](const aiagent::agent::AgentEvent& event) {
                                         WriteAgentEventFrame(write, event);
                                     });

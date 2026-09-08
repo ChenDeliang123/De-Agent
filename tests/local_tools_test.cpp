@@ -61,7 +61,8 @@ public:
     }
 
     aiagent::tools::ToolExecutionResult Execute(const std::string& name,
-                                                const nlohmann::json&) override {
+                                                const nlohmann::json&,
+                                                const std::string&) override {
         aiagent::tools::ToolExecutionResult result;
         result.ok = (name == name_);
         result.text = "executed-" + name_;
@@ -161,12 +162,40 @@ void TestComposite() {
     Expect(!unknown.ok, "composite should fail on unknown tool");
 }
 
+void TestWorkingDirectoryOverride() {
+    const auto parent = TempDir();
+    const auto dir_a = parent / "dir_a";
+    const auto dir_b = parent / "dir_b";
+    std::filesystem::create_directories(dir_a);
+    std::filesystem::create_directories(dir_b);
+    WriteFile(dir_a / "hello.txt", "from-a");
+    WriteFile(dir_b / "hello.txt", "from-b");
+
+    aiagent::tools::LocalCodingTools tools(dir_a.string());
+
+    // 默认 cwd 为 dir_a。
+    auto result = tools.Execute("read", {{"path", "hello.txt"}});
+    Expect(result.ok && result.text == "from-a", "default cwd should be dir_a");
+
+    // 显式传入 per-request cwd 后应改为 dir_b。
+    result = tools.Execute("read", {{"path", "hello.txt"}}, dir_b.string());
+    Expect(result.ok && result.text == "from-b",
+           "per-request working_directory should override default cwd");
+
+    result = tools.Execute("bash", {{"command", "pwd"}}, dir_b.string());
+    Expect(result.ok && result.text.find(dir_b.string()) != std::string::npos,
+           "bash should run in per-request working_directory");
+
+    std::filesystem::remove_all(parent);
+}
+
 }  // namespace
 
 int main() {
     TestReadWriteEdit();
     TestBash();
     TestComposite();
+    TestWorkingDirectoryOverride();
 
     if (g_failures != 0) {
         std::cerr << "local tools test failed with " << g_failures << " failure(s)\n";

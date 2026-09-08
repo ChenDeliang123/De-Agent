@@ -45,14 +45,16 @@ public:
             const a2a::models::Message& incoming,
             const std::vector<a2a::models::Message>& history,
             const std::string& context_id,
-            const AgentEventCallback& on_event);
+            const AgentEventCallback& on_event,
+            const std::string& working_directory = {});
 
 private:
     // 流式主循环的公共实现：产出 AgentEvent 事件流，返回最终回复文本。
     std::string RunStreaming(const a2a::models::Message& incoming,
                              const std::vector<a2a::models::Message>& history,
                              const std::string& context_id,
-                             const AgentEventCallback& on_event);
+                             const AgentEventCallback& on_event,
+                             const std::string& working_directory);
 
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;

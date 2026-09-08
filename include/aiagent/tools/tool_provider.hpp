@@ -22,7 +22,8 @@ public:
 
     virtual std::vector<llm::ToolSpec> ListTools() = 0;
     virtual ToolExecutionResult Execute(const std::string& name,
-                                        const nlohmann::json& arguments) = 0;
+                                        const nlohmann::json& arguments,
+                                        const std::string& working_directory = {}) = 0;
 };
 
 }  // namespace aiagent::tools

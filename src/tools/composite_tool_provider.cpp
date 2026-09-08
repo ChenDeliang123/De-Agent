@@ -26,12 +26,13 @@ std::vector<llm::ToolSpec> CompositeToolProvider::ListTools() {
 }
 
 ToolExecutionResult CompositeToolProvider::Execute(const std::string& name,
-                                                   const nlohmann::json& arguments) {
+                                                   const nlohmann::json& arguments,
+                                                   const std::string& working_directory) {
     for (const auto& provider : providers_) {
         const auto tools = provider->ListTools();
         for (const auto& tool : tools) {
             if (tool.name == name) {
-                return provider->Execute(name, arguments);
+                return provider->Execute(name, arguments, working_directory);
             }
         }
     }

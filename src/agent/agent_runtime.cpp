@@ -148,13 +148,17 @@ std::string AgentRuntime::RunStreaming(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id,
-        const AgentEventCallback& on_event) {
+        const AgentEventCallback& on_event,
+        const std::string& working_directory) {
     (void)context_id;
 
     std::vector<llm::ChatMessage> chat_messages;
     llm::ChatMessage system;
     system.role = "system";
     system.content = system_prompt_;
+    if (!working_directory.empty()) {
+        system.content += "\n\nCurrent working directory: " + working_directory;
+    }
     chat_messages.push_back(std::move(system));
 
     bool has_user_message = false;
@@ -231,7 +235,8 @@ std::string AgentRuntime::RunStreaming(
                 if (!call.arguments.empty()) {
                     arguments = nlohmann::json::parse(call.arguments);
                 }
-                execution_result = tools_->Execute(call.name, arguments);
+                execution_result =
+                        tools_->Execute(call.name, arguments, working_directory);
             } catch (const std::exception& e) {
                 execution_result.ok = false;
                 execution_result.error = e.what();
@@ -274,15 +279,17 @@ std::string AgentRuntime::HandleMessageStreaming(
                             if (event.kind == AgentEventKind::kToken && on_token) {
                                 on_token(event.content);
                             }
-                        });
+                        },
+                        {});
 }
 
 std::string AgentRuntime::HandleMessageStreamingEvents(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id,
-        const AgentEventCallback& on_event) {
-    return RunStreaming(incoming, history, context_id, on_event);
+        const AgentEventCallback& on_event,
+        const std::string& working_directory) {
+    return RunStreaming(incoming, history, context_id, on_event, working_directory);
 }
 
 }  // namespace aiagent::agent
