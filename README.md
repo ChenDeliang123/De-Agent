@@ -75,6 +75,7 @@ Node.js Web 前端用于快速体验。
 ├── src/                        # 对应实现
 ├── tests/                      # C++ 测试
 ├── examples/                   # CLI 示例
+├── cli/                        # 终端 coding 客户端（Node，零依赖）
 ├── web/node_frontend/          # Node BFF + 静态前端
 ├── vendor/
 │   ├── a2a-protocol/           # Git submodule
@@ -174,6 +175,30 @@ cmake --build vendor/mcp-extension-platform/build -j
 ```
 
 再次启动 `aiagent_app`，终端出现 `MCP tools loaded: N` 即表示已启用。
+
+### 7. 终端 coding 客户端
+
+终端客户端连接 C++ Web Gateway，支持流式对话、工具调用过程展示与断点续聊：
+
+```bash
+cd cli
+node cli.mjs --backend http://127.0.0.1:18081
+```
+
+常用命令：
+
+```text
+/new        开始新会话
+/sessions   查看会话
+/open <id>  续聊历史会话
+/quit       退出
+```
+
+也可以直接指定会话进入：
+
+```bash
+node cli.mjs --backend http://127.0.0.1:18081 --session <session-id>
+```
 
 ## Web API
 
