@@ -24,17 +24,32 @@ int main() {
                         {"capabilities", {{"tools", nlohmann::json::object()}}},
                         {"serverInfo", {{"name", "fake-mcp"}, {"version", "test"}}}};
             } else if (method == "tools/list") {
+                // 两个工具：calculate 用于常规调用，bigtext 返回大文本，
+                // 用于验证客户端缓冲读能跨多个 read 块正确拼接。
                 response["result"]["tools"] = nlohmann::json::array(
                         {{{"name", "calculate"},
                           {"description", "Calculate an arithmetic expression"},
                           {"inputSchema",
                            {{"type", "object"},
-                            {"properties", {{"expr", {{"type", "string"}}}}}}}}});
+                            {"properties", {{"expr", {{"type", "string"}}}}}}}},
+                         {{"name", "bigtext"},
+                          {"description", "Return a large text payload"},
+                          {"inputSchema", {{"type", "object"}}}}});
             } else if (method == "tools/call") {
-                response["result"] = {
-                        {"content",
-                         nlohmann::json::array({{{"type", "text"}, {"text", "4"}}})},
-                        {"isError", false}};
+                const std::string tool_name =
+                        request["params"].value("name", std::string());
+                if (tool_name == "bigtext") {
+                    const std::string big(200 * 1024, 'x');
+                    response["result"] = {
+                            {"content",
+                             nlohmann::json::array({{{"type", "text"}, {"text", big}}})},
+                            {"isError", false}};
+                } else {
+                    response["result"] = {
+                            {"content",
+                             nlohmann::json::array({{{"type", "text"}, {"text", "4"}}})},
+                            {"isError", false}};
+                }
             } else {
                 response["error"] = {{"code", -32601}, {"message", "Method not found"}};
             }

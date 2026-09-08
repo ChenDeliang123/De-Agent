@@ -7,6 +7,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
@@ -36,48 +37,6 @@ void WriteAll(int fd, const std::string& data) {
         }
         offset += static_cast<std::size_t>(written);
     }
-}
-
-std::string ReadLine(int fd, long timeout_seconds) {
-    std::string line;
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::seconds(timeout_seconds);
-    while (true) {
-        const auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining.count() <= 0) {
-            throw std::runtime_error("timeout waiting for MCP server response");
-        }
-        const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining)
-                                          .count();
-        pollfd descriptor{fd, POLLIN, 0};
-        const int result = poll(&descriptor, 1, static_cast<int>(remaining_ms));
-        if (result < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            throw std::runtime_error("poll failed while reading MCP server");
-        }
-        if (result == 0) {
-            throw std::runtime_error("timeout waiting for MCP server response");
-        }
-
-        char byte = '\0';
-        const ssize_t count = read(fd, &byte, 1);
-        if (count == 0) {
-            throw std::runtime_error("MCP server closed stdout");
-        }
-        if (count < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            throw std::runtime_error("failed to read MCP server response");
-        }
-        if (byte == '\n') {
-            break;
-        }
-        line.push_back(byte);
-    }
-    return line;
 }
 
 std::string ContentText(const nlohmann::json& result) {
@@ -117,6 +76,10 @@ public:
         }
 
         config_ = config;
+        // 复用实例重新启动：清空上一次会话的读缓冲与工具缓存。
+        read_buffer_.clear();
+        tools_cached_ = false;
+        tool_cache_.clear();
 
         int child_stdin[2];
         int child_stdout[2];
@@ -216,11 +179,24 @@ public:
             }
         }
         running_ = false;
+        read_buffer_.clear();
+        {
+            std::lock_guard<std::mutex> lock(tool_cache_mutex_);
+            tools_cached_ = false;
+            tool_cache_.clear();
+        }
     }
 
     bool IsRunning() const { return running_; }
 
     std::vector<llm::ToolSpec> ListTools() {
+        {
+            std::lock_guard<std::mutex> lock(tool_cache_mutex_);
+            if (tools_cached_) {
+                return tool_cache_;
+            }
+        }
+
         const nlohmann::json response = Call("tools/list", nlohmann::json::object());
         std::vector<llm::ToolSpec> tools;
         if (!response.contains("tools") || !response["tools"].is_array()) {
@@ -237,7 +213,14 @@ public:
                 tools.push_back(std::move(spec));
             }
         }
-        return tools;
+        {
+            std::lock_guard<std::mutex> lock(tool_cache_mutex_);
+            if (!tools_cached_) {
+                tool_cache_ = std::move(tools);
+                tools_cached_ = true;
+            }
+            return tool_cache_;
+        }
     }
 
     tools::ToolExecutionResult Execute(const std::string& name,
@@ -260,10 +243,62 @@ public:
     }
 
 private:
+    // 缓冲式读取 MCP stdout 的一行（\n 结尾，去除 \r）。
+    // 大块 read 进 read_buffer_ 后按行切分，避免旧实现每字节一次 poll+read
+    // 造成上万次系统调用（大工具结果时尤其明显）。超时仍以整行读取为粒度。
+    std::string ReadLine() {
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(config_.request_timeout_seconds);
+        while (true) {
+            const std::size_t newline = read_buffer_.find('\n');
+            if (newline != std::string::npos) {
+                std::string line = read_buffer_.substr(0, newline);
+                read_buffer_.erase(0, newline + 1);
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                return line;
+            }
+
+            const auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining.count() <= 0) {
+                throw std::runtime_error("timeout waiting for MCP server response");
+            }
+            const auto remaining_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+            pollfd descriptor{stdout_fd_, POLLIN, 0};
+            const int result = poll(&descriptor, 1, static_cast<int>(remaining_ms));
+            if (result < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw std::runtime_error("poll failed while reading MCP server");
+            }
+            if (result == 0) {
+                throw std::runtime_error("timeout waiting for MCP server response");
+            }
+
+            char buffer[64 * 1024];
+            const ssize_t count = read(stdout_fd_, buffer, sizeof(buffer));
+            if (count == 0) {
+                throw std::runtime_error("MCP server closed stdout");
+            }
+            if (count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw std::runtime_error("failed to read MCP server response");
+            }
+            read_buffer_.append(buffer, static_cast<std::size_t>(count));
+        }
+    }
+
     nlohmann::json Call(const std::string& method, const nlohmann::json& params) {
         if (!running_) {
             throw std::runtime_error("MCP server is not running");
         }
+        // 子进程是单 fd 的请求/响应协议：并发调用会串响应，必须串行化。
+        std::lock_guard<std::mutex> lock(call_mutex_);
 
         const std::string request_id = std::to_string(next_id_++);
         const nlohmann::json request = {{"jsonrpc", "2.0"},
@@ -273,7 +308,7 @@ private:
         WriteAll(stdin_fd_, request.dump() + "\n");
 
         while (true) {
-            const std::string line = ReadLine(stdout_fd_, config_.request_timeout_seconds);
+            const std::string line = ReadLine();
             const nlohmann::json response = nlohmann::json::parse(line);
             const std::string response_id =
                     response.contains("id") && !response["id"].is_null()
@@ -304,6 +339,11 @@ private:
     int stdout_fd_ = -1;
     bool running_ = false;
     int next_id_ = 1;
+    std::string read_buffer_;
+    std::mutex call_mutex_;
+    mutable std::mutex tool_cache_mutex_;
+    std::vector<llm::ToolSpec> tool_cache_;
+    bool tools_cached_ = false;
 };
 
 MCPClientBridge::MCPClientBridge() : impl_(std::make_unique<Impl>()) {}

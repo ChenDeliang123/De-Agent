@@ -85,13 +85,26 @@ int main() {
         }
 
         const auto tools = bridge->ListTools();
-        Expect(tools.size() == 1, "tools/list should return one tool");
+        Expect(tools.size() == 2, "tools/list should return two tools");
         Expect(!tools.empty() && tools.front().name == "calculate",
-               "tool name should be calculate");
+               "first tool name should be calculate");
+
+        // tools/list 结果已缓存：重复调用应返回一致结果（不再访问 MCP server）。
+        const auto tools_again = bridge->ListTools();
+        Expect(tools_again.size() == tools.size(),
+               "cached tools/list should be stable");
+        Expect(!tools_again.empty() && tools_again.front().name == tools.front().name,
+               "cached tool list should match the first call");
 
         const auto execution = bridge->Execute("calculate", {{"expr", "1+1"}});
         Expect(execution.ok, "tools/call should succeed");
         Expect(execution.text == "4", "tools/call should return text 4");
+
+        // 大响应跨多个 read 块，验证缓冲读拼接正确（200 KiB 单行）。
+        const auto big = bridge->Execute("bigtext", nlohmann::json::object());
+        Expect(big.ok, "bigtext tools/call should succeed");
+        Expect(big.text.size() == static_cast<std::size_t>(200 * 1024),
+               "bigtext should return the full 200 KiB payload");
 
         auto model = std::make_shared<ToolCallingModel>();
         aiagent::agent::AgentRuntime runtime(model);
