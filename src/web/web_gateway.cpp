@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <set>
 #include <string>
@@ -20,6 +21,7 @@
 #include "a2a/server/task_store.hpp"
 
 #include "aiagent/agent/history_cache.hpp"
+#include "aiagent/log.hpp"
 
 namespace aiagent::web {
 namespace {
@@ -307,6 +309,11 @@ private:
     }
 
     nlohmann::json ChatOnce(const std::string& session_id, const std::string& content) {
+        const auto started = std::chrono::steady_clock::now();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "web",
+                "session=" + session_id + " event=chat_start sync=true user_bytes=" +
+                        std::to_string(content.size()));
         a2a::models::SendMessageRequest request;
         request.message = a2a::models::MakeTextMessage(
                 a2a::models::Role::kUser, content, "text/plain");
@@ -321,6 +328,15 @@ private:
                 break;
             }
         }
+        const auto duration_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "web",
+                "session=" + session_id + " task=" + task.id +
+                        " event=chat_end sync=true duration_ms=" +
+                        std::to_string(duration_ms));
         return {{"session_id", session_id},
                 {"task_id", task.id},
                 {"content", reply}};
@@ -328,10 +344,16 @@ private:
 
     void StreamChat(const std::string& session_id, const std::string& content,
                     const std::string& cwd, httplib::Response& response) {
+        const auto started = std::chrono::steady_clock::now();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "web",
+                "session=" + session_id + " event=stream_start user_bytes=" +
+                        std::to_string(content.size()) + " cwd=" + cwd);
         response.status = 200;
         response.set_chunked_content_provider(
                 "text/event-stream",
-                [this, session_id, content, cwd](size_t offset, httplib::DataSink& sink) {
+                [this, session_id, content, cwd, started](size_t offset,
+                                                          httplib::DataSink& sink) {
                     if (offset != 0) {
                         sink.done();
                         return false;
@@ -367,8 +389,20 @@ private:
                         }
                         write("done", done_payload);
                     } catch (const std::exception& e) {
+                        aiagent::DefaultLogger().Log(
+                                aiagent::LogLevel::kError, "web",
+                                "session=" + session_id +
+                                        " event=stream_error message=" + e.what());
                         write("error", {{"error", e.what()}});
                     }
+                    const auto duration_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count();
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "web",
+                            "session=" + session_id + " event=stream_end duration_ms=" +
+                                    std::to_string(duration_ms));
                     sink.done();
                     return false;
                 });

@@ -1,4 +1,5 @@
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/log.hpp"
 
 #include <a2a/core/http_client.hpp>
 #include <a2a/core/json_rpc_error.hpp>
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <map>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -82,6 +84,24 @@ int JsonInt(const nlohmann::json& object, const char* key) {
         return 0;
     }
     return object[key].get<int>();
+}
+
+std::size_t RequestBytes(const std::vector<ChatMessage>& messages,
+                         const std::vector<ToolSpec>& tools) {
+    std::size_t bytes = 0;
+    for (const auto& message : messages) {
+        bytes += message.content.size() + message.reasoning_content.size();
+        for (const auto& call : message.tool_calls) {
+            bytes += call.arguments.size();
+        }
+    }
+    for (const auto& tool : tools) {
+        bytes += tool.name.size() + tool.description.size();
+        if (tool.parameters.is_string()) {
+            bytes += tool.parameters.get_ref<const std::string&>().size();
+        }
+    }
+    return bytes;
 }
 
 // 429 限流与 5xx 服务端错误值得重试；4xx（认证/参数）与本地错误重试无意义。
@@ -218,18 +238,53 @@ ChatResult DeepSeekClient::Chat(const std::vector<ChatMessage>& messages,
                                 const std::optional<std::string>& tool_choice) {
     int attempt = 0;
     while (true) {
+        const auto started = std::chrono::steady_clock::now();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kDebug, "deepseek",
+                "mode=sync attempt=" + std::to_string(attempt) +
+                        " event=request_start messages=" +
+                        std::to_string(messages.size()) +
+                        " request_bytes=" + std::to_string(RequestBytes(messages, tools)));
         try {
-            return DoChat(messages, tools, tool_choice);
+            const auto result = DoChat(messages, tools, tool_choice);
+            const auto duration_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - started)
+                            .count();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "deepseek",
+                    "mode=sync event=request_end status=200 duration_ms=" +
+                            std::to_string(duration_ms) +
+                            " finish=" +
+                            (result.choices.empty()
+                                     ? "-"
+                                     : result.choices.front().finish_reason));
+            return result;
         } catch (const DeepSeekException& e) {
-            if (!IsRetryableStatusCode(e.status_code()) || attempt >= config_.max_retries) {
+            const bool retry = IsRetryableStatusCode(e.status_code()) &&
+                               attempt < config_.max_retries;
+            aiagent::DefaultLogger().Log(
+                    retry ? aiagent::LogLevel::kWarning
+                          : aiagent::LogLevel::kError,
+                    "deepseek",
+                    "mode=sync attempt=" + std::to_string(attempt) +
+                            " event=error status=" + std::to_string(e.status_code()) +
+                            " message=" + e.what());
+            if (!retry) {
                 throw;
             }
-        } catch (const a2a::core::JsonRpcException&) {
-            // HttpClient 抛出的网络层错误（连接失败/超时等），可重试。
-            if (attempt >= config_.max_retries) {
+        } catch (const a2a::core::JsonRpcException& e) {
+            const bool retry = attempt < config_.max_retries;
+            aiagent::DefaultLogger().Log(
+                    retry ? aiagent::LogLevel::kWarning
+                          : aiagent::LogLevel::kError,
+                    "deepseek",
+                    "mode=sync event=network_error message=" + std::string(e.what()));
+            if (!retry) {
                 throw;
             }
         }
+            // HttpClient 抛出的网络层错误（连接失败/超时等），可重试。
         SleepBackoff(attempt);
         ++attempt;
     }
@@ -264,6 +319,13 @@ void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
     bool delivered_any = false;
     int attempt = 0;
     while (true) {
+        const auto started = std::chrono::steady_clock::now();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kDebug, "deepseek",
+                "mode=stream attempt=" + std::to_string(attempt) +
+                        " event=request_start messages=" +
+                        std::to_string(messages.size()) +
+                        " request_bytes=" + std::to_string(RequestBytes(messages, tools)));
         try {
             if (config_.api_key.empty()) {
                 throw DeepSeekException(0, "DeepSeek api_key is not configured");
@@ -336,14 +398,39 @@ void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
             if (parse_failed) {
                 throw DeepSeekException(0, "failed to parse DeepSeek stream: " + parse_error);
             }
+            const auto duration_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - started)
+                            .count();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "deepseek",
+                    "mode=stream event=request_end status=200 duration_ms=" +
+                            std::to_string(duration_ms) +
+                            " delivered_events=" + (delivered_any ? "true" : "false"));
             return;
         } catch (const DeepSeekException& e) {
-            if (delivered_any || !IsRetryableStatusCode(e.status_code()) ||
-                attempt >= config_.max_retries) {
+            const bool retry = !delivered_any &&
+                               IsRetryableStatusCode(e.status_code()) &&
+                               attempt < config_.max_retries;
+            aiagent::DefaultLogger().Log(
+                    retry ? aiagent::LogLevel::kWarning
+                          : aiagent::LogLevel::kError,
+                    "deepseek",
+                    "mode=stream attempt=" + std::to_string(attempt) +
+                            " event=error status=" + std::to_string(e.status_code()) +
+                            " message=" + e.what());
+            if (!retry) {
                 throw;
             }
-        } catch (const a2a::core::JsonRpcException&) {
-            if (delivered_any || attempt >= config_.max_retries) {
+        } catch (const a2a::core::JsonRpcException& e) {
+            const bool retry = !delivered_any && attempt < config_.max_retries;
+            aiagent::DefaultLogger().Log(
+                    retry ? aiagent::LogLevel::kWarning
+                          : aiagent::LogLevel::kError,
+                    "deepseek",
+                    "mode=stream event=network_error message=" +
+                            std::string(e.what()));
+            if (!retry) {
                 throw;
             }
         }

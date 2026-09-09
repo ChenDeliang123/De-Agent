@@ -1,7 +1,9 @@
 #include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/log.hpp"
 
 #include "a2a/core/id.hpp"
 
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -46,6 +48,12 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id) {
+    const std::string run_id = std::string(a2a::core::NewUuid());
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "agent_runtime",
+            "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
+                    " event=request_start messages=" + std::to_string(history.size()));
+
     std::vector<llm::ChatMessage> chat_messages;
 
     llm::ChatMessage system;
@@ -99,6 +107,11 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         chat_messages.push_back(std::move(assistant));
 
         for (const auto& call : choice.tool_calls) {
+            const auto tool_started = std::chrono::steady_clock::now();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "agent_runtime",
+                    "run=" + run_id + " event=tool_start name=" + call.name +
+                            " args_bytes=" + std::to_string(call.arguments.size()));
             tools::ToolExecutionResult execution_result;
             try {
                 nlohmann::json arguments = nlohmann::json::object();
@@ -110,6 +123,18 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
                 execution_result.ok = false;
                 execution_result.error = e.what();
             }
+            const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - tool_started)
+                                             .count();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "agent_runtime",
+                    "run=" + run_id + " event=tool_end name=" + call.name + " ok=" +
+                            (execution_result.ok ? "true" : "false") +
+                            " duration_ms=" + std::to_string(duration_ms) +
+                            " output_bytes=" +
+                            std::to_string(execution_result.ok
+                                                   ? execution_result.text.size()
+                                                   : execution_result.error.size()));
 
             llm::ChatMessage tool_result;
             tool_result.role = "tool";
@@ -141,6 +166,11 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
 
     a2a::models::SendMessageResponse response;
     response.task = std::move(task);
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "agent_runtime",
+            "run=" + run_id + " session=" + context_id +
+                    " event=request_end reply_bytes=" +
+                    std::to_string(reply_text.size()));
     return response;
 }
 
@@ -151,6 +181,12 @@ std::string AgentRuntime::RunStreaming(
         const AgentEventCallback& on_event,
         const std::string& working_directory) {
     (void)context_id;
+    const std::string run_id = std::string(a2a::core::NewUuid());
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "agent_runtime",
+            "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
+                    " event=request_start streaming=true messages=" +
+                    std::to_string(history.size()));
 
     std::vector<llm::ChatMessage> chat_messages;
     llm::ChatMessage system;
@@ -220,6 +256,11 @@ std::string AgentRuntime::RunStreaming(
         chat_messages.push_back(std::move(assistant));
 
         for (const auto& call : streamed_tool_calls) {
+            const auto tool_started = std::chrono::steady_clock::now();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "agent_runtime",
+                    "run=" + run_id + " event=tool_start name=" + call.name +
+                            " args_bytes=" + std::to_string(call.arguments.size()));
             if (on_event) {
                 AgentEvent agent_event;
                 agent_event.kind = AgentEventKind::kToolStart;
@@ -241,6 +282,14 @@ std::string AgentRuntime::RunStreaming(
                 execution_result.ok = false;
                 execution_result.error = e.what();
             }
+            const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - tool_started)
+                                             .count();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "agent_runtime",
+                    "run=" + run_id + " event=tool_end name=" + call.name + " ok=" +
+                            (execution_result.ok ? "true" : "false") +
+                            " duration_ms=" + std::to_string(duration_ms));
 
             if (on_event) {
                 AgentEvent agent_event;
@@ -266,6 +315,11 @@ std::string AgentRuntime::RunStreaming(
     if (reply.empty()) {
         throw std::runtime_error("model returned an empty reply");
     }
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "agent_runtime",
+            "run=" + run_id + " session=" + context_id +
+                    " event=request_end streaming=true reply_bytes=" +
+                    std::to_string(reply.size()));
     return reply;
 }
 

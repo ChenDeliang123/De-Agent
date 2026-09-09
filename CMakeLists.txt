@@ -84,7 +84,7 @@ add_library(aiagent_llm STATIC
   src/llm/deepseek_client.cpp
 )
 target_include_directories(aiagent_llm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(aiagent_llm PUBLIC a2a::a2a)
+target_link_libraries(aiagent_llm PUBLIC aiagent_log a2a::a2a)
 
 if(MSVC)
   target_compile_options(aiagent_llm PRIVATE /W4 /permissive-)

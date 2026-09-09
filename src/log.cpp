@@ -110,7 +110,7 @@ private:
     LogLevel level_ = LogLevel::kInfo;
     std::string file_path_;
     std::ofstream file_stream_;
-    bool console_ = true;
+    bool console_ = false;
 };
 
 Logger::Logger() : impl_(std::make_unique<Impl>()) {}

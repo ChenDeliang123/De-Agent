@@ -258,6 +258,10 @@ curl -X POST http://127.0.0.1:18081/api/v1/chat \
 .runtime/backend-console.log  # 后端 stdout/stderr 原始输出
 ```
 
+P1 后，`backend.log` 可串联 WebGateway / AgentRuntime / DeepSeek 的
+请求生命周期：`event=chat_start → request_start → request_end → chat_end`，
+并记录耗时、session、reply 大小与 DeepSeek 错误/重试。
+
 查看结构化日志：
 
 ```bash
