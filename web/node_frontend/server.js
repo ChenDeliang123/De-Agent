@@ -3,6 +3,8 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { log } from "./logger.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 
@@ -20,6 +22,15 @@ export function createHttpServer(
   return http.createServer((request, response) => {
     const requestUrl = new URL(request.url, "http://localhost");
     const pathname = requestUrl.pathname;
+    const started = Date.now();
+    log("info", "web", `event=request_start method=${request.method} path=${pathname}`);
+    response.on("finish", () => {
+      log(
+        "info",
+        "web",
+        `event=request_end method=${request.method} path=${pathname} status=${response.statusCode} duration_ms=${Date.now() - started}`,
+      );
+    });
 
     if (pathname.startsWith("/api/")) {
       proxyToBackend(request, response, backendBaseUrl, backendApiPath(pathname));
@@ -66,6 +77,7 @@ function proxyToBackend(request, response, backendBaseUrl, pathname) {
 
   upstream.on("error", (error) => {
     console.error(`proxy error for ${pathname}:`, error.message);
+    log("error", "web", `event=proxy_error path=${pathname} message=${error.message}`);
     if (!response.headersSent) {
       response.writeHead(502, { "content-type": "application/json" });
     }
@@ -103,5 +115,6 @@ if (isMain) {
   server.listen(port, () => {
     console.log(`ai-agent web listening on http://127.0.0.1:${port}`);
     console.log(`backend: ${process.env.AIAGENT_BACKEND_URL || "http://127.0.0.1:18081"}`);
+    log("info", "web", `event=server_start port=${port}`);
   });
 }

@@ -256,6 +256,8 @@ curl -X POST http://127.0.0.1:18081/api/v1/chat \
 ```text
 .runtime/backend.log          # 结构化 INFO/ERROR 日志
 .runtime/backend-console.log  # 后端 stdout/stderr 原始输出
+.runtime/cli.log              # CLI 事件日志
+.runtime/web.log              # Node BFF 请求日志
 ```
 
 P1 后，`backend.log` 可串联 WebGateway / AgentRuntime / DeepSeek 的
@@ -265,10 +267,15 @@ P1 后，`backend.log` 可串联 WebGateway / AgentRuntime / DeepSeek 的
 P2 后，`tools` / `mcp` 模块还会记录 read/write/edit/bash 与
 MCP `tools/list` / `tools/call` 的执行时长、输出大小和退出状态。
 
+P3 后，CLI 与 Node BFF 也会写文件日志；`de` 会把自己的 `.runtime`
+传给 CLI，方便统一查看。
+
 查看结构化日志：
 
 ```bash
 de logs
+de logs cli
+de logs web
 ```
 
 配置：

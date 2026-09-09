@@ -39,7 +39,7 @@ commands:
   stop             stop the daemonized backend
   status           show backend status
   restart          stop then start backend
-  logs             tail backend log
+  logs [target]    tail log: backend (default) | cli | web
   help             show this help
 
 options:
@@ -255,7 +255,27 @@ case "${ACTION}" in
     ;;
   logs)
     ensure_runtime_dir
-    tail -f "${LOG_FILE}"
+    target="backend"
+    if [ "${#CLI_ARGS[@]}" -gt 0 ]; then
+      target="${CLI_ARGS[0]}"
+    fi
+    case "${target}" in
+      backend)
+        LOG_TARGET="${LOG_FILE}"
+        ;;
+      cli)
+        LOG_TARGET="${RUNTIME_DIR}/cli.log"
+        ;;
+      web)
+        LOG_TARGET="${RUNTIME_DIR}/web.log"
+        ;;
+      *)
+        echo "unknown log target: ${target}; use backend|cli|web" >&2
+        exit 1
+        ;;
+    esac
+    touch "${LOG_TARGET}" 2>/dev/null || true
+    tail -f "${LOG_TARGET}"
     ;;
   cli)
     if [ "${NO_BACKEND}" -eq 0 ]; then
@@ -269,6 +289,7 @@ case "${ACTION}" in
     fi
 
     echo "starting CLI (backend http://127.0.0.1:${WEB_PORT})..."
+    AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
     "${NODE_BIN}" "${ROOT_DIR}/cli/cli.mjs" \
       --backend "http://127.0.0.1:${WEB_PORT}" \
       "${CLI_ARGS[@]}"

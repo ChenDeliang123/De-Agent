@@ -2,6 +2,7 @@ import readlinePromises from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
+import { log } from "./logger.mjs";
 import { listSessions, loadHistory, streamChat } from "./session.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
@@ -40,6 +41,7 @@ function clearInputLine() {
 
 async function renderHistory(backend, sessionId) {
   const history = await loadHistory(backend, sessionId);
+  log("info", "cli", `event=history_load session=${sessionId} messages=${history.length}`);
   for (const message of history) {
     if (message.role === "user") {
       renderer.user(message.content);
@@ -80,6 +82,7 @@ async function handleAnswer(backend, state, answer) {
     } else if (command === "/new") {
       state.sessionId = null;
       console.log("new session");
+      log("info", "cli", "event=new_session");
     } else if (command === "/sessions") {
       await showSessions(backend);
     } else if (command === "/open") {
@@ -106,6 +109,7 @@ async function handleAnswer(backend, state, answer) {
       state.sessionId = typeof entry === "string" ? entry : entry.id;
       clearInputLine();
       await renderHistory(backend, state.sessionId);
+      log("info", "cli", `event=open_session session=${state.sessionId}`);
     } else {
       console.log(`unknown command: ${command}; use /help`);
     }
@@ -118,6 +122,7 @@ async function handleAnswer(backend, state, answer) {
 
 async function sendMessage(backend, sessionId, text) {
   clearInputLine();
+  log("info", "cli", `event=user_message session=${sessionId ?? "-"} bytes=${text.length}`);
   renderer.user(text);
   renderer.startReply();
   try {
@@ -138,9 +143,12 @@ async function sendMessage(backend, sessionId, text) {
       }
     });
     renderer.endReply();
+    log("info", "cli",
+        `event=stream_end session=${done?.session_id ?? sessionId ?? "-"}`);
     return done?.session_id ?? sessionId;
   } catch (error) {
     renderer.error(error.message);
+    log("error", "cli", `event=stream_error message=${error.message}`);
     return sessionId;
   }
 }
@@ -154,6 +162,7 @@ async function main() {
 
   const backend = options.backend.replace(/\/+$/, "");
   console.log(`ai-agent-cli  backend=${backend}`);
+  log("info", "cli", `event=cli_start backend=${backend}`);
 
   const state = { sessionId: options.session };
   const sessions = await listSessions(backend).catch(() => []);
@@ -199,5 +208,6 @@ async function main() {
 main().catch((error) => {
   clearInputLine();
   console.error(error);
+  log("error", "cli", `event=cli_fatal message=${error.message}`);
   process.exitCode = 1;
 });
