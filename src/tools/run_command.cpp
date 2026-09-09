@@ -1,4 +1,5 @@
 #include "aiagent/tools/run_command.hpp"
+#include "aiagent/log.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -47,6 +48,11 @@ std::string TruncateTail(const std::string& text) {
 CommandResult RunCommand(const std::string& command, const std::string& cwd,
                          long timeout_seconds) {
     CommandResult result;
+    const auto started = std::chrono::steady_clock::now();
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kDebug, "tools",
+            "tool=bash event=start command_bytes=" + std::to_string(command.size()) +
+                    " cwd=" + cwd + " timeout=" + std::to_string(timeout_seconds));
 
     int pipe_fds[2];
     if (pipe(pipe_fds) != 0) {
@@ -160,18 +166,28 @@ CommandResult RunCommand(const std::string& command, const std::string& cwd,
         result.ok = false;
         result.error = read_error;
         result.output = TruncateTail(output);
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kError, "tools",
+                "tool=bash event=end ok=false error=" + read_error);
         return result;
     }
     if (timed_out) {
         result.ok = false;
         result.error = "command timed out after " + std::to_string(timeout_seconds) + "s";
         result.output = TruncateTail(output);
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "tools",
+                "tool=bash event=end ok=false reason=timeout timeout=" +
+                        std::to_string(timeout_seconds));
         return result;
     }
     if (exit_code != 0) {
         result.ok = false;
         result.error = "command exited with code " + std::to_string(exit_code);
         result.output = TruncateTail(output);
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "tools",
+                "tool=bash event=end ok=false exit=" + std::to_string(exit_code));
         return result;
     }
 
@@ -180,6 +196,15 @@ CommandResult RunCommand(const std::string& command, const std::string& cwd,
     if (result.output.empty()) {
         result.output = "(no output)";
     }
+    const auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count();
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "tools",
+            "tool=bash event=end ok=true exit=0 duration_ms=" +
+                    std::to_string(duration_ms) + " output_bytes=" +
+                    std::to_string(result.output.size()));
     return result;
 }
 

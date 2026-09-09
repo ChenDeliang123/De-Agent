@@ -262,6 +262,9 @@ P1 后，`backend.log` 可串联 WebGateway / AgentRuntime / DeepSeek 的
 请求生命周期：`event=chat_start → request_start → request_end → chat_end`，
 并记录耗时、session、reply 大小与 DeepSeek 错误/重试。
 
+P2 后，`tools` / `mcp` 模块还会记录 read/write/edit/bash 与
+MCP `tools/list` / `tools/call` 的执行时长、输出大小和退出状态。
+
 查看结构化日志：
 
 ```bash

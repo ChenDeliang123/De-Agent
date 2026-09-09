@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "aiagent/tools/run_command.hpp"
+#include "aiagent/log.hpp"
 
 namespace aiagent::tools {
 namespace {
@@ -176,6 +177,8 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             result.error = "read requires a path";
             return result;
         }
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
+                                     "tool=read path=" + path + " event=start");
         bool ok = false;
         std::string error;
         const std::string content = ReadFile(path, &ok, &error);
@@ -190,6 +193,10 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         }
         result.ok = true;
         result.text = text;
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "tools",
+                                     "tool=read path=" + path +
+                                             " event=end ok=true bytes=" +
+                                             std::to_string(text.size()));
         return result;
     }
 
@@ -201,6 +208,10 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             result.error = "write requires a path";
             return result;
         }
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
+                                     "tool=write path=" + path +
+                                             " event=start content_bytes=" +
+                                             std::to_string(content.size()));
         std::ofstream output(path, std::ios::binary | std::ios::trunc);
         if (!output) {
             result.error = "cannot open file for write: " + path;
@@ -214,6 +225,10 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         }
         result.ok = true;
         result.text = "wrote " + std::to_string(content.size()) + " bytes to " + path;
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "tools",
+                                     "tool=write path=" + path +
+                                             " event=end ok=true content_bytes=" +
+                                             std::to_string(content.size()));
         return result;
     }
 
@@ -226,6 +241,8 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             result.error = "edit requires path and non-empty oldText";
             return result;
         }
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
+                                     "tool=edit path=" + path + " event=start");
         bool ok = false;
         std::string error;
         const std::string content = ReadFile(path, &ok, &error);
@@ -253,6 +270,9 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         output.close();
         result.ok = true;
         result.text = "edited " + path;
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "tools",
+                                     "tool=edit path=" + path +
+                                             " event=end ok=true");
         return result;
     }
 
@@ -262,6 +282,9 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             result.error = "bash requires a command";
             return result;
         }
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
+                                     "tool=bash event=start command_bytes=" +
+                                             std::to_string(command.size()));
         long timeout = 60;
         if (arguments.contains("timeout") && arguments["timeout"].is_number_integer()) {
             timeout = arguments["timeout"].get<long>();

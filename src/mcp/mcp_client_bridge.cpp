@@ -1,4 +1,5 @@
 #include "aiagent/mcp/mcp_client_bridge.hpp"
+#include "aiagent/log.hpp"
 
 #include <json.hpp>
 
@@ -138,6 +139,10 @@ public:
         stdin_fd_ = child_stdin[1];
         stdout_fd_ = child_stdout[0];
         running_ = true;
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "mcp",
+                "event=server_start pid=" + std::to_string(pid_) +
+                        " binary=" + config_.binary);
 
         try {
             const nlohmann::json params = {
@@ -178,6 +183,8 @@ public:
                 pid_ = -1;
             }
         }
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "mcp", "event=server_stop");
         running_ = false;
         read_buffer_.clear();
         {
@@ -193,6 +200,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(tool_cache_mutex_);
             if (tools_cached_) {
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kDebug, "mcp",
+                        "event=tools_list cache_hit=true count=" +
+                                std::to_string(tool_cache_.size()));
                 return tool_cache_;
             }
         }
@@ -200,6 +211,9 @@ public:
         const nlohmann::json response = Call("tools/list", nlohmann::json::object());
         std::vector<llm::ToolSpec> tools;
         if (!response.contains("tools") || !response["tools"].is_array()) {
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "mcp",
+                    "event=tools_list cache_hit=false count=0");
             return tools;
         }
         for (const auto& item : response["tools"]) {
@@ -213,6 +227,10 @@ public:
                 tools.push_back(std::move(spec));
             }
         }
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "mcp",
+                "event=tools_list cache_hit=false count=" +
+                        std::to_string(tools.size()));
         {
             std::lock_guard<std::mutex> lock(tool_cache_mutex_);
             if (!tools_cached_) {
@@ -226,12 +244,18 @@ public:
     tools::ToolExecutionResult Execute(const std::string& name,
                                        const nlohmann::json& arguments,
                                        const std::string&) {
-        const nlohmann::json response = Call("tools/call",
-                                             {{"name", name}, {"arguments", arguments}});
+        const auto started = std::chrono::steady_clock::now();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kDebug, "mcp",
+                "event=tool_call_start name=" + name +
+                        " args_bytes=" + std::to_string(arguments.dump().size()));
+        const nlohmann::json response =
+                Call("tools/call", {{"name", name}, {"arguments", arguments}});
         tools::ToolExecutionResult result;
         if (response.contains("isError") && response["isError"] == true) {
             result.ok = false;
             result.error = ContentText(response);
+            LogToolCallEnd(name, started, false, result.error.size());
             return result;
         }
         result.ok = true;
@@ -239,11 +263,30 @@ public:
         if (result.text.empty()) {
             result.ok = false;
             result.error = "tool returned no text content";
+            LogToolCallEnd(name, started, false, result.error.size());
+        } else {
+            LogToolCallEnd(name, started, true, result.text.size());
         }
         return result;
     }
 
 private:
+    void LogToolCallEnd(const std::string& name,
+                        const std::chrono::steady_clock::time_point& started,
+                        bool ok, std::size_t output_bytes) {
+        const auto duration_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+        aiagent::DefaultLogger().Log(
+                ok ? aiagent::LogLevel::kInfo : aiagent::LogLevel::kWarning,
+                "mcp",
+                "event=tool_call_end name=" + name + " ok=" +
+                        (ok ? "true" : "false") +
+                        " duration_ms=" + std::to_string(duration_ms) +
+                        " output_bytes=" + std::to_string(output_bytes));
+    }
+
     // 缓冲式读取 MCP stdout 的一行（\n 结尾，去除 \r）。
     // 大块 read 进 read_buffer_ 后按行切分，避免旧实现每字节一次 poll+read
     // 造成上万次系统调用（大工具结果时尤其明显）。超时仍以整行读取为粒度。
