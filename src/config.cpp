@@ -21,6 +21,15 @@ std::string Trim(std::string value) {
     return value;
 }
 
+std::string Lower(std::string value) {
+    for (char& c : value) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return value;
+}
+
 bool SetSection(const std::string& line, std::string& section) {
     if (line.size() < 2 || line.front() != '[' || line.back() != ']') {
         return false;
@@ -236,6 +245,67 @@ std::optional<MCPConfig> LoadMCPConfigFile(const std::string& path, std::string*
     std::ostringstream content;
     content << input.rdbuf();
     return ParseMCPConfig(content.str(), error);
+}
+
+std::optional<LogConfig> ParseLogConfig(const std::string& content, std::string* error) {
+    LogConfig config;
+    bool in_logging = false;
+    bool saw_logging_section = false;
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_logging = (section == "logging");
+            saw_logging_section = saw_logging_section || in_logging;
+            continue;
+        }
+        if (!in_logging) {
+            continue;
+        }
+
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "level") {
+            config.level = value;
+        } else if (key == "file") {
+            config.file = value;
+        } else if (key == "console") {
+            config.console = Lower(value) == "true" || value == "1";
+        }
+    }
+
+    if (!saw_logging_section) {
+        if (error != nullptr) {
+            *error = "missing [logging] section; using defaults";
+        }
+        return config;
+    }
+    return config;
+}
+
+std::optional<LogConfig> LoadLogConfigFile(const std::string& path, std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseLogConfig(content.str(), error);
 }
 
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config) {

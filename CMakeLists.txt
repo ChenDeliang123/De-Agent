@@ -70,6 +70,15 @@ add_subdirectory("${AIAGENT_A2A_SOURCE_DIR}" a2a-protocol)
 # ---------------------------------------------------------------------------
 # 本项目核心库
 # ---------------------------------------------------------------------------
+add_library(aiagent_log STATIC src/log.cpp)
+target_include_directories(aiagent_log PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(MSVC)
+  target_compile_options(aiagent_log PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_log PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(aiagent_llm STATIC
   src/config.cpp
   src/llm/deepseek_client.cpp
@@ -135,7 +144,8 @@ endif()
 add_executable(aiagent_app src/main.cpp)
 target_include_directories(aiagent_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aiagent_app PRIVATE
-                      aiagent_agent aiagent_mcp aiagent_web aiagent_llm a2a::a2a)
+                      aiagent_agent aiagent_mcp aiagent_web aiagent_llm
+                      aiagent_log a2a::a2a)
 
 if(MSVC)
   target_compile_options(aiagent_app PRIVATE /W4 /permissive-)
@@ -154,6 +164,10 @@ if(AIAGENT_BUILD_TESTS)
                              ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(m0_smoke_test PRIVATE a2a::a2a)
   add_test(NAME aiagent_m0_smoke COMMAND m0_smoke_test)
+
+  add_executable(logging_test tests/logging_test.cpp)
+  target_link_libraries(logging_test PRIVATE aiagent_log aiagent_llm Threads::Threads)
+  add_test(NAME aiagent_logging COMMAND logging_test)
 
   add_executable(llm_client_test tests/llm_client_test.cpp)
   target_link_libraries(llm_client_test PRIVATE aiagent_llm Threads::Threads)

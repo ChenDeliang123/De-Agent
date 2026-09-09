@@ -25,6 +25,7 @@
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/log.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
@@ -47,6 +48,9 @@ struct AppOptions {
     std::string mcp_binary;
     std::string mcp_plugins;
     std::string mcp_python_path;
+    std::string log_file;
+    std::string log_level;
+    bool log_console = false;
 };
 
 AppOptions ParseOptions(int argc, char** argv) {
@@ -72,6 +76,16 @@ AppOptions ParseOptions(int argc, char** argv) {
     if (const char* value = std::getenv("AIAGENT_MCP_PYTHON_PATH")) {
         options.mcp_python_path = value;
     }
+    if (const char* value = std::getenv("AIAGENT_LOG_FILE")) {
+        options.log_file = value;
+    }
+    if (const char* value = std::getenv("AIAGENT_LOG_LEVEL")) {
+        options.log_level = value;
+    }
+    if (const char* value = std::getenv("AIAGENT_LOG_CONSOLE")) {
+        options.log_console = std::string(value) == "1" ||
+                              std::string(value) == "true";
+    }
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -89,6 +103,12 @@ AppOptions ParseOptions(int argc, char** argv) {
             options.mcp_plugins = argv[++i];
         } else if (arg == "--mcp-python-path" && i + 1 < argc) {
             options.mcp_python_path = argv[++i];
+        } else if (arg == "--log-file" && i + 1 < argc) {
+            options.log_file = argv[++i];
+        } else if (arg == "--log-level" && i + 1 < argc) {
+            options.log_level = argv[++i];
+        } else if (arg == "--log-console") {
+            options.log_console = true;
         } else {
             options.port = std::stoi(arg);
         }
@@ -165,6 +185,26 @@ int main(int argc, char** argv) {
             std::cerr << "配置错误: " << config_error << '\n';
             return 1;
         }
+
+        aiagent::LogConfig log_config;
+        std::string log_error;
+        const auto parsed_log = aiagent::LoadLogConfigFile(options.config_path, &log_error);
+        if (parsed_log.has_value()) {
+            log_config = *parsed_log;
+        }
+        if (!options.log_file.empty()) {
+            log_config.file = options.log_file;
+        }
+        if (!options.log_level.empty()) {
+            log_config.level = options.log_level;
+        }
+        if (options.log_console) {
+            log_config.console = true;
+        }
+        aiagent::ConfigureDefaultLogger(log_config.level, log_config.file,
+                                        log_config.console);
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "main",
+                                     "config loaded: " + options.config_path);
 
         const std::filesystem::path db_path(options.db_path);
         if (db_path.has_parent_path()) {
@@ -289,6 +329,10 @@ int main(int argc, char** argv) {
         std::cout << "Model: " << config->model << '\n';
         std::cout << "Task DB: " << options.db_path << '\n';
         std::cout << "Press Ctrl+C to stop.\n";
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "main",
+                "listening on " + std::to_string(options.port) + " / web " +
+                        std::to_string(options.web_port));
 
         while (!g_stop_requested) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -299,6 +343,8 @@ int main(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "aiagent_app failed: " << e.what() << '\n';
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kFatal, "main",
+                                     std::string("fatal: ") + e.what());
         return 1;
     }
 }

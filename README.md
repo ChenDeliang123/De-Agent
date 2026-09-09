@@ -246,6 +246,40 @@ curl -X POST http://127.0.0.1:18081/api/v1/chat \
   -d '{"message":"你好"}'
 ```
 
+## 日志
+
+日志基础设施位于 `include/aiagent/log.hpp` / `src/log.cpp`，零第三方依赖，
+支持文件与可选 stdout、线程安全与 trace/debug/info/warn/error/fatal 级别。
+
+`de` 启动后会分别写入：
+
+```text
+.runtime/backend.log          # 结构化 INFO/ERROR 日志
+.runtime/backend-console.log  # 后端 stdout/stderr 原始输出
+```
+
+查看结构化日志：
+
+```bash
+de logs
+```
+
+配置：
+
+```ini
+[logging]
+level = info
+file = .runtime/backend.log
+console = false
+```
+
+也可用环境变量或参数覆盖：
+
+```bash
+AIAGENT_LOG_LEVEL=debug de
+de --log-level debug --log-file /tmp/debug.log
+```
+
 ## A2A
 
 Agent 通过 A2A v1.0 JSON-RPC 暴露能力：

@@ -16,12 +16,15 @@ ROOT_DIR="$(cd -P "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
 RUNTIME_DIR="${AIAGENT_RUNTIME_DIR:-${ROOT_DIR}/.runtime}"
 PID_FILE="${RUNTIME_DIR}/backend.pid"
 LOG_FILE="${RUNTIME_DIR}/backend.log"
+CONSOLE_LOG_FILE="${RUNTIME_DIR}/backend-console.log"
 
 A2A_PORT="${AIAGENT_PORT:-18080}"
 WEB_PORT="${AIAGENT_WEB_PORT:-18081}"
 CONFIG_FILE="${AIAGENT_CONFIG:-${ROOT_DIR}/conf/conf.ini}"
 DB_PATH="${AIAGENT_DB:-${ROOT_DIR}/build/db/aiagent_tasks.db}"
 BACKEND_BIN="${ROOT_DIR}/build/aiagent_app"
+LOG_LEVEL=""
+LOG_FILE_ARG=""
 
 ACTION="cli"
 NO_BACKEND=0
@@ -45,6 +48,8 @@ options:
   --web-port N     Web Gateway port (default 18081)
   --config FILE    DeepSeek config file
   --db FILE        SQLite database path
+  --log-level N    backend log level (trace/debug/info/warn/error/fatal)
+  --log-file FILE  backend structured log path
   --               pass remaining arguments to cli.mjs
 
 environment:
@@ -125,15 +130,23 @@ start_backend() {
   fi
 
   rm -f "${PID_FILE}"
-  echo "starting backend daemon (log: ${LOG_FILE})..."
+  echo "starting backend daemon (console log: ${CONSOLE_LOG_FILE})..."
+  local backend_args=(
+    "${BACKEND_BIN}"
+    --config "${CONFIG_FILE}"
+    --db "${DB_PATH}"
+    --port "${A2A_PORT}"
+    --web-port "${WEB_PORT}"
+  )
+  if [ -n "${LOG_LEVEL}" ]; then
+    backend_args+=(--log-level "${LOG_LEVEL}")
+  fi
+  if [ -n "${LOG_FILE_ARG}" ]; then
+    backend_args+=(--log-file "${LOG_FILE_ARG}")
+  fi
   (
     cd "${ROOT_DIR}"
-    nohup "${BACKEND_BIN}" \
-      --config "${CONFIG_FILE}" \
-      --db "${DB_PATH}" \
-      --port "${A2A_PORT}" \
-      --web-port "${WEB_PORT}" \
-      >>"${LOG_FILE}" 2>&1 &
+    nohup "${backend_args[@]}" >>"${CONSOLE_LOG_FILE}" 2>&1 &
     echo $! >"${PID_FILE}"
   )
 
@@ -148,7 +161,9 @@ start_backend() {
     sleep 0.5
   done
 
-  echo "backend failed to become healthy; last log:" >&2
+  echo "backend failed to become healthy; last console log:" >&2
+  tail -n 20 "${CONSOLE_LOG_FILE}" >&2 || true
+  echo "structured backend log:" >&2
   tail -n 20 "${LOG_FILE}" >&2 || true
   return 1
 }
@@ -193,6 +208,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --db)
       DB_PATH="$2"
+      shift 2
+      ;;
+    --log-level)
+      LOG_LEVEL="$2"
+      shift 2
+      ;;
+    --log-file)
+      LOG_FILE_ARG="$2"
       shift 2
       ;;
     --)

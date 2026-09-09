@@ -13,3 +13,8 @@ plugins = /absolute/path/to/mcp_server/plugins
 python_path = python3
 transport = stdio
 request_timeout_seconds = 60
+
+[logging]
+level = info
+file = .runtime/backend.log
+console = false
