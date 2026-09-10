@@ -218,9 +218,17 @@ int main(int argc, char** argv) {
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         const std::string coding_system_prompt =
                 "You are a terminal coding agent implemented in C++. You help the user by "
-                "reading, editing, and writing files and running bash commands. Use the read "
-                "tool to inspect files before editing them. After making changes, summarize "
-                "what you did concisely.";
+                "reading, editing, and writing files and running bash commands.\n"
+                "Available tools: read, write, edit, bash.\n"
+                "Rules:\n"
+                "- When the user asks to create or modify code/files, use write or edit in "
+                "the SAME turn. Do NOT stop after presenting a plan.\n"
+                "- If the task is large, work step by step, but do not finish until the "
+                "requested files have actually been created or modified.\n"
+                "- Do not end with 'If you want, I can...' after only planning.\n"
+                "- Use read before editing when you need file contents, and use bash to "
+                "verify when useful.\n"
+                "- After making changes, summarize which files were created or modified.";
         aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
         // 会话最新历史内存缓存：避免每次请求 ListAll() 全表扫描（长会话 O(n²)）。
         aiagent::agent::HistoryCache history_cache;
