@@ -94,6 +94,7 @@ endif()
 
 add_library(aiagent_agent STATIC
   src/agent/agent_runtime.cpp
+  src/agent/compaction.cpp
   src/agent/history_cache.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
@@ -181,6 +182,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(history_cache_test tests/history_cache_test.cpp)
   target_link_libraries(history_cache_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_history_cache COMMAND history_cache_test)
+
+  add_executable(compaction_test tests/compaction_test.cpp)
+  target_link_libraries(compaction_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_compaction COMMAND compaction_test)
 
   add_executable(local_tools_test tests/local_tools_test.cpp)
   target_link_libraries(local_tools_test PRIVATE aiagent_agent)

@@ -60,6 +60,8 @@ struct StreamChunk {
     std::string reasoning_content;
     std::vector<ToolCall> tool_calls;
     std::string finish_reason;
+    // 仅在请求开启 stream_options.include_usage 时，最后一帧携带。
+    ChatUsage usage;
 };
 
 // ChatStream 对外回调中使用的高层事件。
@@ -69,6 +71,8 @@ struct StreamEvent {
     std::string reasoning_content;
     std::string finish_reason;
     std::vector<ToolCall> tool_calls;
+    // 仅在开启 include_usage 时，流结束时由 usage 帧填充。
+    ChatUsage usage;
 };
 
 class DeepSeekException : public std::runtime_error {

@@ -32,6 +32,14 @@ struct LogConfig {
     int max_files = 5;
 };
 
+// 上下文压缩配置。语义见 agent/compaction.hpp 的 CompactionSettings。
+struct CompactionConfig {
+    bool enabled = true;
+    int context_window = 64000;
+    int reserve_tokens = 16384;
+    int keep_recent_tokens = 20000;
+};
+
 // 解析 INI 文本中的 [deepseek] 段。api_key 缺失或为占位值时，
 // 若环境变量 DEEPSEEK_API_KEY 存在则回退使用。
 std::optional<DeepSeekConfig> ParseDeepSeekConfig(const std::string& content,
@@ -53,6 +61,13 @@ std::optional<LogConfig> ParseLogConfig(const std::string& content,
 
 std::optional<LogConfig> LoadLogConfigFile(const std::string& path,
                                            std::string* error = nullptr);
+
+// 解析 INI 文本中的 [compaction] 段；没有该段时返回默认值。
+std::optional<CompactionConfig> ParseCompactionConfig(const std::string& content,
+                                                      std::string* error = nullptr);
+
+std::optional<CompactionConfig> LoadCompactionConfigFile(const std::string& path,
+                                                         std::string* error = nullptr);
 
 // 返回实际请求地址：base_url 已带 /chat/completions 时原样使用，否则补全。
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config);

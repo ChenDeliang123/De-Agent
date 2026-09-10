@@ -131,6 +131,10 @@ std::string BuildChatRequestBody(const std::string& model,
         {"model", model},
         {"stream", stream},
     };
+    if (stream) {
+        // 让流式响应的最后一帧带上 usage，供 Agent 做上下文计量。
+        body["stream_options"] = {{"include_usage", true}};
+    }
 
     nlohmann::json message_array = nlohmann::json::array();
     for (const ChatMessage& message : messages) {
@@ -192,6 +196,12 @@ StreamChunk ParseStreamChunk(const std::string& data) {
 
     StreamChunk chunk;
     chunk.id = JsonString(root, "id");
+    // include_usage 的 usage 帧通常 choices 为空，需独立于 choices 解析。
+    if (root.contains("usage") && root["usage"].is_object()) {
+        chunk.usage.prompt_tokens = JsonInt(root["usage"], "prompt_tokens");
+        chunk.usage.completion_tokens = JsonInt(root["usage"], "completion_tokens");
+        chunk.usage.total_tokens = JsonInt(root["usage"], "total_tokens");
+    }
     if (root.contains("choices") && root["choices"].is_array() &&
         !root["choices"].empty()) {
         const auto& choice = root["choices"].front();
@@ -347,12 +357,14 @@ void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
                 try {
                     const StreamChunk chunk = ParseStreamChunk(data);
                     if (!chunk.role.empty() || !chunk.content.empty() ||
-                        !chunk.reasoning_content.empty() || !chunk.finish_reason.empty()) {
+                        !chunk.reasoning_content.empty() || !chunk.finish_reason.empty() ||
+                        chunk.usage.total_tokens > 0) {
                         StreamEvent event;
                         event.role = chunk.role;
                         event.content = chunk.content;
                         event.reasoning_content = chunk.reasoning_content;
                         event.finish_reason = chunk.finish_reason;
+                        event.usage = chunk.usage;
                         delivered_any = true;
                         if (on_event) {
                             on_event(event);

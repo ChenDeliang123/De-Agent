@@ -102,6 +102,16 @@ void TestRequestBody() {
     Expect(root["tools"][0]["function"]["name"] == "get_weather",
            "tools should be serialized");
     Expect(root["tool_choice"] == "auto", "tool_choice should be serialized");
+
+    // 流式请求应开启 include_usage，并在非流式请求中不出现该字段。
+    const std::string stream_body = BuildChatRequestBody(
+            "deepseek-v4-flash", {system, user}, {}, /*stream=*/true, std::nullopt);
+    const auto stream_root = nlohmann::json::parse(stream_body);
+    Expect(stream_root["stream"] == true, "stream request should set stream=true");
+    Expect(stream_root["stream_options"]["include_usage"] == true,
+           "stream request should enable include_usage");
+    Expect(!root.contains("stream_options"),
+           "non-stream request should not send stream_options");
 }
 
 void TestResponseParsing() {
@@ -196,6 +206,24 @@ void TestResponseParsing() {
 
     Expect(DeepSeekErrorMessage(R"({"error":{"message":"bad request"}})") == "bad request",
            "error message should be extracted");
+
+    // include_usage 的 usage 帧：choices 为空数组，usage 在顶层。
+    const std::string usage_frame = R"JSON({
+  "id": "chatcmpl-usage",
+  "choices": [],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 30,
+    "total_tokens": 150
+  }
+})JSON";
+    const StreamChunk usage_chunk = ParseStreamChunk(usage_frame);
+    Expect(usage_chunk.usage.prompt_tokens == 120,
+           "stream usage prompt_tokens should be parsed");
+    Expect(usage_chunk.usage.completion_tokens == 30,
+           "stream usage completion_tokens should be parsed");
+    Expect(usage_chunk.usage.total_tokens == 150,
+           "stream usage total_tokens should be parsed");
 }
 
 // 起一个本地 HTTP server，POST /chat/completions 返回 status（handler 决定），

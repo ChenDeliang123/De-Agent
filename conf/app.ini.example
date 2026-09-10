@@ -20,3 +20,12 @@ file = .runtime/backend.log
 console = false
 max_size_bytes = 10485760
 max_files = 5
+
+[compaction]
+; 上下文压缩：当请求 token 超过 context_window - reserve_tokens 时，
+; 把较早的消息压缩成结构化摘要，只保留最近 keep_recent_tokens。
+; context_window 请按实际模型填写（如 deepseek 128k 可填 128000）。
+enabled = true
+context_window = 64000
+reserve_tokens = 16384
+keep_recent_tokens = 20000

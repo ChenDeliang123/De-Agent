@@ -327,6 +327,105 @@ std::optional<LogConfig> LoadLogConfigFile(const std::string& path, std::string*
     return ParseLogConfig(content.str(), error);
 }
 
+std::optional<CompactionConfig> ParseCompactionConfig(const std::string& content,
+                                                      std::string* error) {
+    CompactionConfig config;
+    bool in_compaction = false;
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_compaction = (section == "compaction");
+            continue;
+        }
+        if (!in_compaction) {
+            continue;
+        }
+
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "enabled") {
+            config.enabled = Lower(value) == "true" || value == "1";
+        } else if (key == "context_window") {
+            try {
+                const int parsed = std::stoi(value);
+                if (parsed <= 0) {
+                    if (error != nullptr) {
+                        *error = "context_window must be positive";
+                    }
+                    return std::nullopt;
+                }
+                config.context_window = parsed;
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid context_window: " + value;
+                }
+                return std::nullopt;
+            }
+        } else if (key == "reserve_tokens") {
+            try {
+                const int parsed = std::stoi(value);
+                if (parsed < 0) {
+                    if (error != nullptr) {
+                        *error = "reserve_tokens must be non-negative";
+                    }
+                    return std::nullopt;
+                }
+                config.reserve_tokens = parsed;
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid reserve_tokens: " + value;
+                }
+                return std::nullopt;
+            }
+        } else if (key == "keep_recent_tokens") {
+            try {
+                const int parsed = std::stoi(value);
+                if (parsed < 0) {
+                    if (error != nullptr) {
+                        *error = "keep_recent_tokens must be non-negative";
+                    }
+                    return std::nullopt;
+                }
+                config.keep_recent_tokens = parsed;
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid keep_recent_tokens: " + value;
+                }
+                return std::nullopt;
+            }
+        }
+    }
+
+    return config;
+}
+
+std::optional<CompactionConfig> LoadCompactionConfigFile(const std::string& path,
+                                                         std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseCompactionConfig(content.str(), error);
+}
+
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config) {
     constexpr const char* kSuffix = "/chat/completions";
     if (config.base_url.size() >= 18 &&
