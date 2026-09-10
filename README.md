@@ -325,6 +325,10 @@ keep_recent_tokens = 20000
 - `context_window` 请按实际模型填写（如 DeepSeek 128k 模型可填 `128000`）。
 - 流式请求会自动开启 `stream_options.include_usage`，用真实 usage 计量；
   拿不到 usage 时退回按字节估算。
+- 若模型返回上下文超长错误或 `finish_reason=length`，会强制压缩并
+  **重试一次**；重试仍失败则向上报错（不会无限重试）。
+- 摘要会附加 `<read-files>` / `<modified-files>` 清单，压缩后仍能记住
+  动过哪些文件，并在后续压缩中累积。
 - 压缩只作用于「本次请求构造的消息窗口」，SQLite 中仍保留完整历史，
   便于回溯。
 

@@ -67,11 +67,13 @@ private:
 
     // 模型调用前的阈值压缩。命中阈值时把较早的消息摘要成一条 user 消息，
     // 并重置 usage 跟踪；同一批消息（size 未变）不重复压缩。
-    void MaybeCompactBeforeCall(std::vector<llm::ChatMessage>& chat_messages,
+    // force=true 时跳过阈值判断与去重（用于 overflow 恢复），返回是否真的压缩了。
+    bool MaybeCompactBeforeCall(std::vector<llm::ChatMessage>& chat_messages,
                                 int& last_usage_tokens,
                                 std::size_t& last_usage_message_count,
                                 std::size_t& last_compacted_size,
-                                const std::string& run_id);
+                                const std::string& run_id,
+                                bool force = false);
 
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;

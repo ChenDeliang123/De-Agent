@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,27 @@ std::string SerializeConversation(const std::vector<llm::ChatMessage>& messages)
 // 调用模型生成结构化摘要（不带工具）。失败抛 std::runtime_error。
 std::string GenerateSummary(llm::IModelClient& model,
                             const std::vector<llm::ChatMessage>& to_summarize);
+
+// 检测 DeepSeek 返回的错误信息是否为上下文超长。
+bool IsContextOverflowMessage(const std::string& message);
+
+// 检测 finish_reason 是否为可恢复的长度截断。
+bool IsRecoverableLengthStop(const std::string& finish_reason);
+
+// 从 tool_calls（read/write/edit 的 path 参数）以及摘要消息中已有的
+// <read-files>/<modified-files> 标记里提取文件操作，便于压缩后仍记得
+// 动过哪些文件；再次压缩时可累积传递。
+struct FileOperations {
+    std::set<std::string> read;
+    std::set<std::string> written;
+    std::set<std::string> edited;
+};
+
+FileOperations ExtractFileOperations(const std::vector<llm::ChatMessage>& messages);
+
+// 把文件操作格式化为 <read-files>/<modified-files> 文本（无内容时返回空串）。
+// read-files 会排除已被修改的文件。
+std::string FormatFileOperations(const FileOperations& operations);
 
 // 压缩结果。compacted=false 时 messages 为空，调用方保持原消息列表。
 struct CompactionOutcome {

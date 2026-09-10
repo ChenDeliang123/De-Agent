@@ -1,5 +1,7 @@
 #include "aiagent/agent/compaction.hpp"
 
+#include <cctype>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -30,6 +32,44 @@ std::string TruncateForSummary(const std::string& text, std::size_t max_chars) {
     const std::size_t dropped = text.size() - max_chars;
     return text.substr(0, max_chars) + "\n[... " + std::to_string(dropped) +
            " more characters truncated]";
+}
+
+std::string TrimAscii(const std::string& value) {
+    std::size_t begin = 0;
+    std::size_t end = value.size();
+    while (begin < end &&
+           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+// 从 content 中提取 <tag>...</tag> 内的逐行文件名，用于累积历史摘要中的清单。
+void ExtractTaggedFiles(const std::string& content, const std::string& tag,
+                        std::set<std::string>& out) {
+    const std::string open = "<" + tag + ">";
+    const std::string close = "</" + tag + ">";
+    std::size_t pos = 0;
+    while ((pos = content.find(open, pos)) != std::string::npos) {
+        const std::size_t start = pos + open.size();
+        const std::size_t end = content.find(close, start);
+        if (end == std::string::npos) {
+            break;
+        }
+        std::istringstream input(content.substr(start, end - start));
+        std::string line;
+        while (std::getline(input, line)) {
+            const std::string trimmed = TrimAscii(line);
+            if (!trimmed.empty()) {
+                out.insert(trimmed);
+            }
+        }
+        pos = end + close.size();
+    }
 }
 
 constexpr const char* kSummarizationSystemPrompt =
@@ -112,6 +152,107 @@ bool ShouldCompact(int context_tokens, const CompactionSettings& settings) {
         return false;
     }
     return context_tokens > settings.context_window - settings.reserve_tokens;
+}
+
+bool IsContextOverflowMessage(const std::string& message) {
+    std::string lower;
+    lower.reserve(message.size());
+    for (const char c : message) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    static const char* const kPatterns[] = {
+            "maximum context length",
+            "context length",
+            "context_length_exceeded",
+            "maximum number of tokens",
+            "too many tokens",
+            "reduce the length",
+            "exceeds the maximum",
+            "token limit",
+    };
+    for (const char* pattern : kPatterns) {
+        if (lower.find(pattern) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsRecoverableLengthStop(const std::string& finish_reason) {
+    return finish_reason == "length";
+}
+
+FileOperations ExtractFileOperations(const std::vector<llm::ChatMessage>& messages) {
+    FileOperations operations;
+    for (const auto& message : messages) {
+        if (message.role == "assistant") {
+            for (const auto& call : message.tool_calls) {
+                std::string path;
+                try {
+                    if (!call.arguments.empty()) {
+                        const auto arguments = nlohmann::json::parse(call.arguments);
+                        if (arguments.is_object() && arguments.contains("path") &&
+                            arguments["path"].is_string()) {
+                            path = arguments["path"].get<std::string>();
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // 参数不是合法 JSON 时跳过。
+                }
+                if (path.empty()) {
+                    continue;
+                }
+                if (call.name == "read") {
+                    operations.read.insert(path);
+                } else if (call.name == "write") {
+                    operations.written.insert(path);
+                } else if (call.name == "edit") {
+                    operations.edited.insert(path);
+                }
+            }
+        }
+        // 累积此前摘要中已记录的文件清单。
+        ExtractTaggedFiles(message.content, "read-files", operations.read);
+        ExtractTaggedFiles(message.content, "modified-files", operations.edited);
+    }
+    return operations;
+}
+
+std::string FormatFileOperations(const FileOperations& operations) {
+    std::set<std::string> modified = operations.written;
+    modified.insert(operations.edited.begin(), operations.edited.end());
+
+    std::vector<std::string> read_only;
+    for (const auto& file : operations.read) {
+        if (modified.find(file) == modified.end()) {
+            read_only.push_back(file);
+        }
+    }
+
+    std::string out;
+    if (!read_only.empty()) {
+        out += "<read-files>\n";
+        for (const auto& file : read_only) {
+            out += file;
+            out += "\n";
+        }
+        out += "</read-files>\n";
+    }
+    if (!modified.empty()) {
+        if (!out.empty()) {
+            out += "\n";
+        }
+        out += "<modified-files>\n";
+        for (const auto& file : modified) {
+            out += file;
+            out += "\n";
+        }
+        out += "</modified-files>\n";
+    }
+    if (out.empty()) {
+        return {};
+    }
+    return "\n\n" + out;
 }
 
 const char* const kCompactionSummaryMarker =
@@ -261,8 +402,10 @@ CompactionOutcome CompactMessages(llm::IModelClient& model,
 
     llm::ChatMessage summary_message;
     summary_message.role = "user";
+    std::string summary_text = GenerateSummary(model, to_summarize);
+    summary_text += FormatFileOperations(ExtractFileOperations(to_summarize));
     summary_message.content =
-            std::string(kCompactionSummaryMarker) + "\n\n" + GenerateSummary(model, to_summarize);
+            std::string(kCompactionSummaryMarker) + "\n\n" + summary_text;
     compacted.push_back(std::move(summary_message));
 
     for (std::size_t i = cut.first_kept_index; i < messages.size(); ++i) {

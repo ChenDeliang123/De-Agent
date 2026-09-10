@@ -52,23 +52,26 @@ void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
     compaction_settings_ = settings;
 }
 
-void AgentRuntime::MaybeCompactBeforeCall(
+bool AgentRuntime::MaybeCompactBeforeCall(
         std::vector<llm::ChatMessage>& chat_messages,
         int& last_usage_tokens,
         std::size_t& last_usage_message_count,
         std::size_t& last_compacted_size,
-        const std::string& run_id) {
-    if (!compaction_settings_.enabled) {
-        return;
-    }
-    const ContextUsageEstimate estimate = EstimateContextTokens(
-            chat_messages, last_usage_tokens, last_usage_message_count);
-    if (!ShouldCompact(estimate.tokens, compaction_settings_)) {
-        return;
-    }
-    // 同一批消息不重复压缩，避免压缩后仍超阈值时反复调用摘要模型。
-    if (chat_messages.size() == last_compacted_size) {
-        return;
+        const std::string& run_id,
+        bool force) {
+    if (!force) {
+        if (!compaction_settings_.enabled) {
+            return false;
+        }
+        const ContextUsageEstimate estimate = EstimateContextTokens(
+                chat_messages, last_usage_tokens, last_usage_message_count);
+        if (!ShouldCompact(estimate.tokens, compaction_settings_)) {
+            return false;
+        }
+        // 同一批消息不重复压缩，避免压缩后仍超阈值时反复调用摘要模型。
+        if (chat_messages.size() == last_compacted_size) {
+            return false;
+        }
     }
     try {
         CompactionOutcome outcome =
@@ -76,25 +79,29 @@ void AgentRuntime::MaybeCompactBeforeCall(
         if (!outcome.compacted) {
             // 无法找到安全切点时标记已尝试，避免每轮重复计算。
             last_compacted_size = chat_messages.size();
-            return;
+            return false;
         }
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "agent_runtime",
-                "run=" + run_id + " event=compaction tokens_before=" +
-                        std::to_string(outcome.tokens_before) + " tokens_after=" +
-                        std::to_string(outcome.tokens_after) + " messages_before=" +
-                        std::to_string(chat_messages.size()) + " messages_after=" +
+                "run=" + run_id + " event=compaction" +
+                        (force ? std::string(" reason=overflow") : std::string()) +
+                        " tokens_before=" + std::to_string(outcome.tokens_before) +
+                        " tokens_after=" + std::to_string(outcome.tokens_after) +
+                        " messages_before=" + std::to_string(chat_messages.size()) +
+                        " messages_after=" +
                         std::to_string(outcome.messages.size()));
         chat_messages = std::move(outcome.messages);
         last_usage_tokens = 0;
         last_usage_message_count = 0;
         last_compacted_size = chat_messages.size();
+        return true;
     } catch (const std::exception& e) {
         // 摘要失败不影响主流程：保持原消息，记录日志。
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kWarning, "agent_runtime",
                 "run=" + run_id + " event=compaction_failed message=" + e.what());
         last_compacted_size = chat_messages.size();
+        return false;
     }
 }
 
@@ -142,6 +149,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     int last_usage_tokens = 0;
     std::size_t last_usage_message_count = 0;
     std::size_t last_compacted_size = static_cast<std::size_t>(-1);
+    bool overflow_retry_used = false;
     llm::ChatResult result;
     for (int round = 0;; ++round) {
         if (max_tool_rounds_ > 0 && round >= max_tool_rounds_) {
@@ -152,13 +160,36 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
                                last_usage_message_count, last_compacted_size, run_id);
         const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         const std::size_t messages_at_call = chat_messages.size();
-        result = model_->Chat(chat_messages, tool_specs);
+        try {
+            result = model_->Chat(chat_messages, tool_specs);
+        } catch (const llm::DeepSeekException& e) {
+            // 上下文超长：强制压缩后重试本回合一次。
+            if (!overflow_retry_used && IsContextOverflowMessage(e.what()) &&
+                MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
+                                       last_usage_message_count, last_compacted_size,
+                                       run_id, /*force=*/true)) {
+                overflow_retry_used = true;
+                --round;
+                continue;
+            }
+            throw;
+        }
         if (result.choices.empty()) {
             throw std::runtime_error("model returned no choices");
         }
         const bool has_usage = result.usage.total_tokens > 0;
 
         const auto& choice = result.choices.front();
+        // 长度截断：压缩后重试一次，丢弃这次的半截结果。
+        if (!overflow_retry_used && choice.tool_calls.empty() &&
+            IsRecoverableLengthStop(choice.finish_reason) &&
+            MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
+                                   last_usage_message_count, last_compacted_size,
+                                   run_id, /*force=*/true)) {
+            overflow_retry_used = true;
+            --round;
+            continue;
+        }
         if (choice.tool_calls.empty()) {
             if (has_usage) {
                 last_usage_tokens = result.usage.total_tokens;
@@ -306,6 +337,7 @@ std::string AgentRuntime::RunStreaming(
     int last_usage_tokens = 0;
     std::size_t last_usage_message_count = 0;
     std::size_t last_compacted_size = static_cast<std::size_t>(-1);
+    bool overflow_retry_used = false;
     for (int round = 0;; ++round) {
         if (should_cancel && should_cancel()) {
             throw std::runtime_error("task interrupted");
@@ -319,30 +351,60 @@ std::string AgentRuntime::RunStreaming(
         const std::vector<llm::ToolSpec> tool_specs =
                 tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         std::vector<llm::ToolCall> streamed_tool_calls;
+        std::string round_reply;
+        std::string finish_reason;
         const std::size_t messages_at_call = chat_messages.size();
         int stream_usage_tokens = 0;
 
-        model_->ChatStream(
-                chat_messages,
-                tool_specs,
-                [&](const llm::StreamEvent& event) {
-                    if (event.usage.total_tokens > 0) {
-                        stream_usage_tokens = event.usage.total_tokens;
-                    }
-                    if (!event.content.empty()) {
-                        reply += event.content;
-                        if (on_event) {
-                            AgentEvent agent_event;
-                            agent_event.kind = AgentEventKind::kToken;
-                            agent_event.content = event.content;
-                            on_event(agent_event);
+        try {
+            model_->ChatStream(
+                    chat_messages,
+                    tool_specs,
+                    [&](const llm::StreamEvent& event) {
+                        if (event.usage.total_tokens > 0) {
+                            stream_usage_tokens = event.usage.total_tokens;
                         }
-                    }
-                    if (!event.tool_calls.empty()) {
-                        streamed_tool_calls = event.tool_calls;
-                    }
-                });
+                        if (!event.content.empty()) {
+                            round_reply += event.content;
+                            if (on_event) {
+                                AgentEvent agent_event;
+                                agent_event.kind = AgentEventKind::kToken;
+                                agent_event.content = event.content;
+                                on_event(agent_event);
+                            }
+                        }
+                        if (!event.finish_reason.empty()) {
+                            finish_reason = event.finish_reason;
+                        }
+                        if (!event.tool_calls.empty()) {
+                            streamed_tool_calls = event.tool_calls;
+                        }
+                    });
+        } catch (const llm::DeepSeekException& e) {
+            // 上下文超长：强制压缩后重试本回合一次（丢弃已生成内容）。
+            if (!overflow_retry_used && IsContextOverflowMessage(e.what()) &&
+                MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
+                                       last_usage_message_count, last_compacted_size,
+                                       run_id, /*force=*/true)) {
+                overflow_retry_used = true;
+                --round;
+                continue;
+            }
+            throw;
+        }
 
+        // 长度截断：压缩后重试一次，丢弃本轮半截输出。
+        if (!overflow_retry_used && streamed_tool_calls.empty() &&
+            IsRecoverableLengthStop(finish_reason) &&
+            MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
+                                   last_usage_message_count, last_compacted_size,
+                                   run_id, /*force=*/true)) {
+            overflow_retry_used = true;
+            --round;
+            continue;
+        }
+
+        reply += round_reply;
         const bool has_usage = stream_usage_tokens > 0;
         if (streamed_tool_calls.empty()) {
             if (has_usage) {

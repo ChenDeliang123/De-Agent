@@ -1,6 +1,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -194,6 +195,161 @@ public:
     }
 };
 
+// 第一次流式调用抛出“上下文超长”，压缩后重试成功。
+class OverflowOnceModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+    int summary_calls = 0;
+    bool saw_summary_marker = false;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\noverflow summary";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>& messages,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++stream_calls;
+        for (const auto& message : messages) {
+            if (message.content.find(aiagent::agent::kCompactionSummaryMarker) !=
+                std::string::npos) {
+                saw_summary_marker = true;
+            }
+        }
+        if (stream_calls == 1) {
+            throw aiagent::llm::DeepSeekException(
+                    400, "This model's maximum context length is 8192 tokens");
+        }
+        aiagent::llm::StreamEvent event;
+        event.content = "recovered";
+        event.finish_reason = "stop";
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
+// 第一次流式调用以 length 截断结束（带半截输出），压缩后重试成功。
+class LengthOnceModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+    int summary_calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\nlength summary";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++stream_calls;
+        aiagent::llm::StreamEvent event;
+        if (stream_calls == 1) {
+            event.content = "partial answer";
+            event.finish_reason = "length";
+        } else {
+            event.content = "final answer";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
+// 持续抛出上下文超长：只允许压缩重试一次，之后向上抛错。
+class AlwaysOverflowModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+    int summary_calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\noverflow summary";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>&) override {
+        ++stream_calls;
+        throw aiagent::llm::DeepSeekException(400,
+                                              "maximum context length exceeded");
+    }
+};
+
+// 同步路径：第一次主调用抛超长，摘要调用靠 system 提示词区分，之后成功。
+class SyncOverflowOnceModel final : public aiagent::llm::IModelClient {
+public:
+    int chat_calls = 0;
+    int summary_calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>& messages,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        if (!messages.empty() &&
+            messages.front().content.find("summarization assistant") !=
+                    std::string::npos) {
+            ++summary_calls;
+            aiagent::llm::ChatResult summary;
+            aiagent::llm::ChatChoice summary_choice;
+            summary_choice.role = "assistant";
+            summary_choice.content = "## Goal\nsync summary";
+            summary.choices.push_back(std::move(summary_choice));
+            return summary;
+        }
+        ++chat_calls;
+        if (chat_calls == 1) {
+            throw aiagent::llm::DeepSeekException(
+                    400, "This model's maximum context length is 8192 tokens");
+        }
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "sync-recovered";
+        choice.finish_reason = "stop";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>&) override {
+        throw std::runtime_error("SyncOverflowOnceModel::ChatStream should not be called");
+    }
+};
+
 // 前 3 轮请求工具（附带近似真实 usage），之后返回最终答案；
 // 摘要调用（无 tools 的 Chat）返回固定摘要。
 class CompactionFakeModel final : public aiagent::llm::IModelClient {
@@ -299,6 +455,17 @@ std::vector<a2a::models::Message> HistoryByContext(
             latest_history_size = task.history.size();
         }
     }
+    return history;
+}
+
+std::vector<a2a::models::Message> MultiTurnHistory() {
+    std::vector<a2a::models::Message> history;
+    history.push_back(a2a::models::MakeTextMessage(
+            a2a::models::Role::kUser, "first request", "text/plain"));
+    history.push_back(a2a::models::MakeTextMessage(
+            a2a::models::Role::kAgent, "first answer", "text/plain"));
+    history.push_back(a2a::models::MakeTextMessage(
+            a2a::models::Role::kUser, "second request", "text/plain"));
     return history;
 }
 
@@ -451,6 +618,117 @@ int main() {
                "compaction should not create extra model turns");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime compaction test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<OverflowOnceModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 1000000;
+        settings.reserve_tokens = 1000;
+        settings.keep_recent_tokens = 1;
+        runtime.SetCompactionSettings(settings);
+
+        auto history = MultiTurnHistory();
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "latest question", "text/plain");
+        history.push_back(user);
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, history, "ctx-overflow", nullptr);
+        Expect(reply == "recovered",
+               "context overflow should be recovered after compaction");
+        Expect(model->stream_calls == 2, "overflow recovery should retry once");
+        Expect(model->summary_calls == 1, "overflow recovery should compact once");
+        Expect(model->saw_summary_marker,
+               "overflow retry should see the injected summary");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime overflow recovery test failed: " << e.what()
+                  << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<LengthOnceModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 1000000;
+        settings.reserve_tokens = 1000;
+        settings.keep_recent_tokens = 1;
+        runtime.SetCompactionSettings(settings);
+
+        auto history = MultiTurnHistory();
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "latest question", "text/plain");
+        history.push_back(user);
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, history, "ctx-length", nullptr);
+        Expect(reply == "final answer",
+               "length-stop recovery should discard the partial output");
+        Expect(model->stream_calls == 2, "length recovery should retry once");
+        Expect(model->summary_calls == 1, "length recovery should compact once");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime length recovery test failed: " << e.what()
+                  << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<AlwaysOverflowModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 1000000;
+        settings.reserve_tokens = 1000;
+        settings.keep_recent_tokens = 1;
+        runtime.SetCompactionSettings(settings);
+
+        auto history = MultiTurnHistory();
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "latest question", "text/plain");
+        history.push_back(user);
+        bool threw = false;
+        try {
+            runtime.HandleMessageStreaming(user, history, "ctx-overflow-twice", nullptr);
+        } catch (const aiagent::llm::DeepSeekException&) {
+            threw = true;
+        }
+        Expect(threw, "persistent overflow should surface an error");
+        Expect(model->stream_calls == 2,
+               "overflow recovery should only retry once");
+        Expect(model->summary_calls == 1,
+               "overflow recovery should only compact once");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime overflow limit test failed: " << e.what()
+                  << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<SyncOverflowOnceModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 1000000;
+        settings.reserve_tokens = 1000;
+        settings.keep_recent_tokens = 1;
+        runtime.SetCompactionSettings(settings);
+
+        auto history = MultiTurnHistory();
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "latest question", "text/plain");
+        history.push_back(user);
+        const auto response =
+                runtime.HandleMessage(user, history, "ctx-sync-overflow");
+        Expect(response.IsTask(), "sync overflow recovery should return a task");
+        Expect(FirstText(response.GetTask().history.back()) == "sync-recovered",
+               "sync overflow recovery should return the retried reply");
+        Expect(model->chat_calls == 2, "sync overflow recovery should retry once");
+        Expect(model->summary_calls == 1, "sync overflow recovery should compact once");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime sync overflow test failed: " << e.what() << '\n';
         return 1;
     }
 

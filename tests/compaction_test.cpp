@@ -28,10 +28,11 @@ aiagent::llm::ChatMessage TextMessage(const std::string& role,
     return message;
 }
 
-aiagent::llm::ChatMessage ToolCallMessage(const std::string& name) {
+aiagent::llm::ChatMessage ToolCallMessage(const std::string& name,
+                                          const std::string& arguments = "{}") {
     aiagent::llm::ChatMessage message;
     message.role = "assistant";
-    message.tool_calls.push_back(aiagent::llm::ToolCall{"call-1", name, "{}"});
+    message.tool_calls.push_back(aiagent::llm::ToolCall{"call-1", name, arguments});
     return message;
 }
 
@@ -212,11 +213,11 @@ void TestCompactMessages() {
     std::vector<aiagent::llm::ChatMessage> messages = {
             TextMessage("system", "sys"),
             TextMessage("user", "u1"),
-            ToolCallMessage("read"),
+            ToolCallMessage("read", R"({"path":"src/b.cpp"})"),
             TextMessage("tool", std::string(3000, 'x')),
-            ToolCallMessage("read"),
+            ToolCallMessage("edit", R"({"path":"src/a.cpp"})"),
             TextMessage("tool", std::string(3000, 'x')),
-            ToolCallMessage("read"),
+            ToolCallMessage("read", R"({"path":"src/c.cpp"})"),
             TextMessage("tool", std::string(3000, 'x')),
     };
 
@@ -236,6 +237,14 @@ void TestCompactMessages() {
                "summary message should carry the compaction marker");
         Expect(outcome.messages[1].content.find("fake summary") != std::string::npos,
                "summary message should contain the model summary");
+        Expect(outcome.messages[1].content.find("<read-files>") != std::string::npos,
+               "summary should append read-files");
+        Expect(outcome.messages[1].content.find("<modified-files>") != std::string::npos,
+               "summary should append modified-files");
+        Expect(outcome.messages[1].content.find("src/b.cpp") != std::string::npos,
+               "read-only file should be recorded");
+        Expect(outcome.messages[1].content.find("src/a.cpp") != std::string::npos,
+               "modified file should be recorded");
         // 保留的尾部不应以孤立的 tool 消息开头。
         Expect(outcome.messages[2].role != "tool",
                "retained tail must not start with a tool result");
@@ -249,6 +258,74 @@ void TestCompactMessages() {
     const auto skipped = CompactMessages(*model, small, settings);
     Expect(!skipped.compacted, "small context should not be compacted");
     Expect(model->summary_calls == 1, "no extra summary call for small context");
+}
+
+void TestFileOperations() {
+    using aiagent::agent::ExtractFileOperations;
+    using aiagent::agent::FormatFileOperations;
+
+    const std::vector<aiagent::llm::ChatMessage> messages = {
+            ToolCallMessage("read", R"({"path":"src/a.cpp"})"),
+            ToolCallMessage("edit", R"({"path":"src/b.cpp"})"),
+            ToolCallMessage("write", R"({"path":"src/c.cpp"})"),
+            // b 既读过又改过，read-files 中应被排除。
+            ToolCallMessage("read", R"({"path":"src/b.cpp"})"),
+            // 非文件工具的调用应被忽略。
+            ToolCallMessage("bash", R"({"command":"ls"})"),
+    };
+
+    const auto ops = ExtractFileOperations(messages);
+    Expect(ops.read.size() == 2, "two distinct read files should be collected");
+    Expect(ops.edited.count("src/b.cpp") == 1, "edit path should be collected");
+    Expect(ops.written.count("src/c.cpp") == 1, "write path should be collected");
+
+    const std::string text = FormatFileOperations(ops);
+    Expect(text.find("<read-files>\nsrc/a.cpp\n</read-files>") != std::string::npos,
+           "read-only file should be listed");
+    Expect(text.find("<modified-files>") != std::string::npos,
+           "modified files section should exist");
+    const std::size_t read_begin = text.find("<read-files>");
+    const std::size_t read_end = text.find("</read-files>");
+    Expect(text.substr(read_begin, read_end - read_begin).find("src/b.cpp") ==
+                   std::string::npos,
+           "modified file should be excluded from read-files");
+    Expect(text.find("src/b.cpp") != std::string::npos, "modified file should be listed");
+    Expect(text.find("src/c.cpp") != std::string::npos, "written file should be listed");
+
+    // 空操作返回空串。
+    Expect(FormatFileOperations({}).empty(), "empty file ops should format to empty");
+
+    // 历史摘要中的清单应可累积传递。
+    aiagent::llm::ChatMessage previous_summary;
+    previous_summary.role = "user";
+    previous_summary.content =
+            "[summary]\n\n<read-files>\nsrc/old.cpp\n</read-files>\n\n"
+            "<modified-files>\nsrc/mod.cpp\n</modified-files>\n";
+    const auto carried = ExtractFileOperations({previous_summary});
+    Expect(carried.read.count("src/old.cpp") == 1,
+           "previous read-files should be carried forward");
+    Expect(carried.edited.count("src/mod.cpp") == 1,
+           "previous modified-files should be carried forward");
+}
+
+void TestOverflowDetection() {
+    using aiagent::agent::IsContextOverflowMessage;
+    using aiagent::agent::IsRecoverableLengthStop;
+
+    Expect(IsContextOverflowMessage(
+                   "This model's maximum context length is 8192 tokens"),
+           "maximum context length should be detected");
+    Expect(IsContextOverflowMessage("error: context_length_exceeded"),
+           "context_length_exceeded should be detected");
+    Expect(IsContextOverflowMessage("Request has too many tokens"),
+           "too many tokens should be detected");
+    Expect(!IsContextOverflowMessage("invalid api key"),
+           "unrelated errors should not be treated as overflow");
+
+    Expect(IsRecoverableLengthStop("length"), "length finish_reason is recoverable");
+    Expect(!IsRecoverableLengthStop("stop"), "stop finish_reason is not recoverable");
+    Expect(!IsRecoverableLengthStop("tool_calls"),
+           "tool_calls finish_reason is not recoverable");
 }
 
 void TestCompactionConfig() {
@@ -299,6 +376,8 @@ int main() {
     TestFindCutPoint();
     TestSerializeConversation();
     TestCompactMessages();
+    TestFileOperations();
+    TestOverflowDetection();
     TestCompactionConfig();
 
     if (g_failures != 0) {
