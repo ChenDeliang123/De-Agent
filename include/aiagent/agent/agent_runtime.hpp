@@ -25,6 +25,7 @@ public:
 
     // 可选：注入 MCP/工具提供者后，Agent 会自动执行 model 的 tool_calls。
     void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);
+    void SetMaxToolRounds(int rounds);
 
     // history 应包含本次用户消息（续聊时由调用方从 TaskStore 取回）。
     // 返回一个已完成 Task，其 history 追加了 assistant 回复。
@@ -59,6 +60,7 @@ private:
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
     std::string system_prompt_;
+    int max_tool_rounds_ = 24;
 };
 
 }  // namespace aiagent::agent

@@ -44,6 +44,12 @@ void AgentRuntime::SetToolProvider(std::shared_ptr<tools::IToolProvider> tools) 
     tools_ = std::move(tools);
 }
 
+void AgentRuntime::SetMaxToolRounds(int rounds) {
+    if (rounds > 0) {
+        max_tool_rounds_ = rounds;
+    }
+}
+
 a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
@@ -82,9 +88,9 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         chat_messages.push_back(std::move(user));
     }
 
-    constexpr int kMaxToolRounds = 8;
+    bool reached_max_rounds = false;
     llm::ChatResult result;
-    for (int round = 0; round < kMaxToolRounds; ++round) {
+    for (int round = 0; round < max_tool_rounds_; ++round) {
         const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         result = model_->Chat(chat_messages, tool_specs);
         if (result.choices.empty()) {
@@ -144,8 +150,15 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
                                           : std::string("tool error: ") + execution_result.error;
             chat_messages.push_back(std::move(tool_result));
         }
+        if (round + 1 >= max_tool_rounds_) {
+            reached_max_rounds = true;
+        }
     }
 
+    if (reached_max_rounds) {
+        throw std::runtime_error(
+                "reached max tool rounds without a final answer; task may be incomplete");
+    }
     if (result.choices.empty()) {
         throw std::runtime_error("model returned no choices");
     }
@@ -217,9 +230,9 @@ std::string AgentRuntime::RunStreaming(
         chat_messages.push_back(std::move(user));
     }
 
-    constexpr int kMaxToolRounds = 8;
+    bool reached_max_rounds = false;
     std::string reply;
-    for (int round = 0; round < kMaxToolRounds; ++round) {
+    for (int round = 0; round < max_tool_rounds_; ++round) {
         const std::vector<llm::ToolSpec> tool_specs =
                 tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         std::vector<llm::ToolCall> streamed_tool_calls;
@@ -310,8 +323,15 @@ std::string AgentRuntime::RunStreaming(
                                           : std::string("tool error: ") + execution_result.error;
             chat_messages.push_back(std::move(tool_result));
         }
+        if (round + 1 >= max_tool_rounds_) {
+            reached_max_rounds = true;
+        }
     }
 
+    if (reached_max_rounds) {
+        throw std::runtime_error(
+                "reached max tool rounds without a final answer; task may be incomplete");
+    }
     if (reply.empty()) {
         throw std::runtime_error("model returned an empty reply");
     }

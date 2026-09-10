@@ -91,6 +91,54 @@ public:
     }
 };
 
+class AlwaysToolModel final : public aiagent::llm::IModelClient {
+public:
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.tool_calls.push_back(
+                aiagent::llm::ToolCall{"call-tool", "ok_tool", "{}"});
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        aiagent::llm::StreamEvent event;
+        event.finish_reason = "tool_calls";
+        event.tool_calls.push_back(
+                aiagent::llm::ToolCall{"call-tool", "ok_tool", "{}"});
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
+class OkToolProvider final : public aiagent::tools::IToolProvider {
+public:
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        aiagent::llm::ToolSpec tool;
+        tool.name = "ok_tool";
+        return {tool};
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string&,
+            const nlohmann::json&,
+            const std::string&) override {
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = true;
+        result.text = "ok";
+        return result;
+    }
+};
+
 a2a::models::AgentCard BuildCard() {
     using a2a::models::AgentCard;
 
@@ -197,6 +245,29 @@ int main() {
         Expect(reply == "hello", "streaming method should return the assembled reply");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime streaming test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<AlwaysToolModel>();
+        auto tools = std::make_shared<OkToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+        runtime.SetMaxToolRounds(3);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "long task", "text/plain");
+        bool reached_limit = false;
+        try {
+            runtime.HandleMessageStreaming(user, {user}, "ctx-limit", nullptr);
+        } catch (const std::exception& e) {
+            reached_limit = std::string(e.what()).find("max tool rounds") !=
+                            std::string::npos;
+        }
+        Expect(reached_limit,
+               "runtime should report reaching max tool rounds instead of silent stop");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime max round test failed: " << e.what() << '\n';
         return 1;
     }
 
