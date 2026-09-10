@@ -120,6 +120,42 @@ public:
     }
 };
 
+class FiniteToolModel final : public aiagent::llm::IModelClient {
+public:
+    int calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "finished-after-tools";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++calls;
+        if (calls <= 5) {
+            aiagent::llm::StreamEvent event;
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-tool", "ok_tool", "{}"});
+            on_event(event);
+            return;
+        }
+        aiagent::llm::StreamEvent event;
+        event.content = "finished-after-tools";
+        event.finish_reason = "stop";
+        on_event(event);
+    }
+};
+
 class OkToolProvider final : public aiagent::tools::IToolProvider {
 public:
     std::vector<aiagent::llm::ToolSpec> ListTools() override {
@@ -268,6 +304,24 @@ int main() {
                "runtime should report reaching max tool rounds instead of silent stop");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime max round test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<FiniteToolModel>();
+        auto tools = std::make_shared<OkToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "finite long task", "text/plain");
+        const std::string reply =
+                runtime.HandleMessageStreaming(user, {user}, "ctx-finite", nullptr);
+        Expect(reply == "finished-after-tools",
+               "default runtime should continue past the old 8-round limit");
+        Expect(model->calls == 6, "runtime should finish when the model naturally stops");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime unlimited rounds test failed: " << e.what() << '\n';
         return 1;
     }
 

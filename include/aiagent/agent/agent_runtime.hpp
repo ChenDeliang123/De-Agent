@@ -60,7 +60,9 @@ private:
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
     std::string system_prompt_;
-    int max_tool_rounds_ = 24;
+    // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。
+    // 显式设置正数时作为可选安全上限。
+    int max_tool_rounds_ = 0;
 };
 
 }  // namespace aiagent::agent

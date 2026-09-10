@@ -45,9 +45,7 @@ void AgentRuntime::SetToolProvider(std::shared_ptr<tools::IToolProvider> tools) 
 }
 
 void AgentRuntime::SetMaxToolRounds(int rounds) {
-    if (rounds > 0) {
-        max_tool_rounds_ = rounds;
-    }
+    max_tool_rounds_ = rounds > 0 ? rounds : 0;
 }
 
 a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
@@ -89,8 +87,13 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     }
 
     bool reached_max_rounds = false;
+    int completed_rounds = 0;
     llm::ChatResult result;
-    for (int round = 0; round < max_tool_rounds_; ++round) {
+    for (int round = 0;; ++round) {
+        if (max_tool_rounds_ > 0 && round >= max_tool_rounds_) {
+            reached_max_rounds = true;
+            break;
+        }
         const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         result = model_->Chat(chat_messages, tool_specs);
         if (result.choices.empty()) {
@@ -150,9 +153,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
                                           : std::string("tool error: ") + execution_result.error;
             chat_messages.push_back(std::move(tool_result));
         }
-        if (round + 1 >= max_tool_rounds_) {
-            reached_max_rounds = true;
-        }
+        completed_rounds = round + 1;
     }
 
     if (reached_max_rounds) {
@@ -183,7 +184,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             aiagent::LogLevel::kInfo, "agent_runtime",
             "run=" + run_id + " session=" + context_id +
                     " event=request_end reply_bytes=" +
-                    std::to_string(reply_text.size()));
+                    std::to_string(reply_text.size()) +
+                    " tool_rounds=" + std::to_string(completed_rounds));
     return response;
 }
 
@@ -231,8 +233,13 @@ std::string AgentRuntime::RunStreaming(
     }
 
     bool reached_max_rounds = false;
+    int completed_rounds = 0;
     std::string reply;
-    for (int round = 0; round < max_tool_rounds_; ++round) {
+    for (int round = 0;; ++round) {
+        if (max_tool_rounds_ > 0 && round >= max_tool_rounds_) {
+            reached_max_rounds = true;
+            break;
+        }
         const std::vector<llm::ToolSpec> tool_specs =
                 tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         std::vector<llm::ToolCall> streamed_tool_calls;
@@ -323,9 +330,7 @@ std::string AgentRuntime::RunStreaming(
                                           : std::string("tool error: ") + execution_result.error;
             chat_messages.push_back(std::move(tool_result));
         }
-        if (round + 1 >= max_tool_rounds_) {
-            reached_max_rounds = true;
-        }
+        completed_rounds = round + 1;
     }
 
     if (reached_max_rounds) {
@@ -339,7 +344,8 @@ std::string AgentRuntime::RunStreaming(
             aiagent::LogLevel::kInfo, "agent_runtime",
             "run=" + run_id + " session=" + context_id +
                     " event=request_end streaming=true reply_bytes=" +
-                    std::to_string(reply.size()));
+                    std::to_string(reply.size()) +
+                    " tool_rounds=" + std::to_string(completed_rounds));
     return reply;
 }
 
