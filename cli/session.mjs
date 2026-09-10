@@ -23,12 +23,35 @@ export async function loadHistory(backendUrl, sessionId) {
   return response.json();
 }
 
-export async function streamChat(backendUrl, sessionId, message, onEvent, cwd = process.cwd()) {
+export async function cancelChat(backendUrl, sessionId) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/chat/cancel`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: encoder.encode(JSON.stringify({ session_id: sessionId })),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`cancel request failed: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function streamChat(
+  backendUrl,
+  sessionId,
+  message,
+  onEvent,
+  cwd = process.cwd(),
+  signal,
+) {
   const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/chat/stream`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal,
       body: encoder.encode(
         JSON.stringify({
           ...(sessionId ? { session_id: sessionId } : {}),

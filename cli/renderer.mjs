@@ -116,6 +116,13 @@ export class TranscriptRenderer {
     this.endReply();
   }
 
+  interrupted() {
+    this.#write(`\n${yellow}⏹ interrupted${reset}\n`);
+    this.#assistantActive = false;
+    this.#assistantWroteText = false;
+    this.#resumeAssistant = false;
+  }
+
   #write(text) {
     this.#out.write(text);
   }

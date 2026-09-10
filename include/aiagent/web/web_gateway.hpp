@@ -22,6 +22,7 @@ namespace aiagent::web {
 class WebGateway {
 public:
     using TokenCallback = std::function<void(const std::string& token)>;
+    using CancelCallback = std::function<bool()>;
     using StreamChatHandler =
             std::function<void(const std::string& session_id,
                                const std::string& message,
@@ -32,7 +33,8 @@ public:
             const std::string& session_id,
             const std::string& message,
             const std::string& cwd,
-            const aiagent::agent::AgentEventCallback& on_event)>;
+            const aiagent::agent::AgentEventCallback& on_event,
+            const CancelCallback& should_cancel)>;
 
     WebGateway(a2a::server::AgentServer& agent_server,
                a2a::server::ITaskStore& task_store);

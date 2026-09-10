@@ -194,7 +194,8 @@ std::string AgentRuntime::RunStreaming(
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id,
         const AgentEventCallback& on_event,
-        const std::string& working_directory) {
+        const std::string& working_directory,
+        const CancelCallback& should_cancel) {
     (void)context_id;
     const std::string run_id = std::string(a2a::core::NewUuid());
     aiagent::DefaultLogger().Log(
@@ -236,6 +237,9 @@ std::string AgentRuntime::RunStreaming(
     int completed_rounds = 0;
     std::string reply;
     for (int round = 0;; ++round) {
+        if (should_cancel && should_cancel()) {
+            throw std::runtime_error("task interrupted");
+        }
         if (max_tool_rounds_ > 0 && round >= max_tool_rounds_) {
             reached_max_rounds = true;
             break;
@@ -276,6 +280,9 @@ std::string AgentRuntime::RunStreaming(
         chat_messages.push_back(std::move(assistant));
 
         for (const auto& call : streamed_tool_calls) {
+            if (should_cancel && should_cancel()) {
+                throw std::runtime_error("task interrupted");
+            }
             const auto tool_started = std::chrono::steady_clock::now();
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kInfo, "agent_runtime",
@@ -360,7 +367,7 @@ std::string AgentRuntime::HandleMessageStreaming(
                                 on_token(event.content);
                             }
                         },
-                        {});
+                        {}, {});
 }
 
 std::string AgentRuntime::HandleMessageStreamingEvents(
@@ -368,8 +375,10 @@ std::string AgentRuntime::HandleMessageStreamingEvents(
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id,
         const AgentEventCallback& on_event,
-        const std::string& working_directory) {
-    return RunStreaming(incoming, history, context_id, on_event, working_directory);
+        const std::string& working_directory,
+        const CancelCallback& should_cancel) {
+    return RunStreaming(incoming, history, context_id, on_event, working_directory,
+                        should_cancel);
 }
 
 }  // namespace aiagent::agent

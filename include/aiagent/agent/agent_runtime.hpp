@@ -19,6 +19,8 @@ namespace aiagent::agent {
 // 不负责 HTTP/任务存储，由 A2A 层把 TaskManager 与它接起来。
 class AgentRuntime {
 public:
+    using CancelCallback = std::function<bool()>;
+
     explicit AgentRuntime(std::shared_ptr<llm::IModelClient> model,
                           std::string system_prompt =
                                   "You are a helpful AI agent implemented in C++.");
@@ -47,7 +49,8 @@ public:
             const std::vector<a2a::models::Message>& history,
             const std::string& context_id,
             const AgentEventCallback& on_event,
-            const std::string& working_directory = {});
+            const std::string& working_directory = {},
+            const CancelCallback& should_cancel = {});
 
 private:
     // 流式主循环的公共实现：产出 AgentEvent 事件流，返回最终回复文本。
@@ -55,7 +58,8 @@ private:
                              const std::vector<a2a::models::Message>& history,
                              const std::string& context_id,
                              const AgentEventCallback& on_event,
-                             const std::string& working_directory);
+                             const std::string& working_directory,
+                             const CancelCallback& should_cancel);
 
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;

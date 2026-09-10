@@ -325,6 +325,28 @@ int main() {
         return 1;
     }
 
+    try {
+        auto model = std::make_shared<AlwaysToolModel>();
+        auto tools = std::make_shared<OkToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "cancel me", "text/plain");
+        bool cancelled = false;
+        try {
+            runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-cancel", nullptr, {}, [] { return true; });
+        } catch (const std::exception& e) {
+            cancelled = std::string(e.what()).find("task interrupted") !=
+                        std::string::npos;
+        }
+        Expect(cancelled, "cancel callback should interrupt the agent runtime");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime cancel test failed: " << e.what() << '\n';
+        return 1;
+    }
+
     if (g_failures != 0) {
         std::cerr << "agent runtime test failed with " << g_failures << " failure(s)\n";
         return 1;

@@ -215,6 +215,9 @@ de logs      # 查看后端日志
 /quit       退出
 ```
 
+流式输出期间可按 `Esc` 中断当前任务；CLI 会调用后端的取消接口，Agent
+会在下一次模型轮次或工具执行前停止。
+
 也可以直接指定会话进入：
 
 ```bash
@@ -234,6 +237,7 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | --- | --- | --- |
 | `POST` | `/api/v1/chat` | 同步对话 |
 | `POST` | `/api/v1/chat/stream` | SSE 逐 token 流式对话 |
+| `POST` | `/api/v1/chat/cancel` | 取消指定 session 的当前流式任务 |
 | `GET` | `/api/v1/sessions` | 会话列表（`id` + 可读 `title`） |
 | `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
 | `GET` | `/health` | 健康检查 |

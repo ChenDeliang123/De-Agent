@@ -7,6 +7,8 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
@@ -209,6 +211,14 @@ public:
         stream_event_handler_ = std::move(handler);
     }
 
+    void CancelSession(const std::string& session_id) {
+        std::lock_guard<std::mutex> lock(cancels_mutex_);
+        const auto it = active_cancels_.find(session_id);
+        if (it != active_cancels_.end() && it->second) {
+            it->second->store(true);
+        }
+    }
+
 private:
     void SetupRoutes() {
         server_.Options("/.*", [](const httplib::Request&, httplib::Response& response) {
@@ -319,6 +329,33 @@ private:
                                      "application/json");
                          }
                      });
+
+        server_.Post("/api/v1/chat/cancel",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         SetCommonHeaders(response);
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             const std::string session_id = StringValue(body, "session_id");
+                             if (session_id.empty()) {
+                                 response.status = 400;
+                                 response.set_content(R"({"error":"session_id is required"})",
+                                                      "application/json");
+                                 return;
+                             }
+                             CancelSession(session_id);
+                             aiagent::DefaultLogger().Log(
+                                     aiagent::LogLevel::kInfo, "web",
+                                     "session=" + session_id +
+                                             " event=cancel_requested");
+                             response.set_content(R"({"cancelled":true})",
+                                                  "application/json");
+                         } catch (const std::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", e.what()}}.dump(),
+                                     "application/json");
+                         }
+                     });
     }
 
     nlohmann::json ChatOnce(const std::string& session_id, const std::string& content) {
@@ -373,6 +410,18 @@ private:
                         return false;
                     }
                     const RequestIdGuard request_guard(std::string(a2a::core::NewUuid()));
+                    auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
+                    {
+                        std::lock_guard<std::mutex> lock(cancels_mutex_);
+                        active_cancels_[session_id] = cancel_flag;
+                    }
+                    const auto clear_cancel = [this, session_id, cancel_flag]() {
+                        std::lock_guard<std::mutex> lock(cancels_mutex_);
+                        const auto it = active_cancels_.find(session_id);
+                        if (it != active_cancels_.end() && it->second == cancel_flag) {
+                            active_cancels_.erase(it);
+                        }
+                    };
                     const auto write = [&sink](const std::string& event,
                                                const nlohmann::json& payload) {
                         const std::string frame =
@@ -389,7 +438,8 @@ private:
                                     cwd,
                                     [&write](const aiagent::agent::AgentEvent& event) {
                                         WriteAgentEventFrame(write, event);
-                                    });
+                                    },
+                                    [cancel_flag] { return cancel_flag->load(); });
                         } else if (stream_handler_) {
                             stream_handler_(
                                     session_id,
@@ -418,6 +468,7 @@ private:
                             aiagent::LogLevel::kInfo, "web",
                             "session=" + session_id + " event=stream_end duration_ms=" +
                                     std::to_string(duration_ms));
+                    clear_cancel();
                     sink.done();
                     return false;
                 });
@@ -432,6 +483,8 @@ private:
     bool running_ = false;
     WebGateway::StreamChatHandler stream_handler_;
     WebGateway::StreamEventHandler stream_event_handler_;
+    std::mutex cancels_mutex_;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_cancels_;
 };
 
 WebGateway::WebGateway(a2a::server::AgentServer& agent_server,

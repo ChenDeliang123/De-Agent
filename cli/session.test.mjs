@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, listSessions, loadHistory, streamChat } from "./session.mjs";
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -70,6 +70,48 @@ test("cli session client lists, resumes, and streams", async () => {
       ["content", "tool_start", "tool_end", "content", "done"],
     );
   } finally {
+    await close(backend);
+  }
+});
+
+test("cli stream can be aborted by signal", async () => {
+  let openResponse = null;
+  const backend = http.createServer((request, response) => {
+    if (request.url === "/api/v1/chat/stream") {
+      openResponse = response;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write('event: content\ndata: {"content":"partial"}\n\n');
+      request.resume();
+      return;
+    }
+    if (request.url === "/api/v1/chat/cancel") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"cancelled":true}');
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+
+  const port = await listen(backend);
+  const controller = new AbortController();
+  try {
+    const stream = streamChat(
+      `http://127.0.0.1:${port}`,
+      null,
+      "hello",
+      () => {},
+      process.cwd(),
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 50);
+    await assert.rejects(stream, (error) => error.name === "AbortError");
+    const cancelled = await cancelChat(`http://127.0.0.1:${port}`, "s1");
+    assert.equal(cancelled.cancelled, true);
+  } finally {
+    if (openResponse) {
+      openResponse.destroy();
+    }
     await close(backend);
   }
 });

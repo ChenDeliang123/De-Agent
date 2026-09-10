@@ -1,12 +1,28 @@
+import readline from "node:readline";
 import readlinePromises from "node:readline/promises";
+import { randomUUID } from "node:crypto";
 import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
-import { listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, listSessions, loadHistory, streamChat } from "./session.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 const renderer = new TranscriptRenderer();
+let activeAbortController = null;
+
+if (input.isTTY) {
+  readline.emitKeypressEvents(input);
+  input.on("keypress", (_text, key) => {
+    if (!activeAbortController) {
+      return;
+    }
+    if (key?.name === "escape" || (key?.ctrl && key?.name === "c")) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+  });
+}
 
 function parseArgs(argv) {
   const options = { backend: defaultBackend, session: null };
@@ -29,9 +45,12 @@ usage: node cli.mjs [--backend <url>] [--session <id>]
 commands:
   /new           start a new session
   /sessions      list backend sessions
-  /open <id>     resume a session by id or index
-  /help          show this help
-  /quit          exit
+/open <id>     resume a session by id or index
+/help          show this help
+/quit          exit
+
+keys:
+  Esc            interrupt the currently running task
 `);
 }
 
@@ -122,34 +141,67 @@ async function handleAnswer(backend, state, answer) {
 
 async function sendMessage(backend, sessionId, text) {
   clearInputLine();
-  log("info", "cli", `event=user_message session=${sessionId ?? "-"} bytes=${text.length}`);
+  const requestSessionId = sessionId ?? randomUUID();
+  log("info", "cli", `event=user_message session=${requestSessionId} bytes=${text.length}`);
   renderer.user(text);
   renderer.startReply();
+  const controller = new AbortController();
+  activeAbortController = controller;
+  const canSetRaw = input.isTTY && typeof input.setRawMode === "function";
+  const wasRaw = canSetRaw ? input.isRaw === true : false;
+  if (canSetRaw) {
+    input.setRawMode(true);
+  }
   try {
-    const done = await streamChat(backend, sessionId, text, ({ event, data }) => {
-      if (!data) {
-        return;
-      }
-      if (event === "content") {
-        renderer.content(data.content ?? "");
-      } else if (event === "tool_start") {
-        renderer.toolStart(data.id ?? "", data.name ?? "tool", data.arguments ?? "");
-      } else if (event === "tool_output") {
-        renderer.toolOutput(data.content ?? "");
-      } else if (event === "tool_end") {
-        renderer.toolEnd(Boolean(data.ok), data.text ?? "");
-      } else if (event === "error") {
-        throw new Error(data.error ?? "unknown error");
-      }
-    });
+    const done = await streamChat(
+      backend,
+      requestSessionId,
+      text,
+      ({ event, data }) => {
+        if (!data) {
+          return;
+        }
+        if (event === "content") {
+          renderer.content(data.content ?? "");
+        } else if (event === "tool_start") {
+          renderer.toolStart(data.id ?? "", data.name ?? "tool", data.arguments ?? "");
+        } else if (event === "tool_output") {
+          renderer.toolOutput(data.content ?? "");
+        } else if (event === "tool_end") {
+          renderer.toolEnd(Boolean(data.ok), data.text ?? "");
+        } else if (event === "error") {
+          throw new Error(data.error ?? "unknown error");
+        }
+      },
+      process.cwd(),
+      controller.signal,
+    );
     renderer.endReply();
     log("info", "cli",
-        `event=stream_end session=${done?.session_id ?? sessionId ?? "-"}`);
-    return done?.session_id ?? sessionId;
+        `event=stream_end session=${done?.session_id ?? requestSessionId}`);
+    return done?.session_id ?? requestSessionId;
   } catch (error) {
+    if (error.name === "AbortError" || controller.signal.aborted) {
+      try {
+        await cancelChat(backend, requestSessionId);
+      } catch (cancelError) {
+        log("error", "cli",
+            `event=cancel_error session=${requestSessionId} message=${cancelError.message}`);
+      }
+      renderer.interrupted();
+      log("info", "cli", `event=stream_interrupted session=${requestSessionId}`);
+      return requestSessionId;
+    }
     renderer.error(error.message);
     log("error", "cli", `event=stream_error message=${error.message}`);
-    return sessionId;
+    return requestSessionId;
+  } finally {
+    if (activeAbortController === controller) {
+      activeAbortController = null;
+    }
+    if (canSetRaw) {
+      input.setRawMode(wasRaw);
+    }
   }
 }
 
