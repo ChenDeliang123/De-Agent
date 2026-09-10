@@ -15,6 +15,7 @@ Node.js Web 前端用于快速体验。
   - 自动发现并加载 MCP 工具
   - 模型发起 `tool_calls` 后自动执行并回填结果
 - 任务与消息历史通过 SQLite 持久化。
+- 上下文压缩：超阈值时自动摘要较早消息，避免长会话撞上下文窗口。
 - 内置 Web Gateway（REST + SSE）与零 npm 依赖的 Node BFF 前端。
 
 [a2a-protocol]: https://gitee.com/chen_dl/a2a-protocol
@@ -302,6 +303,30 @@ max_files = 5
 AIAGENT_LOG_LEVEL=debug de
 de --log-level debug --log-file /tmp/debug.log
 ```
+
+## 上下文压缩
+
+当一次请求的上下文 token 超过 `context_window - reserve_tokens` 时，Agent
+会把较早的消息交给模型生成结构化摘要（Goal / Progress / Decisions / Next
+Steps 等六段），只保留最近 `keep_recent_tokens` 的消息，摘要作为一条 user
+消息插在 system 之后。切点只落在 user / assistant 上，不会切断
+`tool_calls` 与 `tool` 结果的配对。
+
+```ini
+[compaction]
+enabled = true
+context_window = 64000
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+```
+
+说明：
+
+- `context_window` 请按实际模型填写（如 DeepSeek 128k 模型可填 `128000`）。
+- 流式请求会自动开启 `stream_options.include_usage`，用真实 usage 计量；
+  拿不到 usage 时退回按字节估算。
+- 压缩只作用于「本次请求构造的消息窗口」，SQLite 中仍保留完整历史，
+  便于回溯。
 
 ## A2A
 

@@ -10,6 +10,7 @@
 #include "a2a/models/requests.hpp"
 
 #include "aiagent/agent/agent_event.hpp"
+#include "aiagent/agent/compaction.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -28,6 +29,9 @@ public:
     // 可选：注入 MCP/工具提供者后，Agent 会自动执行 model 的 tool_calls。
     void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);
     void SetMaxToolRounds(int rounds);
+
+    // 设置上下文压缩参数；默认 enabled，阈值见 CompactionSettings。
+    void SetCompactionSettings(const CompactionSettings& settings);
 
     // history 应包含本次用户消息（续聊时由调用方从 TaskStore 取回）。
     // 返回一个已完成 Task，其 history 追加了 assistant 回复。
@@ -61,12 +65,21 @@ private:
                              const std::string& working_directory,
                              const CancelCallback& should_cancel);
 
+    // 模型调用前的阈值压缩。命中阈值时把较早的消息摘要成一条 user 消息，
+    // 并重置 usage 跟踪；同一批消息（size 未变）不重复压缩。
+    void MaybeCompactBeforeCall(std::vector<llm::ChatMessage>& chat_messages,
+                                int& last_usage_tokens,
+                                std::size_t& last_usage_message_count,
+                                std::size_t& last_compacted_size,
+                                const std::string& run_id);
+
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
     std::string system_prompt_;
     // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。
     // 显式设置正数时作为可选安全上限。
     int max_tool_rounds_ = 0;
+    CompactionSettings compaction_settings_;
 };
 
 }  // namespace aiagent::agent

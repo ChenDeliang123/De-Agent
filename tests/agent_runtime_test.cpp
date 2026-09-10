@@ -175,6 +175,84 @@ public:
     }
 };
 
+class BigToolProvider final : public aiagent::tools::IToolProvider {
+public:
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        aiagent::llm::ToolSpec tool;
+        tool.name = "big_tool";
+        return {tool};
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string&,
+            const nlohmann::json&,
+            const std::string&) override {
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = true;
+        result.text = std::string(3000, 'x');
+        return result;
+    }
+};
+
+// 前 3 轮请求工具（附带近似真实 usage），之后返回最终答案；
+// 摘要调用（无 tools 的 Chat）返回固定摘要。
+class CompactionFakeModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+    int summary_calls = 0;
+    bool saw_summary_marker = false;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\nfake summary";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>& messages,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++stream_calls;
+        int approx_tokens = 0;
+        for (const auto& message : messages) {
+            if (message.content.find(aiagent::agent::kCompactionSummaryMarker) !=
+                std::string::npos) {
+                saw_summary_marker = true;
+            }
+            std::size_t bytes = message.content.size() +
+                                message.reasoning_content.size() +
+                                message.tool_call_id.size();
+            for (const auto& call : message.tool_calls) {
+                bytes += call.name.size() + call.arguments.size();
+            }
+            approx_tokens += static_cast<int>((bytes + 2) / 3) + 4;
+        }
+
+        aiagent::llm::StreamEvent event;
+        event.usage.prompt_tokens = approx_tokens;
+        event.usage.total_tokens = approx_tokens;
+        if (stream_calls <= 3) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-big", "big_tool", "{}"});
+        } else {
+            event.content = "done-after-compaction";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
 a2a::models::AgentCard BuildCard() {
     using a2a::models::AgentCard;
 
@@ -344,6 +422,35 @@ int main() {
         Expect(cancelled, "cancel callback should interrupt the agent runtime");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime cancel test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<CompactionFakeModel>();
+        auto tools = std::make_shared<BigToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 2500;
+        settings.reserve_tokens = 200;
+        settings.keep_recent_tokens = 1500;
+        runtime.SetCompactionSettings(settings);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "big task", "text/plain");
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, {user}, "ctx-compact", nullptr);
+        Expect(reply == "done-after-compaction",
+               "runtime should finish normally after compaction");
+        Expect(model->summary_calls == 1,
+               "runtime should compact exactly once when the threshold is crossed");
+        Expect(model->saw_summary_marker,
+               "post-compaction request should include the injected summary");
+        Expect(model->stream_calls == 4,
+               "compaction should not create extra model turns");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime compaction test failed: " << e.what() << '\n';
         return 1;
     }
 

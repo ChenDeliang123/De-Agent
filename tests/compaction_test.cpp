@@ -1,4 +1,8 @@
+#include <functional>
 #include <iostream>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -23,6 +27,44 @@ aiagent::llm::ChatMessage TextMessage(const std::string& role,
     message.content = content;
     return message;
 }
+
+aiagent::llm::ChatMessage ToolCallMessage(const std::string& name) {
+    aiagent::llm::ChatMessage message;
+    message.role = "assistant";
+    message.tool_calls.push_back(aiagent::llm::ToolCall{"call-1", name, "{}"});
+    return message;
+}
+
+// 只负责回答摘要请求（无 tools 的 Chat）的 fake 模型。
+class SummaryModel final : public aiagent::llm::IModelClient {
+public:
+    int summary_calls = 0;
+    std::string last_prompt;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>& messages,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        for (const auto& message : messages) {
+            if (message.role == "user") {
+                last_prompt = message.content;
+            }
+        }
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\nfake summary";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>&) override {
+        throw std::runtime_error("SummaryModel::ChatStream should not be called");
+    }
+};
 
 void TestEstimateTokens() {
     using aiagent::agent::EstimateMessagesTokens;
@@ -105,6 +147,110 @@ void TestShouldCompact() {
     Expect(!ShouldCompact(100000, settings), "zero context window should be ignored");
 }
 
+void TestFindCutPoint() {
+    using aiagent::agent::FindCutPoint;
+
+    // 一条 tool 消息必须紧跟其 assistant tool_calls，绝不能被切开。
+    const std::vector<aiagent::llm::ChatMessage> messages = {
+            TextMessage("system", "sys"),
+            TextMessage("user", "read the file"),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(3000, 'x')),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(3000, 'x')),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(3000, 'x')),
+    };
+
+    const auto too_small = FindCutPoint(messages, 100000);
+    Expect(!too_small.valid, "huge keep_recent should not find a cut point");
+
+    const auto cut = FindCutPoint(messages, 1500);
+    Expect(cut.valid, "budget-spanning cut point should be found");
+    if (cut.valid) {
+        Expect(cut.first_kept_index > 1, "cut point should leave something to summarize");
+        const std::string& role = messages[cut.first_kept_index].role;
+        Expect(role == "user" || role == "assistant",
+               "cut point must be user/assistant, never tool");
+    }
+
+    // 只有 system 时不可压缩。
+    const auto tiny = FindCutPoint({TextMessage("system", "sys")}, 10);
+    Expect(!tiny.valid, "single system message should not be compactable");
+}
+
+void TestSerializeConversation() {
+    using aiagent::agent::SerializeConversation;
+
+    std::vector<aiagent::llm::ChatMessage> messages = {
+            TextMessage("system", "ignored system"),
+            TextMessage("user", "hello"),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(5000, 'y')),
+    };
+    const std::string text = SerializeConversation(messages);
+    Expect(text.find("ignored system") == std::string::npos,
+           "system prompt should be skipped in serialization");
+    Expect(text.find("[User]: hello") != std::string::npos, "user text should appear");
+    Expect(text.find("read(") != std::string::npos, "tool call should appear");
+    Expect(text.find("truncated") != std::string::npos,
+           "large tool result should be truncated in serialization");
+}
+
+void TestCompactMessages() {
+    using aiagent::agent::CompactMessages;
+    using aiagent::agent::CompactionSettings;
+    using aiagent::agent::kCompactionSummaryMarker;
+
+    auto model = std::make_shared<SummaryModel>();
+    CompactionSettings settings;
+    settings.enabled = true;
+    settings.context_window = 2500;
+    settings.reserve_tokens = 200;
+    settings.keep_recent_tokens = 1500;
+
+    std::vector<aiagent::llm::ChatMessage> messages = {
+            TextMessage("system", "sys"),
+            TextMessage("user", "u1"),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(3000, 'x')),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(3000, 'x')),
+            ToolCallMessage("read"),
+            TextMessage("tool", std::string(3000, 'x')),
+    };
+
+    const auto outcome = CompactMessages(*model, messages, settings);
+    Expect(outcome.compacted, "large context should be compacted");
+    Expect(model->summary_calls == 1, "compaction should call the model once");
+    Expect(outcome.tokens_after < outcome.tokens_before,
+           "compaction should reduce estimated tokens");
+    if (outcome.compacted) {
+        Expect(outcome.messages.size() < messages.size(),
+               "compacted list should be shorter");
+        Expect(outcome.messages.front().role == "system",
+               "compacted list should keep the system prompt");
+        Expect(outcome.messages[1].role == "user",
+               "summary should be injected as a user message");
+        Expect(outcome.messages[1].content.find(kCompactionSummaryMarker) == 0,
+               "summary message should carry the compaction marker");
+        Expect(outcome.messages[1].content.find("fake summary") != std::string::npos,
+               "summary message should contain the model summary");
+        // 保留的尾部不应以孤立的 tool 消息开头。
+        Expect(outcome.messages[2].role != "tool",
+               "retained tail must not start with a tool result");
+    }
+
+    // 小上下文不触发压缩。
+    const std::vector<aiagent::llm::ChatMessage> small = {
+            TextMessage("system", "sys"),
+            TextMessage("user", "hi"),
+    };
+    const auto skipped = CompactMessages(*model, small, settings);
+    Expect(!skipped.compacted, "small context should not be compacted");
+    Expect(model->summary_calls == 1, "no extra summary call for small context");
+}
+
 void TestCompactionConfig() {
     const std::string ini = R"INI(
 [compaction]
@@ -150,6 +296,9 @@ int main() {
     TestEstimateTokens();
     TestEstimateContextTokens();
     TestShouldCompact();
+    TestFindCutPoint();
+    TestSerializeConversation();
+    TestCompactMessages();
     TestCompactionConfig();
 
     if (g_failures != 0) {

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
+#include <string>
 #include <vector>
 
+#include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/llm/deepseek_types.hpp"
 
 namespace aiagent::agent {
@@ -45,5 +48,40 @@ ContextUsageEstimate EstimateContextTokens(
 
 // 是否越过压缩阈值。
 bool ShouldCompact(int context_tokens, const CompactionSettings& settings);
+
+// 摘要消息的固定前缀，用于回放/测试识别已压缩上下文。
+extern const char* const kCompactionSummaryMarker;
+
+// 安全切点：从尾部向前累计 token，累计到 keep_recent_tokens 后在合法位置切分。
+// 只允许切在 user / assistant 上，绝不切在 tool / system，保证 tool_calls 与其
+// tool 结果成对保留、协议合法。
+struct CutPointResult {
+    std::size_t first_kept_index = 0;  // 从此索引（含）开始保留
+    bool valid = false;                // 是否存在可压缩的切点
+};
+
+CutPointResult FindCutPoint(const std::vector<llm::ChatMessage>& messages,
+                            int keep_recent_tokens);
+
+// 把消息序列化成文本，供摘要模型阅读（避免它把内容当作对话继续）。
+std::string SerializeConversation(const std::vector<llm::ChatMessage>& messages);
+
+// 调用模型生成结构化摘要（不带工具）。失败抛 std::runtime_error。
+std::string GenerateSummary(llm::IModelClient& model,
+                            const std::vector<llm::ChatMessage>& to_summarize);
+
+// 压缩结果。compacted=false 时 messages 为空，调用方保持原消息列表。
+struct CompactionOutcome {
+    bool compacted = false;
+    int tokens_before = 0;
+    int tokens_after = 0;
+    std::vector<llm::ChatMessage> messages;  // 压缩后的完整消息列表
+};
+
+// 执行一次压缩：摘要 [1, cut) 的消息，保留 system 与 [cut, end)，
+// 并把摘要作为一条 user 消息插在 system 之后。
+CompactionOutcome CompactMessages(llm::IModelClient& model,
+                                  const std::vector<llm::ChatMessage>& messages,
+                                  const CompactionSettings& settings);
 
 }  // namespace aiagent::agent

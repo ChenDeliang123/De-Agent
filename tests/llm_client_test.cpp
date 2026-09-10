@@ -355,6 +355,56 @@ void TestNoRetryWhenDisabled() {
     local.Stop();
 }
 
+// 流式响应中的 include_usage 帧应通过 StreamEvent.usage 向上层传递。
+void TestStreamUsageEvent() {
+    LocalServer local;
+    local.server.Post("/chat/completions",
+                      [&](const httplib::Request&, httplib::Response& response) {
+                          local.hits.fetch_add(1);
+                          response.set_chunked_content_provider(
+                                  "text/event-stream",
+                                  [](std::size_t offset, httplib::DataSink& sink) {
+                                      if (offset != 0) {
+                                          sink.done();
+                                          return false;
+                                      }
+                                      const std::string frames =
+                                              "data: {\"id\":\"c\",\"choices\":[{\"index\":0,"
+                                              "\"delta\":{\"content\":\"hi\"},"
+                                              "\"finish_reason\":null}]}\n\n"
+                                              "data: {\"id\":\"c\",\"choices\":[],"
+                                              "\"usage\":{\"prompt_tokens\":11,"
+                                              "\"completion_tokens\":2,\"total_tokens\":13}}\n\n"
+                                              "data: [DONE]\n\n";
+                                      sink.write(frames.data(), frames.size());
+                                      sink.done();
+                                      return true;
+                                  });
+                      });
+    if (!local.Start()) {
+        Expect(false, "stream usage server should bind");
+        return;
+    }
+
+    try {
+        aiagent::llm::DeepSeekClient client(TestConfig(local.BaseUrl()));
+        std::string text;
+        aiagent::llm::ChatUsage seen;
+        client.ChatStream({}, {}, [&](const aiagent::llm::StreamEvent& event) {
+            text += event.content;
+            if (event.usage.total_tokens > 0) {
+                seen = event.usage;
+            }
+        });
+        Expect(text == "hi", "stream content should still be delivered");
+        Expect(seen.total_tokens == 13, "stream usage total_tokens should be surfaced");
+        Expect(seen.prompt_tokens == 11, "stream usage prompt_tokens should be surfaced");
+    } catch (const std::exception& e) {
+        Expect(false, std::string("stream usage chat should not throw: ") + e.what());
+    }
+    local.Stop();
+}
+
 }  // namespace
 
 int main() {
@@ -364,6 +414,7 @@ int main() {
     TestRetryOnTransientServerErrors();
     TestNoRetryOnClientError();
     TestNoRetryWhenDisabled();
+    TestStreamUsageEvent();
 
     if (g_failures != 0) {
         std::cerr << "llm client test failed with " << g_failures << " failure(s)\n";

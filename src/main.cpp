@@ -230,6 +230,20 @@ int main(int argc, char** argv) {
                 "verify when useful.\n"
                 "- After making changes, summarize which files were created or modified.";
         aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
+        // 上下文压缩配置：超阈值时把较早的消息摘要成一条 user 消息。
+        aiagent::CompactionConfig compaction_config;
+        std::string compaction_error;
+        const auto parsed_compaction =
+                aiagent::LoadCompactionConfigFile(options.config_path, &compaction_error);
+        if (parsed_compaction.has_value()) {
+            compaction_config = *parsed_compaction;
+        }
+        aiagent::agent::CompactionSettings compaction_settings;
+        compaction_settings.enabled = compaction_config.enabled;
+        compaction_settings.context_window = compaction_config.context_window;
+        compaction_settings.reserve_tokens = compaction_config.reserve_tokens;
+        compaction_settings.keep_recent_tokens = compaction_config.keep_recent_tokens;
+        runtime.SetCompactionSettings(compaction_settings);
         // 会话最新历史内存缓存：避免每次请求 ListAll() 全表扫描（长会话 O(n²)）。
         aiagent::agent::HistoryCache history_cache;
 

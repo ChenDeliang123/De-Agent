@@ -48,6 +48,56 @@ void AgentRuntime::SetMaxToolRounds(int rounds) {
     max_tool_rounds_ = rounds > 0 ? rounds : 0;
 }
 
+void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
+    compaction_settings_ = settings;
+}
+
+void AgentRuntime::MaybeCompactBeforeCall(
+        std::vector<llm::ChatMessage>& chat_messages,
+        int& last_usage_tokens,
+        std::size_t& last_usage_message_count,
+        std::size_t& last_compacted_size,
+        const std::string& run_id) {
+    if (!compaction_settings_.enabled) {
+        return;
+    }
+    const ContextUsageEstimate estimate = EstimateContextTokens(
+            chat_messages, last_usage_tokens, last_usage_message_count);
+    if (!ShouldCompact(estimate.tokens, compaction_settings_)) {
+        return;
+    }
+    // 同一批消息不重复压缩，避免压缩后仍超阈值时反复调用摘要模型。
+    if (chat_messages.size() == last_compacted_size) {
+        return;
+    }
+    try {
+        CompactionOutcome outcome =
+                CompactMessages(*model_, chat_messages, compaction_settings_);
+        if (!outcome.compacted) {
+            // 无法找到安全切点时标记已尝试，避免每轮重复计算。
+            last_compacted_size = chat_messages.size();
+            return;
+        }
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "agent_runtime",
+                "run=" + run_id + " event=compaction tokens_before=" +
+                        std::to_string(outcome.tokens_before) + " tokens_after=" +
+                        std::to_string(outcome.tokens_after) + " messages_before=" +
+                        std::to_string(chat_messages.size()) + " messages_after=" +
+                        std::to_string(outcome.messages.size()));
+        chat_messages = std::move(outcome.messages);
+        last_usage_tokens = 0;
+        last_usage_message_count = 0;
+        last_compacted_size = chat_messages.size();
+    } catch (const std::exception& e) {
+        // 摘要失败不影响主流程：保持原消息，记录日志。
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "agent_runtime",
+                "run=" + run_id + " event=compaction_failed message=" + e.what());
+        last_compacted_size = chat_messages.size();
+    }
+}
+
 a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
@@ -88,20 +138,32 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
 
     bool reached_max_rounds = false;
     int completed_rounds = 0;
+    // 上下文计量：usage 覆盖 messages[0, last_usage_message_count)，其后尾部再估算。
+    int last_usage_tokens = 0;
+    std::size_t last_usage_message_count = 0;
+    std::size_t last_compacted_size = static_cast<std::size_t>(-1);
     llm::ChatResult result;
     for (int round = 0;; ++round) {
         if (max_tool_rounds_ > 0 && round >= max_tool_rounds_) {
             reached_max_rounds = true;
             break;
         }
+        MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
+                               last_usage_message_count, last_compacted_size, run_id);
         const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
+        const std::size_t messages_at_call = chat_messages.size();
         result = model_->Chat(chat_messages, tool_specs);
         if (result.choices.empty()) {
             throw std::runtime_error("model returned no choices");
         }
+        const bool has_usage = result.usage.total_tokens > 0;
 
         const auto& choice = result.choices.front();
         if (choice.tool_calls.empty()) {
+            if (has_usage) {
+                last_usage_tokens = result.usage.total_tokens;
+                last_usage_message_count = messages_at_call;
+            }
             break;
         }
         if (!tools_) {
@@ -114,6 +176,11 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         assistant.reasoning_content = choice.reasoning_content;
         assistant.tool_calls = choice.tool_calls;
         chat_messages.push_back(std::move(assistant));
+        if (has_usage) {
+            // usage 覆盖到这条 assistant（含其 completion），工具结果算尾部。
+            last_usage_tokens = result.usage.total_tokens;
+            last_usage_message_count = chat_messages.size();
+        }
 
         for (const auto& call : choice.tool_calls) {
             const auto tool_started = std::chrono::steady_clock::now();
@@ -236,6 +303,9 @@ std::string AgentRuntime::RunStreaming(
     bool reached_max_rounds = false;
     int completed_rounds = 0;
     std::string reply;
+    int last_usage_tokens = 0;
+    std::size_t last_usage_message_count = 0;
+    std::size_t last_compacted_size = static_cast<std::size_t>(-1);
     for (int round = 0;; ++round) {
         if (should_cancel && should_cancel()) {
             throw std::runtime_error("task interrupted");
@@ -244,14 +314,21 @@ std::string AgentRuntime::RunStreaming(
             reached_max_rounds = true;
             break;
         }
+        MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
+                               last_usage_message_count, last_compacted_size, run_id);
         const std::vector<llm::ToolSpec> tool_specs =
                 tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         std::vector<llm::ToolCall> streamed_tool_calls;
+        const std::size_t messages_at_call = chat_messages.size();
+        int stream_usage_tokens = 0;
 
         model_->ChatStream(
                 chat_messages,
                 tool_specs,
                 [&](const llm::StreamEvent& event) {
+                    if (event.usage.total_tokens > 0) {
+                        stream_usage_tokens = event.usage.total_tokens;
+                    }
                     if (!event.content.empty()) {
                         reply += event.content;
                         if (on_event) {
@@ -266,7 +343,12 @@ std::string AgentRuntime::RunStreaming(
                     }
                 });
 
+        const bool has_usage = stream_usage_tokens > 0;
         if (streamed_tool_calls.empty()) {
+            if (has_usage) {
+                last_usage_tokens = stream_usage_tokens;
+                last_usage_message_count = messages_at_call;
+            }
             break;
         }
         if (!tools_) {
@@ -278,6 +360,10 @@ std::string AgentRuntime::RunStreaming(
         assistant.content = "";
         assistant.tool_calls = streamed_tool_calls;
         chat_messages.push_back(std::move(assistant));
+        if (has_usage) {
+            last_usage_tokens = stream_usage_tokens;
+            last_usage_message_count = chat_messages.size();
+        }
 
         for (const auto& call : streamed_tool_calls) {
             if (should_cancel && should_cancel()) {
