@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 
@@ -27,6 +28,8 @@ struct LogConfig {
     std::string level = "info";
     std::string file;
     bool console = false;
+    std::size_t max_size_bytes = 10 * 1024 * 1024;
+    int max_files = 5;
 };
 
 // 解析 INI 文本中的 [deepseek] 段。api_key 缺失或为占位值时，

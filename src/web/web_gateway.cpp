@@ -26,6 +26,19 @@
 namespace aiagent::web {
 namespace {
 
+class RequestIdGuard {
+public:
+    explicit RequestIdGuard(std::string request_id)
+        : request_id_(std::move(request_id)) {
+        aiagent::SetThreadRequestId(request_id_);
+    }
+
+    ~RequestIdGuard() { aiagent::ClearThreadRequestId(); }
+
+private:
+    std::string request_id_;
+};
+
 std::string FirstText(const a2a::models::Message& message) {
     for (const auto& part : message.parts) {
         if (part.text.has_value()) {
@@ -309,6 +322,7 @@ private:
     }
 
     nlohmann::json ChatOnce(const std::string& session_id, const std::string& content) {
+        const RequestIdGuard request_guard(std::string(a2a::core::NewUuid()));
         const auto started = std::chrono::steady_clock::now();
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "web",
@@ -358,6 +372,7 @@ private:
                         sink.done();
                         return false;
                     }
+                    const RequestIdGuard request_guard(std::string(a2a::core::NewUuid()));
                     const auto write = [&sink](const std::string& event,
                                                const nlohmann::json& payload) {
                         const std::string frame =

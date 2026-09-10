@@ -283,6 +283,25 @@ std::optional<LogConfig> ParseLogConfig(const std::string& content, std::string*
             config.file = value;
         } else if (key == "console") {
             config.console = Lower(value) == "true" || value == "1";
+        } else if (key == "max_size_bytes") {
+            try {
+                const unsigned long long parsed = std::stoull(value);
+                config.max_size_bytes = static_cast<std::size_t>(parsed);
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid max_size_bytes: " + value;
+                }
+                return std::nullopt;
+            }
+        } else if (key == "max_files") {
+            try {
+                config.max_files = std::stoi(value);
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid max_files: " + value;
+                }
+                return std::nullopt;
+            }
         }
     }
 

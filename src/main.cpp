@@ -202,7 +202,9 @@ int main(int argc, char** argv) {
             log_config.console = true;
         }
         aiagent::ConfigureDefaultLogger(log_config.level, log_config.file,
-                                        log_config.console);
+                                        log_config.console,
+                                        log_config.max_size_bytes,
+                                        log_config.max_files);
         aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "main",
                                      "config loaded: " + options.config_path);
 

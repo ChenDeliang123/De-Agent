@@ -18,3 +18,5 @@ request_timeout_seconds = 60
 level = info
 file = .runtime/backend.log
 console = false
+max_size_bytes = 10485760
+max_files = 5

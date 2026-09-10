@@ -92,12 +92,65 @@ void TestConcurrentWrites() {
     std::filesystem::remove(path);
 }
 
+void TestRedaction() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("aiagent_logging_redact_" + std::to_string(::getpid()) + ".log");
+    aiagent::Logger logger;
+    logger.Configure("info", path.string(), false);
+    const std::string secret = "sk-1234567890abcdef1234567890abcdef";
+    logger.Log(aiagent::LogLevel::kInfo, "test",
+               "api_key=" + secret + " detail=ok");
+
+    const std::string content = ReadAll(path);
+    Expect(content.find("sk-***") != std::string::npos,
+           "api key should be redacted");
+    Expect(content.find(secret) == std::string::npos,
+           "raw api key must not be written");
+    std::filesystem::remove(path);
+}
+
+void TestRotation() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("aiagent_logging_rotate_" + std::to_string(::getpid()) + ".log");
+    aiagent::Logger logger;
+    logger.Configure("info", path.string(), false, 80, 2);
+    const std::string payload(200, 'x');
+    for (int i = 0; i < 4; ++i) {
+        logger.Log(aiagent::LogLevel::kInfo, "test",
+                   "line-" + std::to_string(i) + " " + payload);
+    }
+
+    Expect(std::filesystem::exists(path.string() + ".1"),
+           "rotated log file should exist");
+    std::filesystem::remove(path);
+    std::filesystem::remove(path.string() + ".1");
+    std::filesystem::remove(path.string() + ".2");
+}
+
+void TestThreadRequestId() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("aiagent_logging_req_" + std::to_string(::getpid()) + ".log");
+    aiagent::Logger logger;
+    logger.Configure("info", path.string(), false);
+    aiagent::SetThreadRequestId("req-abc");
+    logger.Log(aiagent::LogLevel::kInfo, "test", "event=hello");
+    aiagent::ClearThreadRequestId();
+
+    const std::string content = ReadAll(path);
+    Expect(content.find("req=req-abc") != std::string::npos,
+           "thread request id should be included");
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
     TestLevelAndFile();
     TestParseConfig();
     TestConcurrentWrites();
+    TestRedaction();
+    TestRotation();
+    TestThreadRequestId();
 
     if (g_failures != 0) {
         std::cerr << "logging test failed with " << g_failures << " failure(s)\n";

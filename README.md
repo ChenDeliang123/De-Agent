@@ -270,6 +270,9 @@ MCP `tools/list` / `tools/call` 的执行时长、输出大小和退出状态。
 P3 后，CLI 与 Node BFF 也会写文件日志；`de` 会把自己的 `.runtime`
 传给 CLI，方便统一查看。
 
+P4 后，日志支持线程级 `req=` request id 串联 Web → Agent → DeepSeek，
+自动脱敏 `sk-...` API Key，并按大小轮转文件。
+
 查看结构化日志：
 
 ```bash
@@ -285,6 +288,8 @@ de logs web
 level = info
 file = .runtime/backend.log
 console = false
+max_size_bytes = 10485760
+max_files = 5
 ```
 
 也可用环境变量或参数覆盖：
