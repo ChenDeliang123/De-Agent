@@ -10,13 +10,13 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "a2a/core/id.hpp"
+#include "a2a/core/time.hpp"
 #include "a2a/models/message.hpp"
 #include "a2a/models/requests.hpp"
 #include "a2a/models/task.hpp"
@@ -24,6 +24,7 @@
 #include "a2a/server/task_store.hpp"
 
 #include "aiagent/agent/history_cache.hpp"
+#include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/log.hpp"
 
 namespace aiagent::web {
@@ -126,7 +127,7 @@ std::string SessionTitleFromHistory(const std::vector<a2a::models::Message>& his
 void SetCommonHeaders(httplib::Response& response) {
     response.set_header("Access-Control-Allow-Origin", "*");
     response.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    response.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    response.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
 }
 
 // 将 AgentEvent 序列化为 SSE 帧（event + data）。arguments 原始 JSON 若能
@@ -234,6 +235,22 @@ public:
         compaction_info_handler_ = std::move(handler);
     }
 
+    void SetDeleteHandler(WebGateway::DeleteHandler handler) {
+        delete_handler_ = std::move(handler);
+    }
+
+    void SetCloneHandler(WebGateway::CloneHandler handler) {
+        clone_handler_ = std::move(handler);
+    }
+
+    void SetToolsHandler(WebGateway::ToolsHandler handler) {
+        tools_handler_ = std::move(handler);
+    }
+
+    void SetSessionMetaStore(aiagent::agent::SessionMetaStore* session_meta_store) {
+        session_meta_store_ = session_meta_store;
+    }
+
     void CancelSession(const std::string& session_id) {
         std::lock_guard<std::mutex> lock(cancels_mutex_);
         const auto it = active_cancels_.find(session_id);
@@ -257,19 +274,73 @@ private:
         server_.Get("/api/v1/sessions",
                     [this](const httplib::Request&, httplib::Response& response) {
                         SetCommonHeaders(response);
-                        std::set<std::string> contexts;
+                        // 单次遍历任务表：每个 context 取写入时间最新的历史，
+                        // 同时记录 updated_at 以便按最近使用排序。
+                        struct Entry {
+                            std::string id;
+                            std::vector<a2a::models::Message> history;
+                            std::optional<a2a::core::TimePoint> updated;
+                        };
+                        std::map<std::string, Entry> entries;
                         for (const auto& task : task_store_.ListAll()) {
-                            if (!task.context_id.empty()) {
-                                contexts.insert(task.context_id);
+                            if (task.context_id.empty()) {
+                                continue;
+                            }
+                            Entry& entry = entries[task.context_id];
+                            entry.id = task.context_id;
+                            if (!task.status.timestamp.has_value()) {
+                                if (entry.history.empty()) {
+                                    entry.history = task.history;
+                                }
+                                continue;
+                            }
+                            if (!entry.updated.has_value() ||
+                                *task.status.timestamp > *entry.updated) {
+                                entry.updated = task.status.timestamp;
+                                entry.history = task.history;
                             }
                         }
+                        std::vector<Entry> ordered;
+                        ordered.reserve(entries.size());
+                        for (auto& [id, entry] : entries) {
+                            (void)id;
+                            if (entry.history.empty()) {
+                                entry.history = LatestHistory(task_store_, history_cache_,
+                                                              entry.id);
+                            }
+                            ordered.push_back(std::move(entry));
+                        }
+                        std::sort(ordered.begin(), ordered.end(),
+                                  [](const Entry& left, const Entry& right) {
+                                      const auto left_time = left.updated.value_or(
+                                              a2a::core::TimePoint{});
+                                      const auto right_time = right.updated.value_or(
+                                              a2a::core::TimePoint{});
+                                      if (left_time != right_time) {
+                                          return left_time > right_time;
+                                      }
+                                      return left.id < right.id;
+                                  });
                         nlohmann::json payload = nlohmann::json::array();
-                        for (const auto& context : contexts) {
-                            payload.push_back(
-                                    {{"id", context},
-                                     {"title", SessionTitleFromHistory(
-                                                       LatestHistory(task_store_,
-                                                                     history_cache_, context))}});
+                        for (const auto& entry : ordered) {
+                            std::string title;
+                            if (session_meta_store_ != nullptr) {
+                                if (auto stored = session_meta_store_->GetTitle(entry.id);
+                                    stored.has_value()) {
+                                    title = *stored;
+                                }
+                            }
+                            if (title.empty()) {
+                                title = SessionTitleFromHistory(entry.history);
+                            }
+                            nlohmann::json item = {{"id", entry.id}, {"title", title}};
+                            if (entry.updated.has_value()) {
+                                item["updated_at"] =
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                entry.updated->time_since_epoch())
+                                                .count();
+                            }
+                            payload.push_back(std::move(item));
                         }
                         response.set_content(payload.dump(), "application/json");
                     });
@@ -352,6 +423,187 @@ private:
                                                {"messages_after", record.messages_after}}
                                         .dump(),
                                 "application/json");
+                    });
+
+        // 设置会话显式标题（/name）。
+        server_.Patch("/api/v1/sessions/:id",
+                      [this](const httplib::Request& request, httplib::Response& response) {
+                          SetCommonHeaders(response);
+                          const auto it = request.path_params.find("id");
+                          if (it == request.path_params.end()) {
+                              response.status = 400;
+                              response.set_content(R"({"error":"missing session id"})",
+                                                   "application/json");
+                              return;
+                          }
+                          if (session_meta_store_ == nullptr) {
+                              response.status = 501;
+                              response.set_content(R"({"error":"session rename not available"})",
+                                                   "application/json");
+                              return;
+                          }
+                          try {
+                              const auto body = nlohmann::json::parse(request.body);
+                              const std::string title = StringValue(body, "title");
+                              if (title.empty()) {
+                                  response.status = 400;
+                                  response.set_content(R"({"error":"title is required"})",
+                                                       "application/json");
+                                  return;
+                              }
+                              const std::string short_title = ShortTitle(title);
+                              session_meta_store_->SetTitle(it->second, short_title);
+                              aiagent::DefaultLogger().Log(
+                                      aiagent::LogLevel::kInfo, "web",
+                                      "session=" + it->second + " event=session_rename");
+                              response.set_content(
+                                      nlohmann::json{{"id", it->second},
+                                                     {"title", short_title}}
+                                              .dump(),
+                                      "application/json");
+                          } catch (const nlohmann::json::exception& e) {
+                              response.status = 400;
+                              response.set_content(
+                                      nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                      e.what()}}
+                                              .dump(),
+                                      "application/json");
+                          }
+                      });
+
+        // 删除会话及其全部任务。
+        server_.Delete("/api/v1/sessions/:id",
+                       [this](const httplib::Request& request, httplib::Response& response) {
+                           SetCommonHeaders(response);
+                           const auto it = request.path_params.find("id");
+                           if (it == request.path_params.end()) {
+                               response.status = 400;
+                               response.set_content(R"({"error":"missing session id"})",
+                                                    "application/json");
+                               return;
+                           }
+                           if (!delete_handler_) {
+                               response.status = 501;
+                               response.set_content(R"({"error":"session delete not available"})",
+                                                    "application/json");
+                               return;
+                           }
+                           std::string error;
+                           if (!delete_handler_(it->second, &error)) {
+                               response.status = 404;
+                               response.set_content(
+                                       nlohmann::json{{"error", error}}.dump(),
+                                       "application/json");
+                               return;
+                           }
+                           response.set_content(
+                                   nlohmann::json{{"deleted", true}, {"id", it->second}}
+                                           .dump(),
+                                   "application/json");
+                       });
+
+        // 复制会话（/clone、/fork）：以最新完整历史创建新会话。
+        server_.Post("/api/v1/sessions/:id/clone",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         SetCommonHeaders(response);
+                         const auto it = request.path_params.find("id");
+                         if (it == request.path_params.end()) {
+                             response.status = 400;
+                             response.set_content(R"({"error":"missing session id"})",
+                                                  "application/json");
+                             return;
+                         }
+                         if (!clone_handler_) {
+                             response.status = 501;
+                             response.set_content(R"({"error":"session clone not available"})",
+                                                  "application/json");
+                             return;
+                         }
+                         std::string new_id;
+                         std::string error;
+                         if (!clone_handler_(it->second, &new_id, &error)) {
+                             response.status = 404;
+                             response.set_content(nlohmann::json{{"error", error}}.dump(),
+                                                  "application/json");
+                             return;
+                         }
+                         response.set_content(
+                                 nlohmann::json{{"session_id", new_id}}.dump(),
+                                 "application/json");
+                     });
+
+        // 会话统计（/session）：消息数、字符数、任务数与最近一次压缩。
+        server_.Get("/api/v1/sessions/:id/stats",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        SetCommonHeaders(response);
+                        const auto it = request.path_params.find("id");
+                        if (it == request.path_params.end()) {
+                            response.status = 400;
+                            response.set_content(R"({"error":"missing session id"})",
+                                                 "application/json");
+                            return;
+                        }
+                        const auto history =
+                                LatestHistory(task_store_, history_cache_, it->second);
+                        if (history.empty()) {
+                            response.status = 404;
+                            response.set_content(R"({"error":"session not found"})",
+                                                 "application/json");
+                            return;
+                        }
+                        std::size_t user_messages = 0;
+                        std::size_t assistant_messages = 0;
+                        std::size_t characters = 0;
+                        for (const auto& message : history) {
+                            const std::string text = FirstText(message);
+                            characters += text.size();
+                            if (message.role == a2a::models::Role::kUser) {
+                                ++user_messages;
+                            } else if (message.role == a2a::models::Role::kAgent) {
+                                ++assistant_messages;
+                            }
+                        }
+                        std::size_t tasks = 0;
+                        for (const auto& task : task_store_.ListAll()) {
+                            if (task.context_id == it->second) {
+                                ++tasks;
+                            }
+                        }
+                        nlohmann::json payload = {{"id", it->second},
+                                                  {"messages", history.size()},
+                                                  {"user_messages", user_messages},
+                                                  {"assistant_messages", assistant_messages},
+                                                  {"characters", characters},
+                                                  {"tasks", tasks},
+                                                  {"compaction", nullptr}};
+                        aiagent::agent::CompactionRecord record;
+                        if (compaction_info_handler_ &&
+                            compaction_info_handler_(it->second, &record)) {
+                            payload["compaction"] = {{"forced", record.forced},
+                                                     {"tokens_before", record.tokens_before},
+                                                     {"tokens_after", record.tokens_after},
+                                                     {"messages_before", record.messages_before},
+                                                     {"messages_after", record.messages_after}};
+                        }
+                        response.set_content(payload.dump(), "application/json");
+                    });
+
+        // 可用工具清单（/tools）：内置 coding 工具 + MCP 工具。
+        server_.Get("/api/v1/tools",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        SetCommonHeaders(response);
+                        if (!tools_handler_) {
+                            response.status = 501;
+                            response.set_content(R"({"error":"tools not available"})",
+                                                 "application/json");
+                            return;
+                        }
+                        nlohmann::json payload = nlohmann::json::array();
+                        for (const auto& tool : tools_handler_()) {
+                            payload.push_back({{"name", tool.name},
+                                               {"description", tool.description}});
+                        }
+                        response.set_content(payload.dump(), "application/json");
                     });
 
         server_.Post("/api/v1/chat",
@@ -569,6 +821,10 @@ private:
     WebGateway::StreamEventHandler stream_event_handler_;
     WebGateway::CompactHandler compact_handler_;
     WebGateway::CompactionInfoHandler compaction_info_handler_;
+    WebGateway::DeleteHandler delete_handler_;
+    WebGateway::CloneHandler clone_handler_;
+    WebGateway::ToolsHandler tools_handler_;
+    aiagent::agent::SessionMetaStore* session_meta_store_ = nullptr;
     std::mutex cancels_mutex_;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_cancels_;
 };
@@ -598,6 +854,23 @@ void WebGateway::SetCompactHandler(WebGateway::CompactHandler handler) {
 
 void WebGateway::SetCompactionInfoHandler(WebGateway::CompactionInfoHandler handler) {
     impl_->SetCompactionInfoHandler(std::move(handler));
+}
+
+void WebGateway::SetDeleteHandler(WebGateway::DeleteHandler handler) {
+    impl_->SetDeleteHandler(std::move(handler));
+}
+
+void WebGateway::SetCloneHandler(WebGateway::CloneHandler handler) {
+    impl_->SetCloneHandler(std::move(handler));
+}
+
+void WebGateway::SetToolsHandler(WebGateway::ToolsHandler handler) {
+    impl_->SetToolsHandler(std::move(handler));
+}
+
+void WebGateway::SetSessionMetaStore(
+        aiagent::agent::SessionMetaStore* session_meta_store) {
+    impl_->SetSessionMetaStore(session_meta_store);
 }
 
 void WebGateway::SetHistoryCache(aiagent::agent::HistoryCache* history_cache) {

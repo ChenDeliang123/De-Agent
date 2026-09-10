@@ -166,3 +166,22 @@ test("LineEditor exits on Ctrl+D with an empty buffer", async () => {
   const result = await pending;
   assert.equal(result.exit, true);
 });
+
+test("LineEditor selectList returns the chosen index and cancels on Esc", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const editor = new LineEditor({ input, output, complete });
+
+  const pending = editor.selectList(["alpha", "beta", "gamma"], "pick one");
+  assert.ok(output.text.includes("pick one"));
+  assert.ok(output.text.includes("❯ alpha"));
+
+  input.emit("keypress", "", key("down"));
+  assert.ok(output.text.includes("❯ beta"));
+  input.emit("keypress", "", key("return"));
+  assert.equal(await pending, 1);
+
+  const cancel = editor.selectList(["alpha", "beta"], "pick one");
+  input.emit("keypress", "", key("escape"));
+  assert.equal(await cancel, null);
+});

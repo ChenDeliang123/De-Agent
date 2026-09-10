@@ -1,10 +1,11 @@
 import readlinePromises from "node:readline/promises";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
-import { cancelChat, listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, listSessions, loadHistory, renameSession, streamChat } from "./session.mjs";
 import { LineEditor, renderHotkeys } from "./editor.mjs";
 import { commands, completeCommands, renderHelp, runCommand } from "./commands.mjs";
 
@@ -25,13 +26,29 @@ if (input.isTTY) {
 }
 
 function parseArgs(argv) {
-  const options = { backend: defaultBackend, session: null };
+  const options = {
+    backend: defaultBackend,
+    session: null,
+    continueSession: false,
+    resume: false,
+    name: null,
+    cwd: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === "--backend" && i + 1 < argv.length) {
+    const arg = argv[i];
+    if (arg === "--backend" && i + 1 < argv.length) {
       options.backend = argv[++i];
-    } else if (argv[i] === "--session" && i + 1 < argv.length) {
+    } else if (arg === "--session" && i + 1 < argv.length) {
       options.session = argv[++i];
-    } else if (argv[i] === "--help" || argv[i] === "-h") {
+    } else if (arg === "-c" || arg === "--continue") {
+      options.continueSession = true;
+    } else if (arg === "-r" || arg === "--resume") {
+      options.resume = true;
+    } else if (arg === "--name" && i + 1 < argv.length) {
+      options.name = argv[++i];
+    } else if (arg === "--cwd" && i + 1 < argv.length) {
+      options.cwd = argv[++i];
+    } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     }
   }
@@ -40,7 +57,16 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-usage: node cli.mjs [--backend <url>] [--session <id>]
+usage: node cli.mjs [options]
+
+options:
+  --backend <url>   Web Gateway base url (default ${defaultBackend})
+  --session <id>    resume a specific session
+  -c, --continue    continue the most recent session
+  -r, --resume      pick a session to resume at startup
+  --name <name>     display name for the new session
+  --cwd <dir>       tool working directory (default: current directory)
+  -h, --help        show this help
 `);
   console.log(renderHelp(commands));
   console.log(`\n${renderHotkeys()}\n`);
@@ -64,6 +90,14 @@ async function renderHistory(backend, sessionId) {
   }
 }
 
+function sessionEntryId(entry) {
+  return typeof entry === "string" ? entry : entry.id;
+}
+
+function sessionEntryLabel(entry) {
+  return typeof entry === "string" ? entry : entry.title || "untitled";
+}
+
 async function handleLine(ctx, answer) {
   const trimmed = answer.trim();
   if (!trimmed) {
@@ -73,10 +107,22 @@ async function handleLine(ctx, answer) {
     await runCommand(ctx, trimmed);
     return;
   }
-  ctx.state.sessionId = await sendMessage(ctx.backend, ctx.state.sessionId, trimmed);
+  ctx.state.sessionId = await sendMessage(ctx, trimmed);
+  if (ctx.state.pendingName) {
+    try {
+      await renameSession(ctx.backend, ctx.state.sessionId, ctx.state.pendingName);
+      ctx.print(`renamed session to ${ctx.state.pendingName}`);
+    } catch (error) {
+      ctx.print(`rename failed: ${error.message}`);
+    }
+    ctx.state.pendingName = null;
+  }
 }
 
-async function sendMessage(backend, sessionId, text) {
+async function sendMessage(ctx, text) {
+  const backend = ctx.backend;
+  const sessionId = ctx.state.sessionId;
+  const cwd = ctx.state.cwd || process.cwd();
   clearInputLine();
   const requestSessionId = sessionId ?? randomUUID();
   log("info", "cli", `event=user_message session=${requestSessionId} bytes=${text.length}`);
@@ -112,7 +158,7 @@ async function sendMessage(backend, sessionId, text) {
           throw new Error(data.error ?? "unknown error");
         }
       },
-      process.cwd(),
+      cwd,
       controller.signal,
     );
     renderer.endReply();
@@ -144,6 +190,17 @@ async function sendMessage(backend, sessionId, text) {
   }
 }
 
+function makeSelector(editor) {
+  return (sessions) =>
+    editor.selectList(
+      sessions.map((entry) => ({
+        label: sessionEntryLabel(entry),
+        description: sessionEntryId(entry),
+      })),
+      "select a session (↑/↓ move, Enter open, Esc cancel):",
+    );
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -155,7 +212,21 @@ async function main() {
   console.log(`ai-agent-cli  backend=${backend}`);
   log("info", "cli", `event=cli_start backend=${backend}`);
 
-  const state = { sessionId: options.session, shouldExit: false };
+  const state = {
+    sessionId: options.session,
+    cwd: options.cwd ? path.resolve(options.cwd) : process.cwd(),
+    shouldExit: false,
+    pendingName: null,
+  };
+
+  const editor = input.isTTY
+    ? new LineEditor({
+        input,
+        output,
+        complete: (prefix) => completeCommands(prefix, commands),
+      })
+    : null;
+
   const ctx = {
     backend,
     state,
@@ -170,12 +241,51 @@ async function main() {
       }
     },
     renderHistory: (backendUrl, sessionId) => renderHistory(backendUrl, sessionId),
+    selectSession: editor ? makeSelector(editor) : null,
+    confirm: editor
+      ? async (message) => {
+          const result = await editor.readLine(`${message} (y/N) `);
+          return !result.exit && /^y(es)?$/i.test((result.text ?? "").trim());
+        }
+      : null,
   };
 
   const sessions = await listSessions(backend).catch(() => []);
   if (sessions.length > 0) {
-    console.log(`found ${sessions.length} session(s); use /sessions or /open <id>`);
+    console.log(`found ${sessions.length} session(s); use /resume to pick one`);
   }
+
+  // 启动会话解析顺序：--session > --continue > --resume。
+  if (!state.sessionId && options.continueSession && sessions.length > 0) {
+    state.sessionId = sessionEntryId(sessions[0]);
+    console.log(`continuing session ${state.sessionId}`);
+  } else if (!state.sessionId && options.resume && sessions.length > 0) {
+    if (editor) {
+      const index = await ctx.selectSession(sessions);
+      if (index !== null && index !== undefined && sessions[index]) {
+        state.sessionId = sessionEntryId(sessions[index]);
+      }
+    } else {
+      sessions.forEach((entry, index) => {
+        console.log(`  ${index + 1}. ${sessionEntryLabel(entry)}  (${sessionEntryId(entry)})`);
+      });
+      console.log("use /resume <index|id> to resume one");
+    }
+  }
+
+  if (options.name) {
+    if (state.sessionId) {
+      try {
+        await renameSession(backend, state.sessionId, options.name);
+        console.log(`renamed session to ${options.name}`);
+      } catch (error) {
+        console.error(`rename failed: ${error.message}`);
+      }
+    } else {
+      state.pendingName = options.name;
+    }
+  }
+
   if (state.sessionId) {
     try {
       await renderHistory(backend, state.sessionId);
@@ -186,12 +296,7 @@ async function main() {
   }
 
   try {
-    if (input.isTTY) {
-      const editor = new LineEditor({
-        input,
-        output,
-        complete: (prefix) => completeCommands(prefix, commands),
-      });
+    if (editor) {
       while (!state.shouldExit) {
         const label = state.sessionId ? state.sessionId.slice(0, 8) : "new";
         const result = await editor.readLine(`[${label}] ❯ `);

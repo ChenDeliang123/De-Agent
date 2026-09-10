@@ -12,10 +12,23 @@
 //   }
 //
 // handler 的 ctx 由 cli.mjs 注入，约定字段：
-//   { backend, state, print, log, clearInputLine, clearScreen, renderHistory, commands }
-// 其中 state 至少包含 { sessionId, shouldExit }。
+//   { backend, state, print, log, clearInputLine, clearScreen, renderHistory,
+//     commands, selectSession?, confirm? }
+// 其中 state 至少包含 { sessionId, cwd, shouldExit, pendingName? }。
 
-import { compactSession, listSessions } from "./session.mjs";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  cloneSession,
+  compactSession,
+  deleteSession,
+  health,
+  listSessions,
+  listTools,
+  renameSession,
+  sessionStats,
+} from "./session.mjs";
 import { renderHotkeys } from "./editor.mjs";
 
 const CATEGORY_ORDER = ["session", "context", "info", "local"];
@@ -27,19 +40,59 @@ const CATEGORY_TITLES = {
   local: "Local",
 };
 
-async function showSessions(ctx) {
-  const sessions = await listSessions(ctx.backend);
-  if (sessions.length === 0) {
-    ctx.print("(no sessions yet)");
-    return [];
+function sessionId(entry) {
+  return typeof entry === "string" ? entry : entry.id;
+}
+
+function sessionTitle(entry, index) {
+  if (typeof entry === "string") {
+    return `session ${index + 1}`;
   }
-  sessions.forEach((session, index) => {
-    const id = typeof session === "string" ? session : session.id;
-    const title =
-      typeof session === "string" ? `session ${index + 1}` : session.title || "untitled";
-    ctx.print(`  ${index + 1}. ${title}  (${id})`);
+  return entry.title || "untitled";
+}
+
+function listSessionsFormatted(ctx, all) {
+  if (all.length === 0) {
+    ctx.print("(no sessions yet)");
+    return;
+  }
+  all.forEach((entry, index) => {
+    ctx.print(`  ${index + 1}. ${sessionTitle(entry, index)}  (${sessionId(entry)})`);
   });
-  return sessions;
+}
+
+async function openSession(ctx, all, target) {
+  const numeric = Number(target);
+  const entry =
+    Number.isInteger(numeric) && numeric >= 1 && numeric <= all.length
+      ? all[numeric - 1]
+      : all.find((session) => sessionId(session) === target);
+  if (!entry) {
+    ctx.print(`session not found: ${target}`);
+    return false;
+  }
+  ctx.state.sessionId = sessionId(entry);
+  ctx.clearInputLine();
+  await ctx.renderHistory(ctx.backend, ctx.state.sessionId);
+  ctx.log("info", "cli", `event=open_session session=${ctx.state.sessionId}`);
+  return true;
+}
+
+async function cloneCurrentSession(ctx) {
+  if (!ctx.state.sessionId) {
+    ctx.print("no active session to clone");
+    return;
+  }
+  try {
+    const result = await cloneSession(ctx.backend, ctx.state.sessionId);
+    ctx.state.sessionId = result.session_id;
+    ctx.print(`cloned to session ${result.session_id}`);
+    ctx.clearInputLine();
+    await ctx.renderHistory(ctx.backend, ctx.state.sessionId);
+    ctx.log("info", "cli", `event=clone_session session=${ctx.state.sessionId}`);
+  } catch (error) {
+    ctx.print(`clone failed: ${error.message}`);
+  }
 }
 
 export const commands = [
@@ -56,46 +109,149 @@ export const commands = [
     },
   },
   {
-    name: "sessions",
-    aliases: [],
-    description: "List backend sessions",
-    argHint: "",
-    category: "session",
-    handler: async (ctx) => {
-      await showSessions(ctx);
-    },
-  },
-  {
-    name: "open",
-    aliases: [],
-    description: "Resume a session by id or index",
-    argHint: "<id|index>",
+    name: "resume",
+    aliases: ["sessions", "open"],
+    description: "Resume a previous session",
+    argHint: "[id|index]",
     category: "session",
     handler: async (ctx, arg) => {
       const all = await listSessions(ctx.backend);
-      let target = (arg ?? "").trim();
-      if (!target && all.length > 0) {
-        target = String(all.length);
+      if (all.length === 0) {
+        ctx.print("(no sessions yet)");
+        return;
       }
+      const target = (arg ?? "").trim();
+      if (target) {
+        await openSession(ctx, all, target);
+        return;
+      }
+      if (typeof ctx.selectSession === "function") {
+        const index = await ctx.selectSession(all);
+        if (index === null || index === undefined || !all[index]) {
+          return;
+        }
+        await openSession(ctx, all, sessionId(all[index]));
+        return;
+      }
+      listSessionsFormatted(ctx, all);
+      ctx.print("use /resume <index|id> to resume one");
+    },
+  },
+  {
+    name: "session",
+    aliases: [],
+    description: "Show current session info and stats",
+    argHint: "",
+    category: "session",
+    handler: async (ctx) => {
+      if (!ctx.state.sessionId) {
+        ctx.print("no active session");
+        return;
+      }
+      try {
+        const stats = await sessionStats(ctx.backend, ctx.state.sessionId);
+        ctx.print(`session:    ${stats.id}`);
+        ctx.print(
+          `messages:   ${stats.messages} (user ${stats.user_messages}, assistant ${stats.assistant_messages})`,
+        );
+        ctx.print(`characters: ${stats.characters}`);
+        ctx.print(`tasks:      ${stats.tasks}`);
+        if (stats.compaction) {
+          ctx.print(
+            `compaction: ${stats.compaction.tokens_before} → ${stats.compaction.tokens_after} tokens`,
+          );
+        } else {
+          ctx.print("compaction: (none)");
+        }
+        ctx.print(`cwd:        ${ctx.state.cwd}`);
+      } catch (error) {
+        ctx.print(`session info failed: ${error.message}`);
+      }
+    },
+  },
+  {
+    name: "name",
+    aliases: [],
+    description: "Set the current session display name",
+    argHint: "<title>",
+    category: "session",
+    handler: async (ctx, arg) => {
+      if (!ctx.state.sessionId) {
+        ctx.print("no active session");
+        return;
+      }
+      const title = (arg ?? "").trim();
+      if (!title) {
+        ctx.print("usage: /name <title>");
+        return;
+      }
+      try {
+        const result = await renameSession(ctx.backend, ctx.state.sessionId, title);
+        ctx.print(`renamed: ${result.title ?? title}`);
+        ctx.log("info", "cli", `event=rename_session session=${ctx.state.sessionId}`);
+      } catch (error) {
+        ctx.print(`rename failed: ${error.message}`);
+      }
+    },
+  },
+  {
+    name: "clone",
+    aliases: [],
+    description: "Duplicate the current session into a new one",
+    argHint: "",
+    category: "session",
+    handler: async (ctx) => {
+      await cloneCurrentSession(ctx);
+    },
+  },
+  {
+    name: "fork",
+    aliases: [],
+    description: "Fork the current session at its latest point",
+    argHint: "",
+    category: "session",
+    handler: async (ctx) => {
+      await cloneCurrentSession(ctx);
+    },
+  },
+  {
+    name: "delete",
+    aliases: [],
+    description: "Delete the current (or given) session",
+    argHint: "[id] [--yes]",
+    category: "session",
+    handler: async (ctx, arg) => {
+      const tokens = (arg ?? "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      const force = tokens.includes("--yes") || tokens.includes("-y");
+      const target = tokens.find((token) => !token.startsWith("-")) ?? ctx.state.sessionId;
       if (!target) {
-        ctx.print("no sessions to open");
+        ctx.print("no active session to delete");
         return;
       }
-      const numeric = Number(target);
-      const entry =
-        Number.isInteger(numeric) && numeric >= 1 && numeric <= all.length
-          ? all[numeric - 1]
-          : all.find(
-              (session) => (typeof session === "string" ? session : session.id) === target,
-            );
-      if (!entry) {
-        ctx.print(`session not found: ${target}`);
-        return;
+      if (!force) {
+        if (typeof ctx.confirm !== "function") {
+          ctx.print("refusing to delete without confirmation; use /delete <id> --yes");
+          return;
+        }
+        const confirmed = await ctx.confirm(`delete session ${target}?`);
+        if (!confirmed) {
+          ctx.print("delete cancelled");
+          return;
+        }
       }
-      ctx.state.sessionId = typeof entry === "string" ? entry : entry.id;
-      ctx.clearInputLine();
-      await ctx.renderHistory(ctx.backend, ctx.state.sessionId);
-      ctx.log("info", "cli", `event=open_session session=${ctx.state.sessionId}`);
+      try {
+        await deleteSession(ctx.backend, target);
+        if (ctx.state.sessionId === target) {
+          ctx.state.sessionId = null;
+        }
+        ctx.print(`deleted session ${target}`);
+        ctx.log("info", "cli", `event=delete_session session=${target}`);
+      } catch (error) {
+        ctx.print(`delete failed: ${error.message}`);
+      }
     },
   },
   {
@@ -117,6 +273,81 @@ export const commands = [
         ctx.print(`compact failed: ${error.message}`);
         ctx.log("error", "cli", `event=compact_failed message=${error.message}`);
       }
+    },
+  },
+  {
+    name: "status",
+    aliases: [],
+    description: "Show backend status and current session",
+    argHint: "",
+    category: "info",
+    handler: async (ctx) => {
+      let healthy = false;
+      try {
+        await health(ctx.backend);
+        healthy = true;
+      } catch {
+        healthy = false;
+      }
+      let count = 0;
+      try {
+        count = (await listSessions(ctx.backend)).length;
+      } catch {
+        count = 0;
+      }
+      ctx.print(`backend:  ${healthy ? "ok" : "unreachable"}  ${ctx.backend}`);
+      ctx.print(`sessions: ${count}`);
+      ctx.print(`session:  ${ctx.state.sessionId ?? "(none)"}`);
+      ctx.print(`cwd:      ${ctx.state.cwd}`);
+    },
+  },
+  {
+    name: "tools",
+    aliases: [],
+    description: "List tools available to the agent",
+    argHint: "",
+    category: "info",
+    handler: async (ctx) => {
+      try {
+        const tools = await listTools(ctx.backend);
+        if (tools.length === 0) {
+          ctx.print("(no tools)");
+          return;
+        }
+        for (const tool of tools) {
+          const description = String(tool.description ?? "").split("\n")[0];
+          ctx.print(`  ${String(tool.name).padEnd(18)} ${description}`);
+        }
+      } catch (error) {
+        ctx.print(`tools failed: ${error.message}`);
+      }
+    },
+  },
+  {
+    name: "cwd",
+    aliases: [],
+    description: "Show or change the tool working directory",
+    argHint: "[dir]",
+    category: "local",
+    handler: async (ctx, arg) => {
+      const target = (arg ?? "").trim();
+      if (!target) {
+        ctx.print(`cwd: ${ctx.state.cwd}`);
+        return;
+      }
+      const base = ctx.state.cwd ?? process.cwd();
+      const resolved = path.resolve(base, target);
+      try {
+        if (!fs.statSync(resolved).isDirectory()) {
+          ctx.print(`not a directory: ${resolved}`);
+          return;
+        }
+      } catch {
+        ctx.print(`directory not found: ${resolved}`);
+        return;
+      }
+      ctx.state.cwd = resolved;
+      ctx.print(`cwd: ${resolved}`);
     },
   },
   {

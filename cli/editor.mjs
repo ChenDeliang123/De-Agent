@@ -427,13 +427,83 @@ export class LineEditor {
     });
   }
 
+  selectList(items, title = "") {
+    const input = this.#input;
+    if (!input.isTTY || items.length === 0) {
+      return Promise.resolve(null);
+    }
+    if (!input.__aiagentKeypress) {
+      readline.emitKeypressEvents(input);
+      input.__aiagentKeypress = true;
+    }
+    const previousRaw = input.isRaw === true;
+    if (typeof input.setRawMode === "function") {
+      input.setRawMode(true);
+    }
+    input.resume?.();
+
+    const entries = items.map((item) =>
+      typeof item === "string" ? { label: item, description: "" } : item,
+    );
+    this.#drawn = 0;
+    let selected = 0;
+    const draw = () => {
+      const columns = this.#columns();
+      let frame = this.#eraseFrame();
+      frame += `\r${clipToWidth(title, columns - 1)}\n`;
+      entries.forEach((entry, index) => {
+        const marker = index === selected ? "❯" : " ";
+        const description = entry.description ? `  ${entry.description}` : "";
+        frame += `\r\x1b[K${clipToWidth(`${marker} ${entry.label}${description}`, columns - 1)}`;
+        if (index < entries.length - 1) {
+          frame += "\n";
+        }
+      });
+      this.#drawn = 1 + entries.length;
+      this.#output.write(frame);
+    };
+    draw();
+
+    return new Promise((resolve) => {
+      const listener = (_str, key) => {
+        if (!key) {
+          return;
+        }
+        if (key.name === "up") {
+          selected = (selected - 1 + entries.length) % entries.length;
+          draw();
+        } else if (key.name === "down") {
+          selected = (selected + 1) % entries.length;
+          draw();
+        } else if (key.name === "return" || key.name === "enter") {
+          finish(selected);
+        } else if (
+          key.name === "escape" ||
+          (key.ctrl && (key.name === "c" || key.name === "d"))
+        ) {
+          finish(null);
+        }
+      };
+      const finish = (result) => {
+        input.removeListener("keypress", listener);
+        this.#clearDrawn();
+        if (typeof input.setRawMode === "function") {
+          input.setRawMode(previousRaw);
+        }
+        resolve(result);
+      };
+      input.on("keypress", listener);
+    });
+  }
+
   #columns() {
     return this.#output.columns || 80;
   }
 
-  #clearDrawn() {
+  // 清除已绘制的输入/候选区域，光标回到区域起始处（不换行）。
+  #eraseFrame() {
     if (this.#drawn <= 0) {
-      return;
+      return "";
     }
     let frame = "";
     if (this.#drawn > 1) {
@@ -448,28 +518,20 @@ export class LineEditor {
     if (this.#drawn > 1) {
       frame += `\x1b[${this.#drawn - 1}A`;
     }
-    frame += "\r";
-    this.#output.write(frame);
+    return frame;
+  }
+
+  #clearDrawn() {
+    if (this.#drawn <= 0) {
+      return;
+    }
+    this.#output.write(`${this.#eraseFrame()}\r`);
     this.#drawn = 0;
   }
 
   #redraw() {
     const state = this.#state;
-    let frame = "";
-    if (this.#drawn > 0) {
-      if (this.#drawn > 1) {
-        frame += `\x1b[${this.#drawn - 1}A`;
-      }
-      for (let i = 0; i < this.#drawn; i += 1) {
-        frame += "\r\x1b[K";
-        if (i < this.#drawn - 1) {
-          frame += "\x1b[1B";
-        }
-      }
-      if (this.#drawn > 1) {
-        frame += `\x1b[${this.#drawn - 1}A`;
-      }
-    }
+    let frame = this.#eraseFrame();
     frame += `\r${this.#prompt}${state.buffer}`;
 
     const columns = this.#columns();

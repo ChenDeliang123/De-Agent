@@ -27,13 +27,20 @@ function makeContext(overrides = {}) {
   return { ctx, printed, state };
 }
 
-test("registry exposes the P0 commands", () => {
+test("registry exposes the P0/P1 commands", () => {
   const names = commands.map((command) => command.name);
   for (const expected of [
     "new",
-    "sessions",
-    "open",
+    "resume",
+    "session",
+    "name",
+    "clone",
+    "fork",
+    "delete",
     "compact",
+    "status",
+    "tools",
+    "cwd",
     "help",
     "hotkeys",
     "clear",
@@ -41,6 +48,12 @@ test("registry exposes the P0 commands", () => {
   ]) {
     assert.ok(names.includes(expected), `missing command /${expected}`);
   }
+});
+
+test("findCommand resolves legacy session aliases", () => {
+  assert.equal(findCommand("sessions").name, "resume");
+  assert.equal(findCommand("open").name, "resume");
+  assert.equal(findCommand("resume").name, "resume");
 });
 
 test("findCommand resolves primary names and aliases", () => {

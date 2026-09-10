@@ -96,6 +96,7 @@ add_library(aiagent_agent STATIC
   src/agent/agent_runtime.cpp
   src/agent/compaction.cpp
   src/agent/history_cache.cpp
+  src/agent/session_meta_store.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
@@ -183,6 +184,10 @@ if(AIAGENT_BUILD_TESTS)
   target_link_libraries(history_cache_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_history_cache COMMAND history_cache_test)
 
+  add_executable(session_meta_store_test tests/session_meta_store_test.cpp)
+  target_link_libraries(session_meta_store_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_session_meta_store COMMAND session_meta_store_test)
+
   add_executable(compaction_test tests/compaction_test.cpp)
   target_link_libraries(compaction_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_compaction COMMAND compaction_test)
@@ -202,6 +207,7 @@ if(AIAGENT_BUILD_TESTS)
 
   add_executable(web_gateway_test tests/web_gateway_test.cpp)
   target_link_libraries(web_gateway_test PRIVATE aiagent_web aiagent_agent)
+  target_include_directories(web_gateway_test PRIVATE ${AIAGENT_HTTPLIB_INCLUDE_DIR})
   add_test(NAME aiagent_web_gateway COMMAND web_gateway_test)
 endif()
 

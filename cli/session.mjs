@@ -35,6 +35,73 @@ export async function compactSession(backendUrl, sessionId) {
   return body;
 }
 
+export async function renameSession(backendUrl, sessionId, title) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: encoder.encode(JSON.stringify({ title })),
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `rename failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function deleteSession(backendUrl, sessionId) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `delete failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function cloneSession(backendUrl, sessionId) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/clone`,
+    { method: "POST" },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `clone failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function sessionStats(backendUrl, sessionId) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/stats`,
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `stats request failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function listTools(backendUrl) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/tools`);
+  if (!response.ok) {
+    throw new Error(`failed to list tools: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function health(backendUrl) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/health`);
+  if (!response.ok) {
+    throw new Error(`health check failed: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function cancelChat(backendUrl, sessionId) {  const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/chat/cancel`,
     {

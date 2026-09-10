@@ -210,21 +210,39 @@ de logs      # 查看后端日志
 常用命令（输入 `/` 会实时显示候选，`Tab` 补全，`/help` 查看全部、`/hotkeys` 查看快捷键）：
 
 ```text
-/new        开始新会话
-/sessions   查看会话
-/open <id>  续聊历史会话
-/compact    把当前会话历史压缩为结构化摘要
-/clear      清屏
-/help       显示全部指令
-/hotkeys    显示键盘快捷键
-/quit       退出（/exit 同义）
+/new              开始新会话
+/resume [id|idx]  查看/选择一个历史会话续聊（/sessions、/open 为别名）
+/session          查看当前会话统计（消息数、字符数、压缩信息）
+/name <title>     重命名当前会话
+/clone            复制当前会话为新会话并切换过去
+/fork             从当前会话最新点 fork（等同 copy）
+/delete [--yes]   删除当前会话（需确认，或显式 --yes）
+/compact          把当前会话历史压缩为结构化摘要
+/status           查看后端健康状态与当前会话
+/tools            列出 Agent 可用工具（coding + MCP）
+/cwd [dir]        查看/切换工具工作目录
+/clear            清屏
+/help             显示全部指令
+/hotkeys          显示键盘快捷键
+/quit             退出（/exit 同义）
 ```
 
 命令列表由 `cli/commands.mjs` 的注册表统一生成，`/help`、候选提示与实际实现
-不会漂移。
+不会漂移。会话标题（`/name`）持久化在数据库同目录的 `aiagent_sessions.json`。
 
 流式输出期间可按 `Esc` 中断当前任务；CLI 会调用后端的取消接口，Agent
 会在下一次模型轮次或工具执行前停止。
+
+CLI 启动参数：
+
+```bash
+--backend <url>    Web Gateway 地址（默认 http://127.0.0.1:18081）
+--session <id>     直接续聊指定会话
+-c, --continue     继续最近一次会话
+-r, --resume       启动时选择要续聊的会话
+--name <title>     为新会话设置显示名
+--cwd <dir>        工具工作目录（默认当前目录）
+```
 
 也可以直接指定会话进入：
 
@@ -248,8 +266,13 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | `POST` | `/api/v1/chat/cancel` | 取消指定 session 的当前流式任务 |
 | `POST` | `/api/v1/sessions/:id/compact` | 手动压缩指定会话历史 |
 | `GET` | `/api/v1/sessions/:id/compaction` | 查询最近一次压缩记录 |
-| `GET` | `/api/v1/sessions` | 会话列表（`id` + 可读 `title`） |
+| `PATCH` | `/api/v1/sessions/:id` | 设置会话显式标题（`/name`） |
+| `DELETE` | `/api/v1/sessions/:id` | 删除会话及其全部任务 |
+| `POST` | `/api/v1/sessions/:id/clone` | 复制会话为新会话（`/clone` `/fork`） |
+| `GET` | `/api/v1/sessions/:id/stats` | 会话统计（消息数/字符数/任务数/压缩） |
+| `GET` | `/api/v1/sessions` | 会话列表（`id` + `title` + `updated_at`，按最近使用排序） |
 | `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
+| `GET` | `/api/v1/tools` | 可用工具清单（coding + MCP） |
 | `GET` | `/health` | 健康检查 |
 
 同步对话示例：

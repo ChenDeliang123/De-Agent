@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/compaction.hpp"
@@ -14,9 +16,16 @@ class ITaskStore;
 
 namespace aiagent::agent {
 class HistoryCache;
+class SessionMetaStore;
 }  // namespace aiagent::agent
 
 namespace aiagent::web {
+
+// 工具清单条目（GET /api/v1/tools）。
+struct ToolInfo {
+    std::string name;
+    std::string description;
+};
 
 // 面向 Node/浏览器前端的 REST + SSE Gateway。
 // 只做协议转换与会话编排，业务逻辑仍由 AgentServer/TaskManager 承担。
@@ -48,6 +57,18 @@ public:
             std::function<bool(const std::string& session_id,
                                aiagent::agent::CompactionRecord* record)>;
 
+    // 删除会话（DELETE /api/v1/sessions/:id）。返回 false 时写入 error。
+    using DeleteHandler =
+            std::function<bool(const std::string& session_id, std::string* error)>;
+
+    // 复制会话（POST /api/v1/sessions/:id/clone）。成功时写入新会话 id。
+    using CloneHandler = std::function<bool(const std::string& source_id,
+                                            std::string* new_id,
+                                            std::string* error)>;
+
+    // 工具清单（GET /api/v1/tools）。
+    using ToolsHandler = std::function<std::vector<ToolInfo>()>;
+
     WebGateway(a2a::server::AgentServer& agent_server,
                a2a::server::ITaskStore& task_store);
     ~WebGateway();
@@ -72,9 +93,22 @@ public:
     // 注入压缩记录查询逻辑。未设置时 /compaction 接口返回 404。
     void SetCompactionInfoHandler(CompactionInfoHandler handler);
 
+    // 注入删除会话处理逻辑。未设置时 DELETE 接口返回 501。
+    void SetDeleteHandler(DeleteHandler handler);
+
+    // 注入复制会话处理逻辑。未设置时 clone 接口返回 501。
+    void SetCloneHandler(CloneHandler handler);
+
+    // 注入工具清单处理逻辑。未设置时 /tools 接口返回 501。
+    void SetToolsHandler(ToolsHandler handler);
+
     // 注入会话历史内存缓存（可选）。命中后，读取会话历史/标题的 REST 接口
     // 不再每次全表扫描 task store；未注入时行为与旧实现一致。
     void SetHistoryCache(aiagent::agent::HistoryCache* history_cache);
+
+    // 注入会话显式标题存储（可选）。注入后 /sessions 返回的 title 优先取
+    // 显式标题，并启用 PATCH /api/v1/sessions/:id。
+    void SetSessionMetaStore(aiagent::agent::SessionMetaStore* session_meta_store);
 
 private:
     class Impl;

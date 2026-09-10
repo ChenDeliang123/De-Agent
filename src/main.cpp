@@ -26,6 +26,7 @@
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/agent/history_cache.hpp"
+#include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/log.hpp"
@@ -151,6 +152,31 @@ std::vector<a2a::models::Message> LoadLatestHistory(
     return history;
 }
 
+// 从历史中取首条 user 文本作为标题，UTF-8 安全截断（最多 48 字节）。
+std::string DeriveShortTitle(const std::vector<a2a::models::Message>& history) {
+    for (const auto& message : history) {
+        if (message.role != a2a::models::Role::kUser) {
+            continue;
+        }
+        for (const auto& part : message.parts) {
+            if (!part.text.has_value() || part.text->empty()) {
+                continue;
+            }
+            const std::string& text = *part.text;
+            constexpr std::size_t kMaxBytes = 48;
+            if (text.size() <= kMaxBytes) {
+                return text;
+            }
+            std::size_t end = kMaxBytes;
+            while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+                --end;
+            }
+            return text.substr(0, end) + "…";
+        }
+    }
+    return "新对话";
+}
+
 a2a::models::AgentCard BuildAgentCard(int port) {
     using a2a::models::AgentCapabilities;
     using a2a::models::AgentCard;
@@ -225,6 +251,10 @@ int main(int argc, char** argv) {
 
         auto task_store =
                 std::make_shared<a2a::server::SqliteTaskStore>(db_path.string());
+        // 会话显式标题：与任务库同目录的 JSON 文件。
+        std::filesystem::path meta_path = db_path;
+        meta_path.replace_filename("aiagent_sessions.json");
+        aiagent::agent::SessionMetaStore session_meta(meta_path.string());
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         const std::string coding_system_prompt =
                 "You are a terminal coding agent implemented in C++. You help the user by "
@@ -377,6 +407,83 @@ int main(int argc, char** argv) {
                     *record = it->second;
                     return true;
                 });
+        web_gateway.SetSessionMetaStore(&session_meta);
+        // 删除会话：删除其全部任务，并清理缓存/标题/压缩记录。
+        web_gateway.SetDeleteHandler(
+                [&](const std::string& session_id, std::string* error) {
+                    std::vector<std::string> task_ids;
+                    for (const auto& task : task_store->ListAll()) {
+                        if (task.context_id == session_id) {
+                            task_ids.push_back(task.id);
+                        }
+                    }
+                    if (task_ids.empty()) {
+                        if (error != nullptr) {
+                            *error = "session not found";
+                        }
+                        return false;
+                    }
+                    for (const auto& task_id : task_ids) {
+                        task_store->Delete(task_id);
+                    }
+                    history_cache.Remove(session_id);
+                    session_meta.Remove(session_id);
+                    {
+                        std::lock_guard<std::mutex> lock(compaction_records_mutex);
+                        compaction_records.erase(session_id);
+                    }
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "session=" + session_id + " event=session_deleted tasks=" +
+                                    std::to_string(task_ids.size()));
+                    return true;
+                });
+        // 复制会话：以最新完整历史创建新会话（/clone、/fork）。
+        web_gateway.SetCloneHandler(
+                [&](const std::string& source_id, std::string* new_id,
+                    std::string* error) {
+                    std::vector<a2a::models::Message> history =
+                            LoadLatestHistory(history_cache, *task_store, source_id);
+                    if (history.empty()) {
+                        if (error != nullptr) {
+                            *error = "session not found";
+                        }
+                        return false;
+                    }
+                    const std::string target = std::string(a2a::core::NewUuid());
+                    a2a::models::Task task;
+                    task.id = std::string(a2a::core::NewUuid());
+                    task.context_id = target;
+                    task.status = a2a::models::MakeTaskStatus(
+                            a2a::models::TaskState::kCompleted);
+                    task.history = history;
+                    task_store->Put(std::move(task));
+                    history_cache.Put(target, history);
+                    std::string base;
+                    if (auto stored = session_meta.GetTitle(source_id);
+                        stored.has_value()) {
+                        base = *stored;
+                    } else {
+                        base = DeriveShortTitle(history);
+                    }
+                    session_meta.SetTitle(target, base + " (copy)");
+                    if (new_id != nullptr) {
+                        *new_id = target;
+                    }
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "session=" + source_id + " event=session_cloned target=" +
+                                    target);
+                    return true;
+                });
+        // 工具清单：内置 coding 工具 + MCP 工具。
+        web_gateway.SetToolsHandler([&]() {
+            std::vector<aiagent::web::ToolInfo> tools_info;
+            for (const auto& spec : tools->ListTools()) {
+                tools_info.push_back({spec.name, spec.description});
+            }
+            return tools_info;
+        });
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,

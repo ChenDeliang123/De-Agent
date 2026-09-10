@@ -1,11 +1,14 @@
 #include <a2a/core/http_client.hpp>
+#include <a2a/core/id.hpp>
 #include <a2a/core/version.hpp>
 #include <a2a/models/agent_card.hpp>
 #include <a2a/models/message.hpp>
 #include <a2a/models/requests.hpp>
+#include <a2a/models/task.hpp>
 #include <a2a/server/agent_server.hpp>
 #include <a2a/server/memory_task_store.hpp>
 
+#include <httplib.h>
 #include <json.hpp>
 
 #include <iostream>
@@ -15,6 +18,7 @@
 #include <vector>
 
 #include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/web/web_gateway.hpp"
 
@@ -193,6 +197,119 @@ int main() {
                 http.Get(base + "/api/v1/sessions/ctx-missing/compaction");
         Expect(info_missing.status_code == 404,
                "missing compaction info should return 404");
+
+        // ---- P1: 会话命名 / 统计 / 复制 / 删除 / 工具清单 ----
+        aiagent::agent::SessionMetaStore meta_store;
+        gateway.SetSessionMetaStore(&meta_store);
+        gateway.SetDeleteHandler([&](const std::string& id, std::string* error) {
+            std::vector<std::string> task_ids;
+            for (const auto& task : task_store->ListAll()) {
+                if (task.context_id == id) {
+                    task_ids.push_back(task.id);
+                }
+            }
+            if (task_ids.empty()) {
+                if (error != nullptr) {
+                    *error = "session not found";
+                }
+                return false;
+            }
+            for (const auto& task_id : task_ids) {
+                task_store->Delete(task_id);
+            }
+            meta_store.Remove(id);
+            return true;
+        });
+        gateway.SetCloneHandler(
+                [&](const std::string& source, std::string* new_id, std::string* error) {
+                    std::vector<a2a::models::Message> history;
+                    for (const auto& task : task_store->ListAll()) {
+                        if (task.context_id == source &&
+                            task.history.size() > history.size()) {
+                            history = task.history;
+                        }
+                    }
+                    if (history.empty()) {
+                        if (error != nullptr) {
+                            *error = "session not found";
+                        }
+                        return false;
+                    }
+                    const std::string target = std::string(a2a::core::NewUuid());
+                    a2a::models::Task cloned;
+                    cloned.id = std::string(a2a::core::NewUuid());
+                    cloned.context_id = target;
+                    cloned.status = a2a::models::MakeTaskStatus(
+                            a2a::models::TaskState::kCompleted);
+                    cloned.history = history;
+                    task_store->Put(std::move(cloned));
+                    meta_store.SetTitle(target, "copy");
+                    if (new_id != nullptr) {
+                        *new_id = target;
+                    }
+                    return true;
+                });
+        gateway.SetToolsHandler([]() {
+            return std::vector<aiagent::web::ToolInfo>{{"read", "Read a file"},
+                                                      {"bash", "Run a command"}};
+        });
+
+        const auto sessions_p1 = http.Get(base + "/api/v1/sessions");
+        const auto session_list_p1 = nlohmann::json::parse(sessions_p1.body);
+        Expect(!session_list_p1.empty(), "sessions should list the chat session");
+        Expect(session_list_p1[0].contains("updated_at"),
+               "session should include updated_at for recency ordering");
+
+        httplib::Client raw(base);
+        const auto renamed = raw.Patch(
+                ("/api/v1/sessions/" + session_id).c_str(),
+                R"({"title":"renamed session"})", "application/json");
+        Expect(renamed && renamed->status == 200, "rename endpoint should succeed");
+        const auto sessions_renamed =
+                nlohmann::json::parse(http.Get(base + "/api/v1/sessions").body);
+        bool renamed_seen = false;
+        for (const auto& item : sessions_renamed) {
+            if (item.value("id", std::string()) == session_id) {
+                renamed_seen = item.value("title", std::string()) == "renamed session";
+            }
+        }
+        Expect(renamed_seen, "renamed title should override the derived title");
+
+        const auto stats =
+                http.Get(base + "/api/v1/sessions/" + session_id + "/stats");
+        Expect(stats.IsSuccess(), "stats endpoint should succeed");
+        const auto stats_json = nlohmann::json::parse(stats.body);
+        Expect(stats_json.value("messages", 0) == 2, "stats messages should be 2");
+        Expect(stats_json.value("user_messages", 0) == 1,
+               "stats user messages should be 1");
+        Expect(stats_json.value("assistant_messages", 0) == 1,
+               "stats assistant messages should be 1");
+        Expect(stats_json.contains("compaction"), "stats should include compaction");
+
+        const auto cloned = http.Post(
+                base + "/api/v1/sessions/" + session_id + "/clone", "",
+                "application/json");
+        Expect(cloned.IsSuccess(), "clone endpoint should succeed");
+        const std::string cloned_id =
+                nlohmann::json::parse(cloned.body).value("session_id", std::string());
+        Expect(!cloned_id.empty() && cloned_id != session_id,
+               "clone should return a new session id");
+        Expect(http.Get(base + "/api/v1/sessions/" + cloned_id + "/stats").IsSuccess(),
+               "cloned session should have stats");
+
+        const auto tools_result = http.Get(base + "/api/v1/tools");
+        Expect(tools_result.IsSuccess(), "tools endpoint should succeed");
+        Expect(nlohmann::json::parse(tools_result.body).size() == 2,
+               "tools endpoint should return two tools");
+
+        const auto deleted = raw.Delete(("/api/v1/sessions/" + session_id).c_str());
+        Expect(deleted && deleted->status == 200, "delete endpoint should succeed");
+        const auto delete_missing = raw.Delete("/api/v1/sessions/does-not-exist");
+        Expect(delete_missing && delete_missing->status == 404,
+               "deleting a missing session should return 404");
+        Expect(http.Get(base + "/api/v1/sessions/" + session_id + "/stats").status_code ==
+                       404,
+               "deleted session stats should return 404");
 
         gateway.Stop();
     } catch (const std::exception& e) {
