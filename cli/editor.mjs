@@ -1,0 +1,491 @@
+// 极简 raw-mode 行编辑器（零依赖）。
+//
+// 目标：在输入过程中提供 slash 指令候选提示、Tab 补全、历史调用，
+// 这是 node:readline 的 question() 做不到的。
+//
+// 拆分：
+//   - applyKey(state, str, key, options) 纯函数，便于单测；
+//   - LineEditor 负责 TTY 交互与渲染。
+//
+// 非 TTY（管道）场景不要使用 LineEditor，调用方应退回逐行读取。
+
+import readline from "node:readline";
+
+export const EDITOR_HOTKEYS = [
+  ["Enter", "submit input / run command"],
+  ["Tab", "complete command"],
+  ["Up / Down", "move candidate selection, or browse input history"],
+  ["Esc", "close command candidates"],
+  ["Ctrl+C", "clear input; press again on empty to exit"],
+  ["Ctrl+D", "exit when input is empty"],
+  ["Ctrl+A / Ctrl+E", "jump to line start / end"],
+  ["Ctrl+U / Ctrl+K", "delete to line start / end"],
+  ["Ctrl+W", "delete previous word"],
+  ["Left / Right", "move cursor"],
+  ["Home / End", "jump to line start / end"],
+  ["Backspace / Delete", "delete character"],
+];
+
+const MAX_CANDIDATES = 8;
+
+// 粗略的东亚宽字符判定，用于光标横向定位。指令名本身是 ASCII，
+// 这里主要保证用户输入中文时输入行不错位。
+function charWidth(codePoint) {
+  if (codePoint === 0) {
+    return 0;
+  }
+  if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) {
+    return 0;
+  }
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0x303e) ||
+    (codePoint >= 0x3041 && codePoint <= 0x33ff) ||
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+    (codePoint >= 0xa000 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+export function displayWidth(text) {
+  let width = 0;
+  for (const char of String(text)) {
+    width += charWidth(char.codePointAt(0));
+  }
+  return width;
+}
+
+export function clipToWidth(text, maxWidth) {
+  if (maxWidth <= 0) {
+    return "";
+  }
+  let width = 0;
+  let out = "";
+  for (const char of String(text)) {
+    const w = charWidth(char.codePointAt(0));
+    if (width + w > maxWidth) {
+      return `${out}…`;
+    }
+    out += char;
+    width += w;
+  }
+  return out;
+}
+
+export function formatCandidate(command, selected, columns = 80) {
+  const marker = selected ? "❯" : " ";
+  const arg = command.argHint ? ` ${command.argHint}` : "";
+  const left = `${marker} /${command.name}${arg}`;
+  const description = command.description ? `  ${command.description}` : "";
+  return clipToWidth(left + description, Math.max(10, columns - 1));
+}
+
+export function createEditorState(history = []) {
+  return {
+    buffer: "",
+    cursor: 0,
+    history,
+    historyIndex: history.length,
+    historyDraft: "",
+    candidates: [],
+    selected: 0,
+    candidatesSuppressed: false,
+  };
+}
+
+// 根据当前输入行计算候选列表。只有 "/" 开头且尚未进入参数部分才提示。
+export function slashCandidates(buffer, complete) {
+  if (typeof complete !== "function" || !buffer.startsWith("/")) {
+    return [];
+  }
+  const token = buffer.slice(1);
+  if (token.includes(" ") || token.includes("\t")) {
+    return [];
+  }
+  return complete(token) ?? [];
+}
+
+function resetBuffer(state) {
+  state.buffer = "";
+  state.cursor = 0;
+  state.candidates = [];
+  state.selected = 0;
+  state.candidatesSuppressed = false;
+}
+
+function refreshCandidates(state, complete) {
+  if (state.candidatesSuppressed) {
+    state.candidates = [];
+    return;
+  }
+  state.candidates = slashCandidates(state.buffer, complete);
+  if (state.selected >= state.candidates.length) {
+    state.selected = 0;
+  }
+}
+
+function insert(state, text) {
+  state.buffer = state.buffer.slice(0, state.cursor) + text + state.buffer.slice(state.cursor);
+  state.cursor += text.length;
+  state.candidatesSuppressed = false;
+}
+
+function deleteWordBackward(state) {
+  let index = state.cursor;
+  while (index > 0 && /\s/.test(state.buffer[index - 1])) {
+    index -= 1;
+  }
+  while (index > 0 && !/\s/.test(state.buffer[index - 1])) {
+    index -= 1;
+  }
+  state.buffer = state.buffer.slice(0, index) + state.buffer.slice(state.cursor);
+  state.cursor = index;
+  state.candidatesSuppressed = false;
+}
+
+function acceptCompletion(state) {
+  const candidate = state.candidates[state.selected];
+  if (!candidate) {
+    return false;
+  }
+  const needsArg = Boolean(candidate.argHint && candidate.argHint.length > 0);
+  state.buffer = `/${candidate.name}${needsArg ? " " : ""}`;
+  state.cursor = state.buffer.length;
+  state.candidates = [];
+  state.selected = 0;
+  state.candidatesSuppressed = false;
+  return true;
+}
+
+function historyPrevious(state) {
+  if (state.history.length === 0) {
+    return { type: "none" };
+  }
+  if (state.historyIndex === state.history.length) {
+    state.historyDraft = state.buffer;
+  }
+  if (state.historyIndex > 0) {
+    state.historyIndex -= 1;
+  }
+  state.buffer = state.history[state.historyIndex] ?? "";
+  state.cursor = state.buffer.length;
+  state.candidatesSuppressed = false;
+  return { type: "redraw" };
+}
+
+function historyNext(state) {
+  if (state.historyIndex >= state.history.length) {
+    return { type: "none" };
+  }
+  state.historyIndex += 1;
+  state.buffer =
+    state.historyIndex === state.history.length
+      ? state.historyDraft
+      : state.history[state.historyIndex];
+  state.cursor = state.buffer.length;
+  state.candidatesSuppressed = false;
+  return { type: "redraw" };
+}
+
+// 处理一个按键。返回 { type: "redraw" | "submit" | "exit" | "none", text? }。
+export function applyKey(state, str, key, options = {}) {
+  const complete = options.complete;
+  const k = key ?? {};
+
+  if (k.ctrl) {
+    switch (k.name) {
+      case "c":
+        if (state.buffer) {
+          resetBuffer(state);
+          return { type: "redraw" };
+        }
+        return { type: "exit" };
+      case "d":
+        return state.buffer ? { type: "none" } : { type: "exit" };
+      case "a":
+        state.cursor = 0;
+        return { type: "redraw" };
+      case "e":
+        state.cursor = state.buffer.length;
+        return { type: "redraw" };
+      case "u":
+        state.buffer = state.buffer.slice(state.cursor);
+        state.cursor = 0;
+        state.candidatesSuppressed = false;
+        refreshCandidates(state, complete);
+        return { type: "redraw" };
+      case "k":
+        state.buffer = state.buffer.slice(0, state.cursor);
+        state.candidatesSuppressed = false;
+        refreshCandidates(state, complete);
+        return { type: "redraw" };
+      case "w":
+        deleteWordBackward(state);
+        refreshCandidates(state, complete);
+        return { type: "redraw" };
+      default:
+        return { type: "none" };
+    }
+  }
+
+  switch (k.name) {
+    case "return":
+    case "enter": {
+      if (state.candidates.length > 0) {
+        const token = state.buffer.startsWith("/")
+          ? state.buffer.slice(1).split(/\s+/)[0]
+          : state.buffer;
+        const exact =
+          token.length > 0 &&
+          state.candidates.some(
+            (candidate) =>
+              candidate.name === token || (candidate.aliases ?? []).includes(token),
+          );
+        if (!exact) {
+          acceptCompletion(state);
+          return { type: "redraw" };
+        }
+      }
+      return { type: "submit", text: state.buffer };
+    }
+    case "tab":
+      if (acceptCompletion(state)) {
+        return { type: "redraw" };
+      }
+      return { type: "none" };
+    case "up":
+      if (state.candidates.length > 0) {
+        state.selected =
+          (state.selected - 1 + state.candidates.length) % state.candidates.length;
+        return { type: "redraw" };
+      }
+      return historyPrevious(state);
+    case "down":
+      if (state.candidates.length > 0) {
+        state.selected = (state.selected + 1) % state.candidates.length;
+        return { type: "redraw" };
+      }
+      return historyNext(state);
+    case "escape":
+      if (state.candidates.length > 0) {
+        state.candidates = [];
+        state.selected = 0;
+        state.candidatesSuppressed = true;
+        return { type: "redraw" };
+      }
+      return { type: "none" };
+    case "backspace":
+      if (state.cursor > 0) {
+        state.buffer =
+          state.buffer.slice(0, state.cursor - 1) + state.buffer.slice(state.cursor);
+        state.cursor -= 1;
+        state.candidatesSuppressed = false;
+        refreshCandidates(state, complete);
+        return { type: "redraw" };
+      }
+      return { type: "none" };
+    case "delete":
+      if (state.cursor < state.buffer.length) {
+        state.buffer =
+          state.buffer.slice(0, state.cursor) + state.buffer.slice(state.cursor + 1);
+        state.candidatesSuppressed = false;
+        refreshCandidates(state, complete);
+        return { type: "redraw" };
+      }
+      return { type: "none" };
+    case "left":
+      if (state.cursor > 0) {
+        state.cursor -= 1;
+        return { type: "redraw" };
+      }
+      return { type: "none" };
+    case "right":
+      if (state.cursor < state.buffer.length) {
+        state.cursor += 1;
+        return { type: "redraw" };
+      }
+      return { type: "none" };
+    case "home":
+      state.cursor = 0;
+      return { type: "redraw" };
+    case "end":
+      state.cursor = state.buffer.length;
+      return { type: "redraw" };
+    default:
+      break;
+  }
+
+  if (str && !k.meta) {
+    insert(state, str);
+    refreshCandidates(state, complete);
+    return { type: "redraw" };
+  }
+  return { type: "none" };
+}
+
+export function renderHotkeys() {
+  const lines = ["keys:"];
+  for (const [key, description] of EDITOR_HOTKEYS) {
+    lines.push(`  ${key.padEnd(20)}${description}`);
+  }
+  return lines.join("\n");
+}
+
+export class LineEditor {
+  #input;
+  #output;
+  #complete;
+  #maxCandidates;
+  #state;
+  #drawn = 0;
+  #prompt = "";
+  #onKeypress = null;
+
+  constructor({ input, output, complete, history = [], maxCandidates = MAX_CANDIDATES } = {}) {
+    this.#input = input ?? process.stdin;
+    this.#output = output ?? process.stdout;
+    this.#complete = complete;
+    this.#maxCandidates = maxCandidates;
+    this.#state = createEditorState(history);
+    if (this.#input.isTTY && !this.#input.__aiagentKeypress) {
+      readline.emitKeypressEvents(this.#input);
+      this.#input.__aiagentKeypress = true;
+    }
+  }
+
+  get state() {
+    return this.#state;
+  }
+
+  get history() {
+    return this.#state.history;
+  }
+
+  readLine(prompt = "❯ ") {
+    const input = this.#input;
+    if (!input.isTTY) {
+      return Promise.resolve({ exit: true });
+    }
+    if (!input.__aiagentKeypress) {
+      readline.emitKeypressEvents(input);
+      input.__aiagentKeypress = true;
+    }
+    const previousRaw = input.isRaw === true;
+    if (typeof input.setRawMode === "function") {
+      input.setRawMode(true);
+    }
+    input.resume?.();
+
+    resetBuffer(this.#state);
+    this.#prompt = prompt;
+    this.#drawn = 0;
+    this.#redraw();
+
+    return new Promise((resolve) => {
+      const finish = (result) => {
+        input.removeListener("keypress", this.#onKeypress);
+        this.#onKeypress = null;
+        this.#clearDrawn();
+        if (typeof input.setRawMode === "function") {
+          input.setRawMode(previousRaw);
+        }
+        resolve(result);
+      };
+      this.#onKeypress = (str, key) => {
+        const action = applyKey(this.#state, str, key, { complete: this.#complete });
+        if (action.type === "submit") {
+          if (action.text.trim()) {
+            this.#state.history.push(action.text);
+          }
+          this.#state.historyIndex = this.#state.history.length;
+          this.#state.historyDraft = "";
+          finish({ text: action.text });
+          return;
+        }
+        if (action.type === "exit") {
+          finish({ exit: true });
+          return;
+        }
+        if (action.type === "redraw") {
+          this.#redraw();
+        }
+      };
+      input.on("keypress", this.#onKeypress);
+    });
+  }
+
+  #columns() {
+    return this.#output.columns || 80;
+  }
+
+  #clearDrawn() {
+    if (this.#drawn <= 0) {
+      return;
+    }
+    let frame = "";
+    if (this.#drawn > 1) {
+      frame += `\x1b[${this.#drawn - 1}A`;
+    }
+    for (let i = 0; i < this.#drawn; i += 1) {
+      frame += "\r\x1b[K";
+      if (i < this.#drawn - 1) {
+        frame += "\x1b[1B";
+      }
+    }
+    if (this.#drawn > 1) {
+      frame += `\x1b[${this.#drawn - 1}A`;
+    }
+    frame += "\r";
+    this.#output.write(frame);
+    this.#drawn = 0;
+  }
+
+  #redraw() {
+    const state = this.#state;
+    let frame = "";
+    if (this.#drawn > 0) {
+      if (this.#drawn > 1) {
+        frame += `\x1b[${this.#drawn - 1}A`;
+      }
+      for (let i = 0; i < this.#drawn; i += 1) {
+        frame += "\r\x1b[K";
+        if (i < this.#drawn - 1) {
+          frame += "\x1b[1B";
+        }
+      }
+      if (this.#drawn > 1) {
+        frame += `\x1b[${this.#drawn - 1}A`;
+      }
+    }
+    frame += `\r${this.#prompt}${state.buffer}`;
+
+    const columns = this.#columns();
+    const candidates = state.candidates.slice(0, this.#maxCandidates);
+    for (let i = 0; i < candidates.length; i += 1) {
+      frame += `\n\r\x1b[K${formatCandidate(candidates[i], i === state.selected, columns)}`;
+    }
+    if (candidates.length > 0) {
+      frame += `\x1b[${candidates.length}A`;
+    }
+    const column = displayWidth(this.#prompt) + displayWidth(state.buffer.slice(0, state.cursor));
+    frame += "\r";
+    if (column > 0) {
+      frame += `\x1b[${column}C`;
+    }
+    this.#drawn = 1 + candidates.length;
+    this.#output.write(frame);
+  }
+}

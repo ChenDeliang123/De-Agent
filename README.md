@@ -207,15 +207,21 @@ de restart   # 重启后端
 de logs      # 查看后端日志
 ```
 
-常用命令：
+常用命令（输入 `/` 会实时显示候选，`Tab` 补全，`/help` 查看全部、`/hotkeys` 查看快捷键）：
 
 ```text
 /new        开始新会话
 /sessions   查看会话
 /open <id>  续聊历史会话
 /compact    把当前会话历史压缩为结构化摘要
-/quit       退出
+/clear      清屏
+/help       显示全部指令
+/hotkeys    显示键盘快捷键
+/quit       退出（/exit 同义）
 ```
+
+命令列表由 `cli/commands.mjs` 的注册表统一生成，`/help`、候选提示与实际实现
+不会漂移。
 
 流式输出期间可按 `Esc` 中断当前任务；CLI 会调用后端的取消接口，Agent
 会在下一次模型轮次或工具执行前停止。

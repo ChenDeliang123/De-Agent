@@ -1,18 +1,18 @@
-import readline from "node:readline";
 import readlinePromises from "node:readline/promises";
 import { randomUUID } from "node:crypto";
 import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
-import { cancelChat, compactSession, listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, listSessions, loadHistory, streamChat } from "./session.mjs";
+import { LineEditor, renderHotkeys } from "./editor.mjs";
+import { commands, completeCommands, renderHelp, runCommand } from "./commands.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 const renderer = new TranscriptRenderer();
 let activeAbortController = null;
 
 if (input.isTTY) {
-  readline.emitKeypressEvents(input);
   input.on("keypress", (_text, key) => {
     if (!activeAbortController) {
       return;
@@ -41,18 +41,9 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(`
 usage: node cli.mjs [--backend <url>] [--session <id>]
-
-commands:
-  /new           start a new session
-  /sessions      list backend sessions
-/open <id>     resume a session by id or index
-/compact       summarize and shrink the current session context
-/help          show this help
-/quit          exit
-
-keys:
-  Esc            interrupt the currently running task
 `);
+  console.log(renderHelp(commands));
+  console.log(`\n${renderHotkeys()}\n`);
 }
 
 function clearInputLine() {
@@ -73,84 +64,16 @@ async function renderHistory(backend, sessionId) {
   }
 }
 
-async function showSessions(backend) {
-  const sessions = await listSessions(backend);
-  if (sessions.length === 0) {
-    console.log("(no sessions yet)");
-    return null;
-  }
-  sessions.forEach((session, index) => {
-    const id = typeof session === "string" ? session : session.id;
-    const title = typeof session === "string" ? `session ${index}` : session.title || "untitled";
-    console.log(`  ${index + 1}. ${title}  (${id})`);
-  });
-  return sessions;
-}
-
-async function handleAnswer(backend, state, answer) {
+async function handleLine(ctx, answer) {
   const trimmed = answer.trim();
   if (!trimmed) {
-    return false;
+    return;
   }
   if (trimmed.startsWith("/")) {
-    const [command, arg] = trimmed.split(/\s+/, 2);
-    if (command === "/quit" || command === "/exit") {
-      return true;
-    }
-    if (command === "/help") {
-      printHelp();
-    } else if (command === "/new") {
-      state.sessionId = null;
-      console.log("new session");
-      log("info", "cli", "event=new_session");
-    } else if (command === "/sessions") {
-      await showSessions(backend);
-    } else if (command === "/compact") {
-      if (!state.sessionId) {
-        console.log("no active session to compact");
-      } else {
-        try {
-          await compactSession(backend, state.sessionId);
-          console.log("context compacted");
-          log("info", "cli", `event=compact session=${state.sessionId}`);
-        } catch (error) {
-          console.log(`compact failed: ${error.message}`);
-          log("error", "cli", `event=compact_failed message=${error.message}`);
-        }
-      }
-    } else if (command === "/open") {
-      const all = await listSessions(backend);
-      let target = arg;
-      if (!target && all.length > 0) {
-        target = String(all.length);
-      }
-      if (!target) {
-        console.log("no sessions to open");
-        return false;
-      }
-      const numeric = Number(target);
-      const entry =
-        Number.isInteger(numeric) && numeric >= 1 && numeric <= all.length
-          ? all[numeric - 1]
-          : all.find(
-              (session) => (typeof session === "string" ? session : session.id) === target,
-            );
-      if (!entry) {
-        console.log(`session not found: ${target}`);
-        return false;
-      }
-      state.sessionId = typeof entry === "string" ? entry : entry.id;
-      clearInputLine();
-      await renderHistory(backend, state.sessionId);
-      log("info", "cli", `event=open_session session=${state.sessionId}`);
-    } else {
-      console.log(`unknown command: ${command}; use /help`);
-    }
-    return false;
+    await runCommand(ctx, trimmed);
+    return;
   }
-
-  state.sessionId = await sendMessage(backend, state.sessionId, trimmed);
-  return false;
+  ctx.state.sessionId = await sendMessage(ctx.backend, ctx.state.sessionId, trimmed);
 }
 
 async function sendMessage(backend, sessionId, text) {
@@ -232,7 +155,23 @@ async function main() {
   console.log(`ai-agent-cli  backend=${backend}`);
   log("info", "cli", `event=cli_start backend=${backend}`);
 
-  const state = { sessionId: options.session };
+  const state = { sessionId: options.session, shouldExit: false };
+  const ctx = {
+    backend,
+    state,
+    renderer,
+    commands,
+    print: (line) => console.log(line),
+    log,
+    clearInputLine,
+    clearScreen: () => {
+      if (output.isTTY) {
+        output.write("\x1b[2J\x1b[3J\x1b[H");
+      }
+    },
+    renderHistory: (backendUrl, sessionId) => renderHistory(backendUrl, sessionId),
+  };
+
   const sessions = await listSessions(backend).catch(() => []);
   if (sessions.length > 0) {
     console.log(`found ${sessions.length} session(s); use /sessions or /open <id>`);
@@ -248,21 +187,24 @@ async function main() {
 
   try {
     if (input.isTTY) {
-      const rl = readlinePromises.createInterface({ input, output, terminal: true });
-      while (true) {
+      const editor = new LineEditor({
+        input,
+        output,
+        complete: (prefix) => completeCommands(prefix, commands),
+      });
+      while (!state.shouldExit) {
         const label = state.sessionId ? state.sessionId.slice(0, 8) : "new";
-        const answer = await rl.question(`[${label}] ❯ `);
-        const shouldExit = await handleAnswer(backend, state, answer);
-        if (shouldExit) {
+        const result = await editor.readLine(`[${label}] ❯ `);
+        if (result.exit) {
           break;
         }
+        await handleLine(ctx, result.text);
       }
-      rl.close();
     } else {
       const lines = readlinePromises.createInterface({ input, terminal: false });
       for await (const line of lines) {
-        const shouldExit = await handleAnswer(backend, state, line);
-        if (shouldExit) {
+        await handleLine(ctx, line);
+        if (state.shouldExit) {
           break;
         }
       }
