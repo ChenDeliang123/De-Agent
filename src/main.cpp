@@ -4,7 +4,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -116,8 +119,8 @@ AppOptions ParseOptions(int argc, char** argv) {
     return options;
 }
 
-// 缓存优先地取某个会话的最新完整历史；缓存未命中时回退存储层（允许一次
-// 全表扫描），并在结果非空时回填缓存，避免冷启动反复扫描。
+// 缓存优先地取某个会话的最新历史；缓存未命中时回退存储层。
+// 选取写入时间最新的任务：手动/自动压缩会写入更短的历史，比较条数会选错。
 std::vector<a2a::models::Message> LoadLatestHistory(
         aiagent::agent::HistoryCache& cache, a2a::server::ITaskStore& store,
         const std::string& context_id) {
@@ -128,12 +131,19 @@ std::vector<a2a::models::Message> LoadLatestHistory(
     if (cache.TryGet(context_id, history)) {
         return history;
     }
-    std::size_t latest_history_size = 0;
+    std::optional<a2a::core::TimePoint> latest_time;
     for (const auto& task : store.ListAll()) {
-        if (task.context_id == context_id && task.history.size() > latest_history_size) {
-            history = task.history;
-            latest_history_size = task.history.size();
+        if (task.context_id != context_id || task.history.empty()) {
+            continue;
         }
+        if (latest_time.has_value()) {
+            if (!task.status.timestamp.has_value() ||
+                !(*task.status.timestamp > *latest_time)) {
+                continue;
+            }
+        }
+        history = task.history;
+        latest_time = task.status.timestamp;
     }
     if (!history.empty()) {
         cache.Put(context_id, history);
@@ -230,6 +240,9 @@ int main(int argc, char** argv) {
                 "verify when useful.\n"
                 "- After making changes, summarize which files were created or modified.";
         aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
+        // 最近一次压缩记录（按会话），供 REST 查询/前端展示。
+        std::map<std::string, aiagent::agent::CompactionRecord> compaction_records;
+        std::mutex compaction_records_mutex;
         // 上下文压缩配置：超阈值时把较早的消息摘要成一条 user 消息。
         aiagent::CompactionConfig compaction_config;
         std::string compaction_error;
@@ -244,6 +257,12 @@ int main(int argc, char** argv) {
         compaction_settings.reserve_tokens = compaction_config.reserve_tokens;
         compaction_settings.keep_recent_tokens = compaction_config.keep_recent_tokens;
         runtime.SetCompactionSettings(compaction_settings);
+        runtime.SetCompactionCallback(
+                [&](const std::string& context_id,
+                    const aiagent::agent::CompactionRecord& record) {
+                    std::lock_guard<std::mutex> lock(compaction_records_mutex);
+                    compaction_records[context_id] = record;
+                });
         // 会话最新历史内存缓存：避免每次请求 ListAll() 全表扫描（长会话 O(n²)）。
         aiagent::agent::HistoryCache history_cache;
 
@@ -306,6 +325,58 @@ int main(int argc, char** argv) {
 
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
         web_gateway.SetHistoryCache(&history_cache);
+        // 手动压缩：压缩后把更短的历史作为新任务落库，并刷新缓存。
+        web_gateway.SetCompactHandler(
+                [&](const std::string& session_id, std::string* error) {
+                    std::vector<a2a::models::Message> history =
+                            LoadLatestHistory(history_cache, *task_store, session_id);
+                    if (history.empty()) {
+                        if (error != nullptr) {
+                            *error = "session not found";
+                        }
+                        return false;
+                    }
+                    std::vector<a2a::models::Message> compacted;
+                    aiagent::agent::CompactionRecord record;
+                    std::string compact_error;
+                    if (!runtime.CompactHistory(session_id, history, &compacted,
+                                                &record, &compact_error)) {
+                        if (error != nullptr) {
+                            *error = compact_error;
+                        }
+                        return false;
+                    }
+                    a2a::models::Task task;
+                    task.id = std::string(a2a::core::NewUuid());
+                    task.context_id = session_id;
+                    task.status = a2a::models::MakeTaskStatus(
+                            a2a::models::TaskState::kCompleted);
+                    task.history = compacted;
+                    history_cache.Put(session_id, std::move(compacted));
+                    task_store->Put(std::move(task));
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "session=" + session_id + " event=manual_compaction tokens_before=" +
+                                    std::to_string(record.tokens_before) +
+                                    " tokens_after=" +
+                                    std::to_string(record.tokens_after) +
+                                    " messages_before=" +
+                                    std::to_string(record.messages_before) +
+                                    " messages_after=" +
+                                    std::to_string(record.messages_after));
+                    return true;
+                });
+        web_gateway.SetCompactionInfoHandler(
+                [&](const std::string& session_id,
+                    aiagent::agent::CompactionRecord* record) {
+                    std::lock_guard<std::mutex> lock(compaction_records_mutex);
+                    const auto it = compaction_records.find(session_id);
+                    if (it == compaction_records.end()) {
+                        return false;
+                    }
+                    *record = it->second;
+                    return true;
+                });
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,

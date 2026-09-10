@@ -146,6 +146,54 @@ int main() {
         Expect(stream_body.find(R"({"content":"好"})") != std::string::npos,
                "stream body should contain the second token");
 
+        gateway.SetCompactHandler(
+                [](const std::string& id, std::string* error) {
+                    if (id == "ctx-compact") {
+                        return true;
+                    }
+                    if (error != nullptr) {
+                        *error = "session not found";
+                    }
+                    return false;
+                });
+        gateway.SetCompactionInfoHandler(
+                [](const std::string& id, aiagent::agent::CompactionRecord* record) {
+                    if (id != "ctx-compact") {
+                        return false;
+                    }
+                    record->forced = true;
+                    record->tokens_before = 100;
+                    record->tokens_after = 20;
+                    record->messages_before = 8;
+                    record->messages_after = 3;
+                    return true;
+                });
+
+        const auto compact = http.Post(
+                base + "/api/v1/sessions/ctx-compact/compact", "", "application/json");
+        Expect(compact.IsSuccess(), "compact endpoint should succeed");
+        Expect(nlohmann::json::parse(compact.body).value("compacted", false),
+               "compact response should report success");
+
+        const auto compact_missing = http.Post(
+                base + "/api/v1/sessions/ctx-missing/compact", "", "application/json");
+        Expect(compact_missing.status_code == 409,
+               "unknown session compact should fail with 409");
+
+        const auto info = http.Get(base + "/api/v1/sessions/ctx-compact/compaction");
+        Expect(info.IsSuccess(), "compaction info endpoint should succeed");
+        const auto info_json = nlohmann::json::parse(info.body);
+        Expect(info_json.value("found", false), "compaction info should be found");
+        Expect(info_json.value("tokens_before", 0) == 100,
+               "compaction info tokens_before should be returned");
+        Expect(info_json.value("tokens_after", 0) == 20,
+               "compaction info tokens_after should be returned");
+
+        const auto info_missing =
+                http.Get(base + "/api/v1/sessions/ctx-missing/compaction");
+        Expect(info_missing.status_code == 404,
+               "missing compaction info should return 404");
+
         gateway.Stop();
     } catch (const std::exception& e) {
         std::cerr << "web gateway test failed: " << e.what() << '\n';

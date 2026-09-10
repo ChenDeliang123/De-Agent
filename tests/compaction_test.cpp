@@ -41,6 +41,7 @@ class SummaryModel final : public aiagent::llm::IModelClient {
 public:
     int summary_calls = 0;
     std::string last_prompt;
+    bool saw_previous_summary = false;
 
     aiagent::llm::ChatResult Chat(
             const std::vector<aiagent::llm::ChatMessage>& messages,
@@ -51,6 +52,9 @@ public:
             if (message.role == "user") {
                 last_prompt = message.content;
             }
+        }
+        if (last_prompt.find("<previous-summary>") != std::string::npos) {
+            saw_previous_summary = true;
         }
         aiagent::llm::ChatResult result;
         aiagent::llm::ChatChoice choice;
@@ -328,6 +332,58 @@ void TestOverflowDetection() {
            "tool_calls finish_reason is not recoverable");
 }
 
+void TestIncrementalSummary() {
+    using aiagent::agent::CompactMessages;
+    using aiagent::agent::CompactionSettings;
+    using aiagent::agent::kCompactionSummaryMarker;
+
+    auto model = std::make_shared<SummaryModel>();
+    CompactionSettings settings;
+    settings.enabled = true;
+    settings.context_window = 2500;
+    settings.reserve_tokens = 200;
+    settings.keep_recent_tokens = 1500;
+
+    const std::vector<aiagent::llm::ChatMessage> messages = {
+            TextMessage("system", "sys"),
+            TextMessage("user", "u1"),
+            ToolCallMessage("read", R"({"path":"src/b.cpp"})"),
+            TextMessage("tool", std::string(3000, 'x')),
+            ToolCallMessage("edit", R"({"path":"src/a.cpp"})"),
+            TextMessage("tool", std::string(3000, 'x')),
+            ToolCallMessage("read", R"({"path":"src/c.cpp"})"),
+            TextMessage("tool", std::string(3000, 'x')),
+    };
+
+    const auto first = CompactMessages(*model, messages, settings);
+    Expect(first.compacted, "first compaction should succeed");
+    Expect(!model->saw_previous_summary,
+           "first compaction should use the initial summary template");
+
+    // 在已压缩结果后继续追加新回合，再次压缩应走增量更新。
+    std::vector<aiagent::llm::ChatMessage> extended = first.messages;
+    extended.push_back(TextMessage("user", "u2"));
+    extended.push_back(ToolCallMessage("read", R"({"path":"src/d.cpp"})"));
+    extended.push_back(TextMessage("tool", std::string(3000, 'x')));
+
+    const auto second = CompactMessages(*model, extended, settings);
+    Expect(second.compacted, "second compaction should succeed");
+    Expect(model->summary_calls == 2, "summary model should be called twice");
+    Expect(model->saw_previous_summary,
+           "second compaction should pass the previous summary");
+    Expect(model->last_prompt.find("fake summary") != std::string::npos,
+           "previous summary body should be preserved in the update prompt");
+
+    std::size_t summary_count = 0;
+    for (const auto& message : second.messages) {
+        if (message.content.rfind(kCompactionSummaryMarker, 0) == 0) {
+            ++summary_count;
+        }
+    }
+    Expect(summary_count == 1,
+           "incremental compaction should keep exactly one summary message");
+}
+
 void TestCompactionConfig() {
     const std::string ini = R"INI(
 [compaction]
@@ -378,6 +434,7 @@ int main() {
     TestCompactMessages();
     TestFileOperations();
     TestOverflowDetection();
+    TestIncrementalSummary();
     TestCompactionConfig();
 
     if (g_failures != 0) {

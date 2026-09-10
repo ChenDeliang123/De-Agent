@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,9 @@ namespace aiagent::agent {
 class AgentRuntime {
 public:
     using CancelCallback = std::function<bool()>;
+    // 每次成功压缩后的回调（可用于日志/审计/前端展示）。
+    using CompactionCallback = std::function<void(const std::string& context_id,
+                                                  const CompactionRecord&)>;
 
     explicit AgentRuntime(std::shared_ptr<llm::IModelClient> model,
                           std::string system_prompt =
@@ -32,6 +36,19 @@ public:
 
     // 设置上下文压缩参数；默认 enabled，阈值见 CompactionSettings。
     void SetCompactionSettings(const CompactionSettings& settings);
+
+    // 注册压缩回调（可选）。每次阈值/overflow 压缩成功后触发。
+    void SetCompactionCallback(CompactionCallback callback);
+
+    // 手动压缩一段会话历史（对应终端 /compact 与 REST 接口）。
+    // 无论是否达到阈值都尝试压缩；成功时输出压缩后的 A2A 历史
+    // （system 不入库，摘要 + 保留尾部），并填充 record。
+    // 返回 false 时写入 error。
+    bool CompactHistory(const std::string& context_id,
+                        const std::vector<a2a::models::Message>& history,
+                        std::vector<a2a::models::Message>* compacted_history,
+                        CompactionRecord* record,
+                        std::string* error);
 
     // history 应包含本次用户消息（续聊时由调用方从 TaskStore 取回）。
     // 返回一个已完成 Task，其 history 追加了 assistant 回复。
@@ -67,13 +84,16 @@ private:
 
     // 模型调用前的阈值压缩。命中阈值时把较早的消息摘要成一条 user 消息，
     // 并重置 usage 跟踪；同一批消息（size 未变）不重复压缩。
-    // force=true 时跳过阈值判断与去重（用于 overflow 恢复），返回是否真的压缩了。
-    bool MaybeCompactBeforeCall(std::vector<llm::ChatMessage>& chat_messages,
-                                int& last_usage_tokens,
-                                std::size_t& last_usage_message_count,
-                                std::size_t& last_compacted_size,
-                                const std::string& run_id,
-                                bool force = false);
+    // force=true 时跳过阈值判断与去重（用于 overflow 恢复）。
+    // 返回本次压缩记录；未压缩时返回 nullopt。
+    std::optional<CompactionRecord> MaybeCompactBeforeCall(
+            std::vector<llm::ChatMessage>& chat_messages,
+            int& last_usage_tokens,
+            std::size_t& last_usage_message_count,
+            std::size_t& last_compacted_size,
+            const std::string& run_id,
+            const std::string& context_id,
+            bool force = false);
 
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
@@ -82,6 +102,7 @@ private:
     // 显式设置正数时作为可选安全上限。
     int max_tool_rounds_ = 0;
     CompactionSettings compaction_settings_;
+    CompactionCallback compaction_callback_;
 };
 
 }  // namespace aiagent::agent

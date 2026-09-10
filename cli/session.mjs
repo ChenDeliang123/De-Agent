@@ -23,8 +23,19 @@ export async function loadHistory(backendUrl, sessionId) {
   return response.json();
 }
 
-export async function cancelChat(backendUrl, sessionId) {
+export async function compactSession(backendUrl, sessionId) {
   const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
+    { method: "POST" },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `compact request failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function cancelChat(backendUrl, sessionId) {  const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/chat/cancel`,
     {
       method: "POST",

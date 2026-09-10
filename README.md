@@ -213,6 +213,7 @@ de logs      # 查看后端日志
 /new        开始新会话
 /sessions   查看会话
 /open <id>  续聊历史会话
+/compact    把当前会话历史压缩为结构化摘要
 /quit       退出
 ```
 
@@ -239,6 +240,8 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | `POST` | `/api/v1/chat` | 同步对话 |
 | `POST` | `/api/v1/chat/stream` | SSE 逐 token 流式对话 |
 | `POST` | `/api/v1/chat/cancel` | 取消指定 session 的当前流式任务 |
+| `POST` | `/api/v1/sessions/:id/compact` | 手动压缩指定会话历史 |
+| `GET` | `/api/v1/sessions/:id/compaction` | 查询最近一次压缩记录 |
 | `GET` | `/api/v1/sessions` | 会话列表（`id` + 可读 `title`） |
 | `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
 | `GET` | `/health` | 健康检查 |
@@ -329,8 +332,13 @@ keep_recent_tokens = 20000
   **重试一次**；重试仍失败则向上报错（不会无限重试）。
 - 摘要会附加 `<read-files>` / `<modified-files>` 清单，压缩后仍能记住
   动过哪些文件，并在后续压缩中累积。
+- 已有旧摘要时使用 UPDATE 模板做**增量合并**，保留旧信息、补充新进展。
+- 流式期间会推送 `compaction` 事件（`tokens_before`/`tokens_after`），
+  终端客户端会显示压缩提示。
 - 压缩只作用于「本次请求构造的消息窗口」，SQLite 中仍保留完整历史，
   便于回溯。
+- 手动 `/compact`（或 REST 接口）会把压缩后的更短历史作为新任务落库，
+  后续请求直接使用；自动压缩仍为请求内内存操作。
 
 ## A2A
 

@@ -5,7 +5,7 @@ import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
-import { cancelChat, listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, compactSession, listSessions, loadHistory, streamChat } from "./session.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 const renderer = new TranscriptRenderer();
@@ -46,6 +46,7 @@ commands:
   /new           start a new session
   /sessions      list backend sessions
 /open <id>     resume a session by id or index
+/compact       summarize and shrink the current session context
 /help          show this help
 /quit          exit
 
@@ -104,6 +105,19 @@ async function handleAnswer(backend, state, answer) {
       log("info", "cli", "event=new_session");
     } else if (command === "/sessions") {
       await showSessions(backend);
+    } else if (command === "/compact") {
+      if (!state.sessionId) {
+        console.log("no active session to compact");
+      } else {
+        try {
+          await compactSession(backend, state.sessionId);
+          console.log("context compacted");
+          log("info", "cli", `event=compact session=${state.sessionId}`);
+        } catch (error) {
+          console.log(`compact failed: ${error.message}`);
+          log("error", "cli", `event=compact_failed message=${error.message}`);
+        }
+      }
     } else if (command === "/open") {
       const all = await listSessions(backend);
       let target = arg;
@@ -169,6 +183,8 @@ async function sendMessage(backend, sessionId, text) {
           renderer.toolOutput(data.content ?? "");
         } else if (event === "tool_end") {
           renderer.toolEnd(Boolean(data.ok), data.text ?? "");
+        } else if (event === "compaction") {
+          renderer.compaction(data);
         } else if (event === "error") {
           throw new Error(data.error ?? "unknown error");
         }

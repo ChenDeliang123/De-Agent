@@ -1,6 +1,7 @@
 #include "aiagent/agent/compaction.hpp"
 
 #include <cctype>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -107,6 +108,57 @@ constexpr const char* kSummarizationPrompt =
         "- [Or \"(none)\" if not applicable]\n\n"
         "Keep each section concise. Preserve exact file paths, function names, "
         "and error messages.";
+
+// 对齐 Pi 的增量更新模板：保留旧摘要、合并新进展。
+constexpr const char* kUpdateSummarizationPrompt =
+        "The messages above are NEW conversation messages to incorporate into "
+        "the existing summary provided in <previous-summary> tags. Update the "
+        "existing structured summary with new information. RULES:\n"
+        "- PRESERVE all existing information from the previous summary\n"
+        "- ADD new progress, decisions, and context from the new messages\n"
+        "- UPDATE the Progress section: move items from \"In Progress\" to "
+        "\"Done\" when completed\n"
+        "- UPDATE \"Next Steps\" based on what was accomplished\n"
+        "- PRESERVE exact file paths, function names, and error messages\n"
+        "- If something is no longer relevant, you may remove it\n\n"
+        "Use this EXACT format:\n\n"
+        "## Goal\n"
+        "[Preserve existing goals, add new ones if the task expanded]\n\n"
+        "## Constraints & Preferences\n"
+        "- [Preserve existing, add new ones discovered]\n\n"
+        "## Progress\n"
+        "### Done\n"
+        "- [x] [Include previously done items AND newly completed items]\n\n"
+        "### In Progress\n"
+        "- [ ] [Current work - update based on progress]\n\n"
+        "### Blocked\n"
+        "- [Current blockers - remove if resolved]\n\n"
+        "## Key Decisions\n"
+        "- **[Decision]**: [Brief rationale] (preserve all previous, add new)\n\n"
+        "## Next Steps\n"
+        "1. [Update based on current state]\n\n"
+        "## Critical Context\n"
+        "- [Preserve important context, add new if needed]\n\n"
+        "Keep each section concise. Preserve exact file paths, function names, "
+        "and error messages.";
+
+// 去掉文本中的 <read-files>/<modified-files> 清单，避免在增量摘要中重复。
+std::string StripFileOperationTags(const std::string& text) {
+    std::string result = text;
+    for (const char* tag : {"read-files", "modified-files"}) {
+        const std::string open = "<" + std::string(tag) + ">";
+        const std::string close = "</" + std::string(tag) + ">";
+        std::size_t pos = 0;
+        while ((pos = result.find(open, pos)) != std::string::npos) {
+            const std::size_t end = result.find(close, pos);
+            if (end == std::string::npos) {
+                break;
+            }
+            result.erase(pos, end + close.size() - pos);
+        }
+    }
+    return TrimAscii(result);
+}
 
 }  // namespace
 
@@ -352,17 +404,26 @@ std::string SerializeConversation(const std::vector<llm::ChatMessage>& messages)
 }
 
 std::string GenerateSummary(llm::IModelClient& model,
-                            const std::vector<llm::ChatMessage>& to_summarize) {
+                            const std::vector<llm::ChatMessage>& to_summarize,
+                            const std::string& previous_summary) {
     std::vector<llm::ChatMessage> request;
     llm::ChatMessage system;
     system.role = "system";
     system.content = kSummarizationSystemPrompt;
     request.push_back(std::move(system));
 
+    std::string prompt;
+    if (!previous_summary.empty()) {
+        prompt = "<previous-summary>\n" + previous_summary +
+                 "\n</previous-summary>\n\n" + kUpdateSummarizationPrompt;
+    } else {
+        prompt = kSummarizationPrompt;
+    }
+
     llm::ChatMessage user;
     user.role = "user";
     user.content = "<conversation>\n" + SerializeConversation(to_summarize) +
-                   "\n</conversation>\n\n" + kSummarizationPrompt;
+                   "\n</conversation>\n\n" + prompt;
     request.push_back(std::move(user));
 
     const llm::ChatResult result = model.Chat(request);
@@ -388,12 +449,32 @@ CompactionOutcome CompactMessages(llm::IModelClient& model,
         return outcome;
     }
 
+    // 若已有旧摘要（在 system 之后的第一条），提取其正文作为增量更新的基础。
+    std::size_t start = 1;
+    std::string previous_summary;
+    if (messages.size() > 1 && messages[1].role == "user" &&
+        messages[1].content.rfind(kCompactionSummaryMarker, 0) == 0) {
+        previous_summary = StripFileOperationTags(
+                messages[1].content.substr(std::strlen(kCompactionSummaryMarker)));
+        start = 2;
+    }
+
+    if (cut.first_kept_index <= start) {
+        // 没有可摘要的新内容（例如刚刚压缩过）。
+        return outcome;
+    }
+
     std::vector<llm::ChatMessage> to_summarize(
-            messages.begin() + 1, messages.begin() +
-                                          static_cast<std::ptrdiff_t>(cut.first_kept_index));
+            messages.begin() + static_cast<std::ptrdiff_t>(start),
+            messages.begin() + static_cast<std::ptrdiff_t>(cut.first_kept_index));
     if (to_summarize.empty()) {
         return outcome;
     }
+
+    // 文件清单从 [1, cut) 累积：既包含旧摘要中的清单，也包含新工具调用。
+    const std::vector<llm::ChatMessage> file_scope(
+            messages.begin() + 1,
+            messages.begin() + static_cast<std::ptrdiff_t>(cut.first_kept_index));
 
     std::vector<llm::ChatMessage> compacted;
     compacted.reserve(messages.size() - cut.first_kept_index + 2);
@@ -402,8 +483,8 @@ CompactionOutcome CompactMessages(llm::IModelClient& model,
 
     llm::ChatMessage summary_message;
     summary_message.role = "user";
-    std::string summary_text = GenerateSummary(model, to_summarize);
-    summary_text += FormatFileOperations(ExtractFileOperations(to_summarize));
+    std::string summary_text = GenerateSummary(model, to_summarize, previous_summary);
+    summary_text += FormatFileOperations(ExtractFileOperations(file_scope));
     summary_message.content =
             std::string(kCompactionSummaryMarker) + "\n\n" + summary_text;
     compacted.push_back(std::move(summary_message));

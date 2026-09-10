@@ -350,6 +350,31 @@ public:
     }
 };
 
+// 只负责回答摘要请求（无 tools 的 Chat）的 fake 模型。
+class SummaryOnlyModel final : public aiagent::llm::IModelClient {
+public:
+    int summary_calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\nmanual summary";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>&) override {
+        throw std::runtime_error("SummaryOnlyModel::ChatStream should not be called");
+    }
+};
+
 // 前 3 轮请求工具（附带近似真实 usage），之后返回最终答案；
 // 摘要调用（无 tools 的 Chat）返回固定摘要。
 class CompactionFakeModel final : public aiagent::llm::IModelClient {
@@ -729,6 +754,99 @@ int main() {
         Expect(model->summary_calls == 1, "sync overflow recovery should compact once");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime sync overflow test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<SummaryOnlyModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 1000000;
+        settings.reserve_tokens = 1000;
+        settings.keep_recent_tokens = 1;
+        runtime.SetCompactionSettings(settings);
+
+        std::vector<aiagent::agent::CompactionRecord> recorded;
+        runtime.SetCompactionCallback(
+                [&](const std::string& context_id,
+                    const aiagent::agent::CompactionRecord& record) {
+                    Expect(context_id == "ctx-manual",
+                           "compaction callback should receive the context id");
+                    recorded.push_back(record);
+                });
+
+        auto history = MultiTurnHistory();
+        history.push_back(a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "third request", "text/plain"));
+        // 追加几轮较长内容，确保压缩后 token 确实下降。
+        for (int i = 0; i < 4; ++i) {
+            history.push_back(a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser,
+                    std::string(300, 'x') + std::to_string(i), "text/plain"));
+            history.push_back(a2a::models::MakeTextMessage(
+                    a2a::models::Role::kAgent,
+                    std::string(300, 'y') + std::to_string(i), "text/plain"));
+        }
+        std::vector<a2a::models::Message> compacted;
+        aiagent::agent::CompactionRecord record;
+        std::string error;
+        const bool ok =
+                runtime.CompactHistory("ctx-manual", history, &compacted, &record, &error);
+        Expect(ok, std::string("manual compact should succeed: ") + error);
+        Expect(!compacted.empty(), "compacted history should not be empty");
+        Expect(compacted.front().role == a2a::models::Role::kUser,
+               "compacted history should start with the summary user message");
+        Expect(FirstText(compacted.front()).find(
+                       aiagent::agent::kCompactionSummaryMarker) != std::string::npos,
+               "compacted history should contain the summary marker");
+        Expect(record.tokens_before > record.tokens_after,
+               "manual compact should reduce estimated tokens");
+        Expect(recorded.size() == 1 && recorded.front().forced,
+               "manual compact should invoke the callback with a forced record");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime manual compact test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<CompactionFakeModel>();
+        auto tools = std::make_shared<BigToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 2500;
+        settings.reserve_tokens = 200;
+        settings.keep_recent_tokens = 1500;
+        runtime.SetCompactionSettings(settings);
+
+        std::vector<aiagent::agent::CompactionRecord> recorded;
+        runtime.SetCompactionCallback(
+                [&](const std::string&, const aiagent::agent::CompactionRecord& record) {
+                    recorded.push_back(record);
+                });
+        std::vector<aiagent::agent::AgentEvent> compaction_events;
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "event task", "text/plain");
+        runtime.HandleMessageStreamingEvents(
+                user, {user}, "ctx-compaction-event",
+                [&](const aiagent::agent::AgentEvent& event) {
+                    if (event.kind == aiagent::agent::AgentEventKind::kCompaction) {
+                        compaction_events.push_back(event);
+                    }
+                });
+        Expect(!compaction_events.empty(), "compaction event should be emitted");
+        Expect(compaction_events.front().compaction_tokens_before >
+                       compaction_events.front().compaction_tokens_after,
+               "compaction event should report reduced tokens");
+        Expect(!compaction_events.front().compaction_forced,
+               "threshold compaction should not be marked forced");
+        Expect(recorded.size() == static_cast<std::size_t>(model->summary_calls),
+               "compaction callback should fire once per compaction");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime compaction event test failed: " << e.what() << '\n';
         return 1;
     }
 

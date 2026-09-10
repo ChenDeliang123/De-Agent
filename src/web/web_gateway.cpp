@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -57,12 +58,21 @@ std::vector<a2a::models::Message> LatestHistory(a2a::server::ITaskStore& store,
     if (history_cache != nullptr && history_cache->TryGet(context_id, history)) {
         return history;
     }
-    std::size_t latest_size = 0;
+    // 取该会话写入时间最新的任务：手动/自动压缩会写入更短的历史，
+    // 单纯比较 history.size() 会错误地回退到压缩前的旧任务。
+    std::optional<a2a::core::TimePoint> latest_time;
     for (const auto& task : store.ListAll()) {
-        if (task.context_id == context_id && task.history.size() > latest_size) {
-            history = task.history;
-            latest_size = task.history.size();
+        if (task.context_id != context_id || task.history.empty()) {
+            continue;
         }
+        if (latest_time.has_value()) {
+            if (!task.status.timestamp.has_value() ||
+                !(*task.status.timestamp > *latest_time)) {
+                continue;
+            }
+        }
+        history = task.history;
+        latest_time = task.status.timestamp;
     }
     if (history_cache != nullptr && !history.empty()) {
         // 冷启动回填，避免每个会话都重复全表扫描。
@@ -152,6 +162,11 @@ void WriteAgentEventFrame(
                                {"ok", event.ok},
                                {"text", event.text}});
             break;
+        case AgentEventKind::kCompaction:
+            write("compaction", {{"tokens_before", event.compaction_tokens_before},
+                                 {"tokens_after", event.compaction_tokens_after},
+                                 {"forced", event.compaction_forced}});
+            break;
     }
 }
 
@@ -211,6 +226,14 @@ public:
         stream_event_handler_ = std::move(handler);
     }
 
+    void SetCompactHandler(WebGateway::CompactHandler handler) {
+        compact_handler_ = std::move(handler);
+    }
+
+    void SetCompactionInfoHandler(WebGateway::CompactionInfoHandler handler) {
+        compaction_info_handler_ = std::move(handler);
+    }
+
     void CancelSession(const std::string& session_id) {
         std::lock_guard<std::mutex> lock(cancels_mutex_);
         const auto it = active_cancels_.find(session_id);
@@ -268,6 +291,67 @@ private:
                                                {"content", FirstText(message)}});
                         }
                         response.set_content(payload.dump(), "application/json");
+                    });
+
+        server_.Post("/api/v1/sessions/:id/compact",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         SetCommonHeaders(response);
+                         const auto it = request.path_params.find("id");
+                         if (it == request.path_params.end()) {
+                             response.status = 400;
+                             response.set_content(R"({"error":"missing session id"})",
+                                                  "application/json");
+                             return;
+                         }
+                         if (!compact_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"compaction not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         std::string error;
+                         if (!compact_handler_(it->second, &error)) {
+                             response.status = 409;
+                             response.set_content(
+                                     nlohmann::json{{"compacted", false},
+                                                    {"error", error}}
+                                             .dump(),
+                                     "application/json");
+                             return;
+                         }
+                         response.set_content(
+                                 nlohmann::json{{"compacted", true}}.dump(),
+                                 "application/json");
+                     });
+
+        server_.Get("/api/v1/sessions/:id/compaction",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        SetCommonHeaders(response);
+                        const auto it = request.path_params.find("id");
+                        if (it == request.path_params.end()) {
+                            response.status = 400;
+                            response.set_content(R"({"error":"missing session id"})",
+                                                 "application/json");
+                            return;
+                        }
+                        aiagent::agent::CompactionRecord record;
+                        if (!compaction_info_handler_ ||
+                            !compaction_info_handler_(it->second, &record)) {
+                            response.status = 404;
+                            response.set_content(R"({"found":false})",
+                                                 "application/json");
+                            return;
+                        }
+                        response.set_content(
+                                nlohmann::json{{"found", true},
+                                               {"forced", record.forced},
+                                               {"tokens_before", record.tokens_before},
+                                               {"tokens_after", record.tokens_after},
+                                               {"messages_before", record.messages_before},
+                                               {"messages_after", record.messages_after}}
+                                        .dump(),
+                                "application/json");
                     });
 
         server_.Post("/api/v1/chat",
@@ -483,6 +567,8 @@ private:
     bool running_ = false;
     WebGateway::StreamChatHandler stream_handler_;
     WebGateway::StreamEventHandler stream_event_handler_;
+    WebGateway::CompactHandler compact_handler_;
+    WebGateway::CompactionInfoHandler compaction_info_handler_;
     std::mutex cancels_mutex_;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_cancels_;
 };
@@ -504,6 +590,14 @@ void WebGateway::SetStreamHandler(WebGateway::StreamChatHandler handler) {
 
 void WebGateway::SetStreamEventHandler(WebGateway::StreamEventHandler handler) {
     impl_->SetStreamEventHandler(std::move(handler));
+}
+
+void WebGateway::SetCompactHandler(WebGateway::CompactHandler handler) {
+    impl_->SetCompactHandler(std::move(handler));
+}
+
+void WebGateway::SetCompactionInfoHandler(WebGateway::CompactionInfoHandler handler) {
+    impl_->SetCompactionInfoHandler(std::move(handler));
 }
 
 void WebGateway::SetHistoryCache(aiagent::agent::HistoryCache* history_cache) {

@@ -5,6 +5,7 @@
 #include <string>
 
 #include "aiagent/agent/agent_event.hpp"
+#include "aiagent/agent/compaction.hpp"
 
 namespace a2a::server {
 class AgentServer;
@@ -36,6 +37,17 @@ public:
             const aiagent::agent::AgentEventCallback& on_event,
             const CancelCallback& should_cancel)>;
 
+    // 手动压缩某个会话（POST /api/v1/sessions/:id/compact）。
+    // 返回 false 时写入 error。
+    using CompactHandler =
+            std::function<bool(const std::string& session_id, std::string* error)>;
+
+    // 查询某个会话最近一次压缩记录（GET /api/v1/sessions/:id/compaction）。
+    // 返回 false 表示该会话没有记录。
+    using CompactionInfoHandler =
+            std::function<bool(const std::string& session_id,
+                               aiagent::agent::CompactionRecord* record)>;
+
     WebGateway(a2a::server::AgentServer& agent_server,
                a2a::server::ITaskStore& task_store);
     ~WebGateway();
@@ -53,6 +65,12 @@ public:
     // 注入结构化事件版流式处理逻辑（token + 工具事件）。设置后优先于
     // SetStreamHandler 使用；未设置时保留旧的 token-only 行为。
     void SetStreamEventHandler(StreamEventHandler handler);
+
+    // 注入手动压缩处理逻辑。未设置时 /compact 接口返回 501。
+    void SetCompactHandler(CompactHandler handler);
+
+    // 注入压缩记录查询逻辑。未设置时 /compaction 接口返回 404。
+    void SetCompactionInfoHandler(CompactionInfoHandler handler);
 
     // 注入会话历史内存缓存（可选）。命中后，读取会话历史/标题的 REST 接口
     // 不再每次全表扫描 task store；未注入时行为与旧实现一致。

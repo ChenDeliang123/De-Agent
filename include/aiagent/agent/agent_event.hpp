@@ -11,6 +11,7 @@ enum class AgentEventKind {
     kToolStart,  // 工具调用开始（tool_call_id / tool_name / arguments）
     kToolOutput, // 工具执行中的增量输出（tool_call_id / content），当前预留
     kToolEnd,    // 工具执行结束（tool_call_id / ok / text）
+    kCompaction, // 上下文压缩完成（compaction_tokens_before/after）
 };
 
 struct AgentEvent {
@@ -29,6 +30,11 @@ struct AgentEvent {
     // kToolEnd
     bool ok = true;
     std::string text;  // 结果文本；ok=false 时为错误描述
+
+    // kCompaction
+    int compaction_tokens_before = 0;
+    int compaction_tokens_after = 0;
+    bool compaction_forced = false;  // overflow/length 触发的强制压缩
 };
 
 using AgentEventCallback = std::function<void(const AgentEvent&)>;

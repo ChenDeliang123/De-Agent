@@ -123,6 +123,18 @@ export class TranscriptRenderer {
     this.#resumeAssistant = false;
   }
 
+  compaction(data) {
+    const before = data?.tokens_before ?? "?";
+    const after = data?.tokens_after ?? "?";
+    const reason = data?.forced ? " (overflow)" : "";
+    this.#write(
+      `\n${dim}⤵ context compacted${reason}: ${before} → ${after} tokens${reset}\n`,
+    );
+    this.#assistantActive = false;
+    this.#assistantWroteText = false;
+    this.#resumeAssistant = true;
+  }
+
   #write(text) {
     this.#out.write(text);
   }

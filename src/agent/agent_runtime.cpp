@@ -31,6 +31,19 @@ std::string RoleToLlmRole(a2a::models::Role role) {
     }
 }
 
+void EmitCompactionEvent(const CompactionRecord& record,
+                         const AgentEventCallback& on_event) {
+    if (!on_event) {
+        return;
+    }
+    AgentEvent event;
+    event.kind = AgentEventKind::kCompaction;
+    event.compaction_tokens_before = record.tokens_before;
+    event.compaction_tokens_after = record.tokens_after;
+    event.compaction_forced = record.forced;
+    on_event(event);
+}
+
 }  // namespace
 
 AgentRuntime::AgentRuntime(std::shared_ptr<llm::IModelClient> model, std::string system_prompt)
@@ -52,25 +65,30 @@ void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
     compaction_settings_ = settings;
 }
 
-bool AgentRuntime::MaybeCompactBeforeCall(
+void AgentRuntime::SetCompactionCallback(CompactionCallback callback) {
+    compaction_callback_ = std::move(callback);
+}
+
+std::optional<CompactionRecord> AgentRuntime::MaybeCompactBeforeCall(
         std::vector<llm::ChatMessage>& chat_messages,
         int& last_usage_tokens,
         std::size_t& last_usage_message_count,
         std::size_t& last_compacted_size,
         const std::string& run_id,
+        const std::string& context_id,
         bool force) {
     if (!force) {
         if (!compaction_settings_.enabled) {
-            return false;
+            return std::nullopt;
         }
         const ContextUsageEstimate estimate = EstimateContextTokens(
                 chat_messages, last_usage_tokens, last_usage_message_count);
         if (!ShouldCompact(estimate.tokens, compaction_settings_)) {
-            return false;
+            return std::nullopt;
         }
         // 同一批消息不重复压缩，避免压缩后仍超阈值时反复调用摘要模型。
         if (chat_messages.size() == last_compacted_size) {
-            return false;
+            return std::nullopt;
         }
     }
     try {
@@ -79,28 +97,120 @@ bool AgentRuntime::MaybeCompactBeforeCall(
         if (!outcome.compacted) {
             // 无法找到安全切点时标记已尝试，避免每轮重复计算。
             last_compacted_size = chat_messages.size();
-            return false;
+            return std::nullopt;
         }
+        CompactionRecord record;
+        record.forced = force;
+        record.tokens_before = outcome.tokens_before;
+        record.tokens_after = outcome.tokens_after;
+        record.messages_before = chat_messages.size();
+        record.messages_after = outcome.messages.size();
+
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "agent_runtime",
                 "run=" + run_id + " event=compaction" +
                         (force ? std::string(" reason=overflow") : std::string()) +
-                        " tokens_before=" + std::to_string(outcome.tokens_before) +
-                        " tokens_after=" + std::to_string(outcome.tokens_after) +
-                        " messages_before=" + std::to_string(chat_messages.size()) +
+                        " tokens_before=" + std::to_string(record.tokens_before) +
+                        " tokens_after=" + std::to_string(record.tokens_after) +
+                        " messages_before=" + std::to_string(record.messages_before) +
                         " messages_after=" +
-                        std::to_string(outcome.messages.size()));
+                        std::to_string(record.messages_after));
         chat_messages = std::move(outcome.messages);
         last_usage_tokens = 0;
         last_usage_message_count = 0;
         last_compacted_size = chat_messages.size();
-        return true;
+        if (compaction_callback_) {
+            compaction_callback_(context_id, record);
+        }
+        return record;
     } catch (const std::exception& e) {
         // 摘要失败不影响主流程：保持原消息，记录日志。
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kWarning, "agent_runtime",
                 "run=" + run_id + " event=compaction_failed message=" + e.what());
         last_compacted_size = chat_messages.size();
+        return std::nullopt;
+    }
+}
+
+bool AgentRuntime::CompactHistory(
+        const std::string& context_id,
+        const std::vector<a2a::models::Message>& history,
+        std::vector<a2a::models::Message>* compacted_history,
+        CompactionRecord* record,
+        std::string* error) {
+    if (compacted_history == nullptr || record == nullptr) {
+        if (error != nullptr) {
+            *error = "invalid compact output arguments";
+        }
+        return false;
+    }
+
+    std::vector<llm::ChatMessage> chat_messages;
+    llm::ChatMessage system;
+    system.role = "system";
+    system.content = system_prompt_;
+    chat_messages.push_back(std::move(system));
+    for (const auto& message : history) {
+        const std::string role = RoleToLlmRole(message.role);
+        const std::string text = FirstText(message);
+        if (role.empty() || text.empty()) {
+            continue;
+        }
+        llm::ChatMessage chat_message;
+        chat_message.role = role;
+        chat_message.content = text;
+        chat_messages.push_back(std::move(chat_message));
+    }
+
+    if (chat_messages.size() <= 2) {
+        if (error != nullptr) {
+            *error = "nothing to compact (session too small)";
+        }
+        return false;
+    }
+
+    try {
+        const CompactionOutcome outcome =
+                CompactMessages(*model_, chat_messages, compaction_settings_);
+        if (!outcome.compacted) {
+            if (error != nullptr) {
+                *error = "nothing to compact (no safe cut point)";
+            }
+            return false;
+        }
+
+        std::vector<a2a::models::Message> result;
+        result.reserve(outcome.messages.size());
+        for (const auto& message : outcome.messages) {
+            if (message.role != "user" && message.role != "assistant") {
+                continue;
+            }
+            if (message.content.empty()) {
+                continue;
+            }
+            const auto role = message.role == "user" ? a2a::models::Role::kUser
+                                                      : a2a::models::Role::kAgent;
+            result.push_back(a2a::models::MakeTextMessage(role, message.content,
+                                                          "text/plain"));
+        }
+
+        CompactionRecord manual_record;
+        manual_record.forced = true;
+        manual_record.tokens_before = outcome.tokens_before;
+        manual_record.tokens_after = outcome.tokens_after;
+        manual_record.messages_before = chat_messages.size();
+        manual_record.messages_after = outcome.messages.size();
+        *compacted_history = std::move(result);
+        *record = manual_record;
+        if (compaction_callback_) {
+            compaction_callback_(context_id, manual_record);
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (error != nullptr) {
+            *error = std::string("compaction failed: ") + e.what();
+        }
         return false;
     }
 }
@@ -157,7 +267,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             break;
         }
         MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
-                               last_usage_message_count, last_compacted_size, run_id);
+                               last_usage_message_count, last_compacted_size, run_id,
+                               context_id);
         const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         const std::size_t messages_at_call = chat_messages.size();
         try {
@@ -167,7 +278,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             if (!overflow_retry_used && IsContextOverflowMessage(e.what()) &&
                 MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
                                        last_usage_message_count, last_compacted_size,
-                                       run_id, /*force=*/true)) {
+                                       run_id, context_id, /*force=*/true)) {
                 overflow_retry_used = true;
                 --round;
                 continue;
@@ -185,7 +296,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             IsRecoverableLengthStop(choice.finish_reason) &&
             MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
                                    last_usage_message_count, last_compacted_size,
-                                   run_id, /*force=*/true)) {
+                                   run_id, context_id, /*force=*/true)) {
             overflow_retry_used = true;
             --round;
             continue;
@@ -294,7 +405,6 @@ std::string AgentRuntime::RunStreaming(
         const AgentEventCallback& on_event,
         const std::string& working_directory,
         const CancelCallback& should_cancel) {
-    (void)context_id;
     const std::string run_id = std::string(a2a::core::NewUuid());
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "agent_runtime",
@@ -346,8 +456,12 @@ std::string AgentRuntime::RunStreaming(
             reached_max_rounds = true;
             break;
         }
-        MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
-                               last_usage_message_count, last_compacted_size, run_id);
+        if (const auto record = MaybeCompactBeforeCall(
+                    chat_messages, last_usage_tokens, last_usage_message_count,
+                    last_compacted_size, run_id, context_id);
+            record.has_value()) {
+            EmitCompactionEvent(*record, on_event);
+        }
         const std::vector<llm::ToolSpec> tool_specs =
                 tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         std::vector<llm::ToolCall> streamed_tool_calls;
@@ -382,26 +496,33 @@ std::string AgentRuntime::RunStreaming(
                     });
         } catch (const llm::DeepSeekException& e) {
             // 上下文超长：强制压缩后重试本回合一次（丢弃已生成内容）。
-            if (!overflow_retry_used && IsContextOverflowMessage(e.what()) &&
-                MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
-                                       last_usage_message_count, last_compacted_size,
-                                       run_id, /*force=*/true)) {
-                overflow_retry_used = true;
-                --round;
-                continue;
+            if (!overflow_retry_used && IsContextOverflowMessage(e.what())) {
+                if (const auto record = MaybeCompactBeforeCall(
+                            chat_messages, last_usage_tokens,
+                            last_usage_message_count, last_compacted_size, run_id,
+                            context_id, /*force=*/true);
+                    record.has_value()) {
+                    EmitCompactionEvent(*record, on_event);
+                    overflow_retry_used = true;
+                    --round;
+                    continue;
+                }
             }
             throw;
         }
 
         // 长度截断：压缩后重试一次，丢弃本轮半截输出。
         if (!overflow_retry_used && streamed_tool_calls.empty() &&
-            IsRecoverableLengthStop(finish_reason) &&
-            MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
-                                   last_usage_message_count, last_compacted_size,
-                                   run_id, /*force=*/true)) {
-            overflow_retry_used = true;
-            --round;
-            continue;
+            IsRecoverableLengthStop(finish_reason)) {
+            if (const auto record = MaybeCompactBeforeCall(
+                        chat_messages, last_usage_tokens, last_usage_message_count,
+                        last_compacted_size, run_id, context_id, /*force=*/true);
+                record.has_value()) {
+                EmitCompactionEvent(*record, on_event);
+                overflow_retry_used = true;
+                --round;
+                continue;
+            }
         }
 
         reply += round_reply;

@@ -68,8 +68,10 @@ CutPointResult FindCutPoint(const std::vector<llm::ChatMessage>& messages,
 std::string SerializeConversation(const std::vector<llm::ChatMessage>& messages);
 
 // 调用模型生成结构化摘要（不带工具）。失败抛 std::runtime_error。
+// previous_summary 非空时使用 UPDATE 模板，保留旧信息并合并新进展。
 std::string GenerateSummary(llm::IModelClient& model,
-                            const std::vector<llm::ChatMessage>& to_summarize);
+                            const std::vector<llm::ChatMessage>& to_summarize,
+                            const std::string& previous_summary = {});
 
 // 检测 DeepSeek 返回的错误信息是否为上下文超长。
 bool IsContextOverflowMessage(const std::string& message);
@@ -98,6 +100,15 @@ struct CompactionOutcome {
     int tokens_before = 0;
     int tokens_after = 0;
     std::vector<llm::ChatMessage> messages;  // 压缩后的完整消息列表
+};
+
+// 一次压缩的记录（供回调/日志/审计）。
+struct CompactionRecord {
+    bool forced = false;  // overflow/length 触发的强制压缩
+    int tokens_before = 0;
+    int tokens_after = 0;
+    std::size_t messages_before = 0;
+    std::size_t messages_after = 0;
 };
 
 // 执行一次压缩：摘要 [1, cut) 的消息，保留 system 与 [cut, end)，

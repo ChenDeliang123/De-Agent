@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { cancelChat, listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, compactSession, listSessions, loadHistory, streamChat } from "./session.mjs";
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -68,6 +68,38 @@ test("cli session client lists, resumes, and streams", async () => {
     assert.deepEqual(
       events.map((entry) => entry.event),
       ["content", "tool_start", "tool_end", "content", "done"],
+    );
+  } finally {
+    await close(backend);
+  }
+});
+
+test("cli session client compacts a session", async () => {
+  let compacted = false;
+  const backend = http.createServer((request, response) => {
+    if (request.url === "/api/v1/sessions/s1/compact" && request.method === "POST") {
+      compacted = true;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"compacted":true}');
+      return;
+    }
+    if (request.url === "/api/v1/sessions/s2/compact" && request.method === "POST") {
+      response.writeHead(409, { "content-type": "application/json" });
+      response.end('{"compacted":false,"error":"nothing to compact"}');
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+
+  const port = await listen(backend);
+  try {
+    const result = await compactSession(`http://127.0.0.1:${port}`, "s1");
+    assert.equal(result.compacted, true);
+    assert.equal(compacted, true);
+    await assert.rejects(
+      compactSession(`http://127.0.0.1:${port}`, "s2"),
+      /nothing to compact/,
     );
   } finally {
     await close(backend);
