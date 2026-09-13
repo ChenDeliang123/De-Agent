@@ -31,8 +31,15 @@ test("stripBom removes a leading UTF-8 BOM", () => {
   assert.equal(stripBom("hello"), "hello");
 });
 
-test("resolveEditorCommand follows flag > AIAGENT_EDITOR > VISUAL > EDITOR > default", () => {
-  assert.equal(resolveEditorCommand({ flag: "code --wait", env: {} }), "code --wait");
+test("resolveEditorCommand follows flag > config > env > default", () => {
+  assert.equal(
+    resolveEditorCommand({ flag: "code --wait", configured: "nvim", env: { AIAGENT_EDITOR: "emacs" } }),
+    "code --wait",
+  );
+  assert.equal(
+    resolveEditorCommand({ configured: "nvim", env: { AIAGENT_EDITOR: "emacs" } }),
+    "nvim",
+  );
   assert.equal(
     resolveEditorCommand({ env: { AIAGENT_EDITOR: "nvim", VISUAL: "vim", EDITOR: "nano" } }),
     "nvim",

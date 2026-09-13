@@ -1,0 +1,8 @@
+; CLI 设置（可选）。复制为 cli.ini 后生效；--cli-config 可指定其它路径。
+;
+; [editor]
+; external = code --wait   ; Ctrl+G 使用的外部编辑器
+;                          ; 优先级：--editor > 本项 > $AIAGENT_EDITOR > $VISUAL > $EDITOR
+
+[editor]
+external = nano

@@ -7,6 +7,8 @@ import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
 import { cancelChat, listSessions, loadHistory, renameSession, streamChat } from "./session.mjs";
 import { LineEditor, renderHotkeys } from "./editor.mjs";
+import { loadCliConfig } from "./config.mjs";
+import { resolveEditorCommand } from "./external-editor.mjs";
 import { commands, completeCommands, renderHelp, runCommand } from "./commands.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
@@ -34,6 +36,7 @@ function parseArgs(argv) {
     name: null,
     cwd: null,
     editor: null,
+    cliConfig: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -51,6 +54,8 @@ function parseArgs(argv) {
       options.cwd = argv[++i];
     } else if (arg === "--editor" && i + 1 < argv.length) {
       options.editor = argv[++i];
+    } else if (arg === "--cli-config" && i + 1 < argv.length) {
+      options.cliConfig = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     }
@@ -70,6 +75,7 @@ options:
   --name <name>     display name for the new session
   --cwd <dir>       tool working directory (default: current directory)
   --editor <cmd>    external editor for Ctrl+G (default: $AIAGENT_EDITOR/$VISUAL/$EDITOR)
+  --cli-config <f>  CLI settings file (default: conf/cli.ini)
   -h, --help        show this help
 `);
   console.log(renderHelp(commands));
@@ -223,12 +229,18 @@ async function main() {
     pendingName: null,
   };
 
+  const cliConfig = loadCliConfig({ explicit: options.cliConfig });
+  const editorCommand = resolveEditorCommand({
+    flag: options.editor,
+    configured: cliConfig.externalEditor,
+  });
+
   const editor = input.isTTY
     ? new LineEditor({
         input,
         output,
         complete: (prefix) => completeCommands(prefix, commands),
-        editorCommand: options.editor,
+        editorCommand,
       })
     : null;
 

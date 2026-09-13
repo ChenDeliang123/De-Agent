@@ -429,7 +429,9 @@ export function renderHelp(registry = commands) {
     }
   }
   lines.push("");
-  lines.push("type / to list commands, Tab to complete it, /hotkeys for keybindings");
+  lines.push(
+    "type / to list commands, Tab to complete it, Ctrl+G for external editor, /hotkeys for keybindings",
+  );
   return lines.join("\n");
 }
 

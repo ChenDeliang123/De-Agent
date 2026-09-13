@@ -2,7 +2,8 @@
 //
 // 语义对齐 pi：把当前输入写入临时目录下的 prompt.md，交给外部编辑器编辑，
 // 退出后读回内容。编辑器命令解析优先级：
-//   --editor > $AIAGENT_EDITOR > $VISUAL > $EDITOR > 平台默认。
+//   --editor > conf/cli.ini 的 editor.external > $AIAGENT_EDITOR >
+//   $VISUAL > $EDITOR > 平台默认。
 //
 // 注意：不要用 spawnSync。Windows 下同步 child_process 调用会在父进程暂停
 // stdin 后仍保持控制台输入读取，和 vim/nvim 抢缓冲区，参考 pi 的实现注释。
@@ -16,20 +17,22 @@ export function stripBom(text) {
   return text.startsWith("\uFEFF") ? text.slice(1) : text;
 }
 
-export function resolveEditorCommand({ flag, env = process.env, platform = process.platform } = {}) {
-  if (typeof flag === "string" && flag.trim() !== "") {
-    return flag.trim();
-  }
-  if (typeof env.AIAGENT_EDITOR === "string" && env.AIAGENT_EDITOR.trim() !== "") {
-    return env.AIAGENT_EDITOR.trim();
-  }
-  if (typeof env.VISUAL === "string" && env.VISUAL.trim() !== "") {
-    return env.VISUAL.trim();
-  }
-  if (typeof env.EDITOR === "string" && env.EDITOR.trim() !== "") {
-    return env.EDITOR.trim();
-  }
-  return platform === "win32" ? "notepad" : "nano";
+export function resolveEditorCommand({
+  flag,
+  configured,
+  env = process.env,
+  platform = process.platform,
+} = {}) {
+  const pick = (value) =>
+    typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+  return (
+    pick(flag) ??
+    pick(configured) ??
+    pick(env.AIAGENT_EDITOR) ??
+    pick(env.VISUAL) ??
+    pick(env.EDITOR) ??
+    (platform === "win32" ? "notepad" : "nano")
+  );
 }
 
 // 返回 { status: "complete", content } 或 { status: "failed" }。

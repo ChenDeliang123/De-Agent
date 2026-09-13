@@ -234,9 +234,10 @@ de logs      # 查看后端日志
 会在下一次模型轮次或工具执行前停止。
 
 输入行里按 `Ctrl+G` 会把当前内容写入临时 `prompt.md`，交给外部编辑器
-（`--editor` > `$AIAGENT_EDITOR` > `$VISUAL` > `$EDITOR`，默认 `nano`，
-Windows 为 `notepad`）编辑，保存退出后内容回填；编辑器启动失败或非 0 退出时
-保留原输入。
+（`--editor` > `conf/cli.ini` 的 `editor.external` > `$AIAGENT_EDITOR` >
+`$VISUAL` > `$EDITOR`，默认 `nano`，Windows 为 `notepad`）编辑，保存退出后
+内容回填；编辑器启动失败或非 0 退出时保留原输入。可复制
+`conf/cli.ini.example` 为 `conf/cli.ini` 持久化设置。
 
 CLI 启动参数：
 
@@ -248,6 +249,7 @@ CLI 启动参数：
 --name <title>     为新会话设置显示名
 --cwd <dir>        工具工作目录（默认当前目录）
 --editor <cmd>     Ctrl+G 使用的外部编辑器（默认见上）
+--cli-config <f>   CLI 设置文件（默认 conf/cli.ini，可用 AIAGENT_CLI_CONFIG 覆盖）
 ```
 
 也可以直接指定会话进入：

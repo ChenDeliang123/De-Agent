@@ -2,6 +2,7 @@ other
 docs
 vendor_demo
 conf/conf.ini
+conf/cli.ini
 build/
 .cache/
 node_modules/
