@@ -459,6 +459,8 @@ export class LineEditor {
           frame += "\n";
         }
       });
+      // 光标回到区域首行（标题行），与 #eraseFrame 的“光标在区域顶部”约定一致。
+      frame += `\r\x1b[${entries.length}A`;
       this.#drawn = 1 + entries.length;
       this.#output.write(frame);
     };
@@ -500,15 +502,13 @@ export class LineEditor {
     return this.#output.columns || 80;
   }
 
-  // 清除已绘制的输入/候选区域，光标回到区域起始处（不换行）。
+  // 清除已绘制的输入/候选区域。约定：调用时光标位于区域首行（顶部），
+  // 因此从当前行向下逐行清除，最后把光标还原到首行（不换行）。
   #eraseFrame() {
     if (this.#drawn <= 0) {
       return "";
     }
     let frame = "";
-    if (this.#drawn > 1) {
-      frame += `\x1b[${this.#drawn - 1}A`;
-    }
     for (let i = 0; i < this.#drawn; i += 1) {
       frame += "\r\x1b[K";
       if (i < this.#drawn - 1) {

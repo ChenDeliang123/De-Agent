@@ -50,6 +50,71 @@ class FakeOutput {
   }
 }
 
+// 极简 ANSI 终端模拟器：把 LineEditor 写出的转义序列还原成一份屏幕快照，
+// 用于断言重绘后不残留旧行（纯字符串断言看不出这类问题）。
+class VirtualTerminal {
+  constructor() {
+    this.rows = [];
+    this.row = 0;
+    this.col = 0;
+  }
+
+  #ensureRow(index) {
+    while (this.rows.length <= index) {
+      this.rows.push([]);
+    }
+  }
+
+  #writeChar(ch) {
+    this.#ensureRow(this.row);
+    const row = this.rows[this.row];
+    while (row.length < this.col) {
+      row.push(" ");
+    }
+    row[this.col] = ch;
+    this.col += 1;
+  }
+
+  write(text) {
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === "\x1b") {
+        const match = /^\x1b\[([0-9;]*)([A-Za-z])/.exec(text.slice(i));
+        if (match) {
+          const count = match[1] === "" ? 1 : Number(match[1]);
+          const code = match[2];
+          if (code === "A") {
+            this.row = Math.max(0, this.row - count);
+          } else if (code === "B") {
+            this.row += count;
+          } else if (code === "C") {
+            this.col += count;
+          } else if (code === "D") {
+            this.col = Math.max(0, this.col - count);
+          } else if (code === "K") {
+            this.#ensureRow(this.row);
+            this.rows[this.row] = this.rows[this.row].slice(0, this.col);
+          }
+          i += match[0].length - 1;
+          continue;
+        }
+      }
+      if (ch === "\r") {
+        this.col = 0;
+      } else if (ch === "\n") {
+        this.row += 1;
+        this.col = 0;
+      } else {
+        this.#writeChar(ch);
+      }
+    }
+  }
+
+  lines() {
+    return this.rows.map((row) => row.join("").replace(/\s+$/, ""));
+  }
+}
+
 test("displayWidth counts wide characters as two columns", () => {
   assert.equal(displayWidth("abc"), 3);
   assert.equal(displayWidth("你好"), 4);
@@ -154,6 +219,48 @@ test("LineEditor resolves readLine on submit and shows candidates", async () => 
   assert.equal(result.text, "/help");
   assert.equal(input.isRaw, false, "raw mode should be restored after submit");
   assert.deepEqual(editor.history, ["/help"]);
+});
+
+test("LineEditor leaves no stale candidate rows after redraw", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput(80);
+  const terminal = new VirtualTerminal();
+  // 先铺一些历史输出，让输入行不在屏幕顶部，从而暴露“向上擦除”的越界。
+  terminal.write("previous output\n".repeat(12));
+  const rawWrite = output.write.bind(output);
+  output.write = (text) => {
+    terminal.write(text);
+    return rawWrite(text);
+  };
+  const editor = new LineEditor({ input, output, complete });
+
+  const pending = editor.readLine("[new] ❯ ");
+  input.emit("keypress", "/", undefined);
+  assert.ok(
+    terminal.lines().includes("❯ /new  Start a new session"),
+    "first redraw should show the candidate list",
+  );
+
+  // 继续输入让候选收窄，旧的候选行必须被清除而不是残留在下方。
+  input.emit("keypress", "c", key("c"));
+  input.emit("keypress", "o", key("o"));
+
+  const lines = terminal.lines();
+  assert.equal(
+    lines.filter((line) => line.includes("/new ")).length,
+    0,
+    "stale /new candidate should be erased",
+  );
+  assert.equal(
+    lines.filter((line) => line.includes("/compact")).length,
+    1,
+    "/compact should appear exactly once",
+  );
+
+  // 第一次 Enter 会把 /co 补全为 /compact，第二次才真正提交。
+  input.emit("keypress", "\r", key("return"));
+  input.emit("keypress", "\r", key("return"));
+  await pending;
 });
 
 test("LineEditor exits on Ctrl+D with an empty buffer", async () => {
