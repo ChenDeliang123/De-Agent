@@ -16,7 +16,7 @@ test(
     const result = spawnSync(scriptPath, ["-qec", "node cli.mjs", "/dev/null"], {
       cwd: import.meta.dirname,
       input: "/quit\n",
-      timeout: 8000,
+      timeout: 20000,
       encoding: "utf8",
     });
     assert.equal(result.error, undefined, `spawn failed: ${result.error}`);

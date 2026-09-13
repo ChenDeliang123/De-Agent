@@ -200,6 +200,17 @@ test("applyKey browses history with arrow keys", () => {
   assert.equal(state.buffer, "/help");
 });
 
+test("applyKey maps Ctrl+G to an external-editor action without mutating state", () => {
+  const state = createEditorState();
+  state.buffer = "hello";
+  state.cursor = 5;
+
+  const action = applyKey(state, "", key("g", { ctrl: true }), { complete });
+  assert.deepEqual(action, { type: "external-editor" });
+  assert.equal(state.buffer, "hello");
+  assert.equal(state.cursor, 5);
+});
+
 test("LineEditor resolves readLine on submit and shows candidates", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -220,6 +231,91 @@ test("LineEditor resolves readLine on submit and shows candidates", async () => 
   assert.equal(result.text, "/help");
   assert.equal(input.isRaw, false, "raw mode should be restored after submit");
   assert.deepEqual(editor.history, ["/help"]);
+});
+
+test("LineEditor opens the external editor on Ctrl+G and applies the result", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const calls = [];
+  const editor = new LineEditor({
+    input,
+    output,
+    complete,
+    editorCommand: "fake-editor",
+    externalEditor: async ({ command, content }) => {
+      calls.push({ command, content });
+      return { status: "complete", content: "edited" };
+    },
+  });
+
+  const pending = editor.readLine("> ");
+  input.emit("keypress", "a", key("a"));
+  input.emit("keypress", "b", key("b"));
+  input.emit("keypress", "", key("g", { ctrl: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, [{ command: "fake-editor", content: "ab" }]);
+  assert.equal(editor.state.buffer, "edited");
+  assert.equal(editor.state.cursor, "edited".length);
+  assert.equal(input.isRaw, true, "raw mode should be restored after editing");
+
+  input.emit("keypress", "\r", key("return"));
+  assert.deepEqual(await pending, { text: "edited" });
+});
+
+test("LineEditor keeps the current input when the external editor fails", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const editor = new LineEditor({
+    input,
+    output,
+    complete,
+    externalEditor: async () => ({ status: "failed" }),
+  });
+
+  const pending = editor.readLine("> ");
+  input.emit("keypress", "x", key("x"));
+  input.emit("keypress", "", key("g", { ctrl: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(editor.state.buffer, "x");
+  assert.match(output.text, /external editor failed/);
+
+  input.emit("keypress", "\r", key("return"));
+  assert.deepEqual(await pending, { text: "x" });
+});
+
+test("LineEditor ignores a second Ctrl+G while the editor is open", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  let release;
+  let calls = 0;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const editor = new LineEditor({
+    input,
+    output,
+    complete,
+    externalEditor: async () => {
+      calls += 1;
+      await gate;
+      return { status: "complete", content: "done" };
+    },
+  });
+
+  const pending = editor.readLine("> ");
+  input.emit("keypress", "", key("g", { ctrl: true }));
+  input.emit("keypress", "", key("g", { ctrl: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1, "editor should only be opened once");
+
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(editor.state.buffer, "done");
+
+  input.emit("keypress", "\r", key("return"));
+  await pending;
 });
 
 test("LineEditor leaves no stale candidate rows after redraw", async () => {

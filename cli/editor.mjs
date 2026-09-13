@@ -11,6 +11,8 @@
 
 import readline from "node:readline";
 
+import { editInExternalEditor, resolveEditorCommand } from "./external-editor.mjs";
+
 export const EDITOR_HOTKEYS = [
   ["Enter", "submit input / run command"],
   ["Tab", "complete command"],
@@ -18,6 +20,7 @@ export const EDITOR_HOTKEYS = [
   ["Esc", "close command candidates"],
   ["Ctrl+C", "clear input; press again on empty to exit"],
   ["Ctrl+D", "exit when input is empty"],
+  ["Ctrl+G", "edit the current prompt in an external editor"],
   ["Ctrl+A / Ctrl+E", "jump to line start / end"],
   ["Ctrl+U / Ctrl+K", "delete to line start / end"],
   ["Ctrl+W", "delete previous word"],
@@ -226,6 +229,9 @@ export function applyKey(state, str, key, options = {}) {
         return { type: "exit" };
       case "d":
         return state.buffer ? { type: "none" } : { type: "exit" };
+      case "g":
+        // 交给 LineEditor 异步处理：挂起 raw 模式 -> 外部编辑器 -> 回填。
+        return { type: "external-editor" };
       case "a":
         state.cursor = 0;
         return { type: "redraw" };
@@ -363,13 +369,27 @@ export class LineEditor {
   #state;
   #drawn = 0;
   #prompt = "";
-  #onKeypress = null;
+  #externalEditor;
+  #editorCommand;
+  #externalEditorActive = false;
+  #resolveLine = null;
+  #previousRaw = false;
 
-  constructor({ input, output, complete, history = [], maxCandidates = MAX_CANDIDATES } = {}) {
+  constructor({
+    input,
+    output,
+    complete,
+    history = [],
+    maxCandidates = MAX_CANDIDATES,
+    externalEditor = editInExternalEditor,
+    editorCommand,
+  } = {}) {
     this.#input = input ?? process.stdin;
     this.#output = output ?? process.stdout;
     this.#complete = complete;
     this.#maxCandidates = maxCandidates;
+    this.#externalEditor = externalEditor;
+    this.#editorCommand = editorCommand ?? null;
     this.#state = createEditorState(history);
     if (this.#input.isTTY && !this.#input.__aiagentKeypress) {
       readline.emitKeypressEvents(this.#input);
@@ -405,37 +425,101 @@ export class LineEditor {
     this.#drawn = 0;
     this.#redraw();
 
+    this.#previousRaw = previousRaw;
+
     return new Promise((resolve) => {
-      const finish = (result) => {
-        input.removeListener("keypress", this.#onKeypress);
-        this.#onKeypress = null;
+      this.#resolveLine = (result) => {
+        this.#resolveLine = null;
+        input.removeListener("keypress", this.#handleKeypress);
         this.#clearDrawn();
         if (typeof input.setRawMode === "function") {
-          input.setRawMode(previousRaw);
+          input.setRawMode(this.#previousRaw);
         }
         resolve(result);
       };
-      this.#onKeypress = (str, key) => {
-        const action = applyKey(this.#state, str, key, { complete: this.#complete });
-        if (action.type === "submit") {
-          if (action.text.trim()) {
-            this.#state.history.push(action.text);
-          }
-          this.#state.historyIndex = this.#state.history.length;
-          this.#state.historyDraft = "";
-          finish({ text: action.text });
-          return;
-        }
-        if (action.type === "exit") {
-          finish({ exit: true });
-          return;
-        }
-        if (action.type === "redraw") {
-          this.#redraw();
-        }
-      };
-      input.on("keypress", this.#onKeypress);
+      input.on("keypress", this.#handleKeypress);
     });
+  }
+
+  // 稳定的按键处理函数引用，供外部编辑器挂起/恢复时成对 add/removeListener。
+  #handleKeypress = (str, key) => {
+    if (this.#externalEditorActive) {
+      return;
+    }
+    const action = applyKey(this.#state, str, key, { complete: this.#complete });
+    if (action.type === "submit") {
+      if (action.text.trim()) {
+        this.#state.history.push(action.text);
+      }
+      this.#state.historyIndex = this.#state.history.length;
+      this.#state.historyDraft = "";
+      this.#resolveLine?.({ text: action.text });
+      return;
+    }
+    if (action.type === "exit") {
+      this.#resolveLine?.({ exit: true });
+      return;
+    }
+    if (action.type === "external-editor") {
+      void this.#openExternalEditor();
+      return;
+    }
+    if (action.type === "redraw") {
+      this.#redraw();
+    }
+  };
+
+  // Ctrl+G：挂起当前输入行，交给外部编辑器，退出后回填内容。
+  async #openExternalEditor() {
+    if (this.#externalEditorActive || typeof this.#externalEditor !== "function") {
+      return;
+    }
+    if (!this.#resolveLine) {
+      return;
+    }
+    const input = this.#input;
+    const state = this.#state;
+    this.#externalEditorActive = true;
+
+    const command = this.#editorCommand || resolveEditorCommand();
+    const content = state.buffer;
+
+    // 挂起：不再抢按键，退出 raw 模式并暂停 stdin，把 TTY 让给编辑器。
+    input.removeListener("keypress", this.#handleKeypress);
+    this.#clearDrawn();
+    if (typeof input.setRawMode === "function") {
+      input.setRawMode(false);
+    }
+    input.pause?.();
+
+    try {
+      const result = await this.#externalEditor({ command, content });
+      if (result && result.status === "complete") {
+        state.buffer = result.content;
+        state.cursor = result.content.length;
+        state.candidates = [];
+        state.selected = 0;
+        state.candidatesSuppressed = false;
+      } else {
+        this.#output.write("\r\x1b[Kexternal editor failed; keeping current input\n");
+      }
+    } catch (error) {
+      this.#output.write(
+        `\r\x1b[Kexternal editor failed: ${error.message}; keeping current input\n`,
+      );
+    } finally {
+      // 恢复：重新进入 raw 模式、恢复 stdin、重挂监听并重绘输入行。
+      input.resume?.();
+      if (typeof input.setRawMode === "function") {
+        input.setRawMode(true);
+      }
+      if (this.#resolveLine) {
+        input.on("keypress", this.#handleKeypress);
+        this.#drawn = 0;
+        this.#redraw();
+      }
+      this.#externalEditorActive = false;
+    }
   }
 
   selectList(items, title = "") {

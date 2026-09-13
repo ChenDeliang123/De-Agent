@@ -33,6 +33,7 @@ function parseArgs(argv) {
     resume: false,
     name: null,
     cwd: null,
+    editor: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -48,6 +49,8 @@ function parseArgs(argv) {
       options.name = argv[++i];
     } else if (arg === "--cwd" && i + 1 < argv.length) {
       options.cwd = argv[++i];
+    } else if (arg === "--editor" && i + 1 < argv.length) {
+      options.editor = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     }
@@ -66,6 +69,7 @@ options:
   -r, --resume      pick a session to resume at startup
   --name <name>     display name for the new session
   --cwd <dir>       tool working directory (default: current directory)
+  --editor <cmd>    external editor for Ctrl+G (default: $AIAGENT_EDITOR/$VISUAL/$EDITOR)
   -h, --help        show this help
 `);
   console.log(renderHelp(commands));
@@ -224,6 +228,7 @@ async function main() {
         input,
         output,
         complete: (prefix) => completeCommands(prefix, commands),
+        editorCommand: options.editor,
       })
     : null;
 
