@@ -85,6 +85,17 @@ export function clipToWidth(text, maxWidth) {
   return out;
 }
 
+// 计算候选列表的滚动窗口起点，保证 selected 始终落在可见窗口内。
+// total <= max 时不需要滚动，直接从头显示。
+export function candidateWindow(total, selected, max) {
+  if (max <= 0 || total <= max) {
+    return 0;
+  }
+  const maxStart = total - max;
+  const start = selected - max + 1;
+  return Math.max(0, Math.min(start, maxStart));
+}
+
 export function formatCandidate(command, selected, columns = 80) {
   const marker = selected ? "❯" : " ";
   const arg = command.argHint ? ` ${command.argHint}` : "";
@@ -535,9 +546,15 @@ export class LineEditor {
     frame += `\r${this.#prompt}${state.buffer}`;
 
     const columns = this.#columns();
-    const candidates = state.candidates.slice(0, this.#maxCandidates);
+    const start = candidateWindow(
+      state.candidates.length,
+      state.selected,
+      this.#maxCandidates,
+    );
+    const candidates = state.candidates.slice(start, start + this.#maxCandidates);
     for (let i = 0; i < candidates.length; i += 1) {
-      frame += `\n\r\x1b[K${formatCandidate(candidates[i], i === state.selected, columns)}`;
+      const selected = start + i === state.selected;
+      frame += `\n\r\x1b[K${formatCandidate(candidates[i], selected, columns)}`;
     }
     if (candidates.length > 0) {
       frame += `\x1b[${candidates.length}A`;

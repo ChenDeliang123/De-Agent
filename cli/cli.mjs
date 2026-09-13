@@ -317,6 +317,9 @@ async function main() {
     }
   } finally {
     clearInputLine();
+    // readLine/selectList 会 resume stdin 以接收按键；退出主循环后若不暂停，
+    // 处于 flowing 状态的 stdin 会让 Node 进程一直存活，表现为 /quit 卡住。
+    input.pause?.();
   }
 }
 

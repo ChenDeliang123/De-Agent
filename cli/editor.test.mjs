@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   LineEditor,
   applyKey,
+  candidateWindow,
   createEditorState,
   displayWidth,
   formatCandidate,
@@ -259,6 +260,54 @@ test("LineEditor leaves no stale candidate rows after redraw", async () => {
 
   // 第一次 Enter 会把 /co 补全为 /compact，第二次才真正提交。
   input.emit("keypress", "\r", key("return"));
+  input.emit("keypress", "\r", key("return"));
+  await pending;
+});
+
+test("candidateWindow keeps the selection visible while scrolling", () => {
+  // 候选不超过窗口时不滚动。
+  assert.equal(candidateWindow(5, 4, 8), 0);
+  // 选择在窗口内时起点仍为 0。
+  assert.equal(candidateWindow(15, 7, 8), 0);
+  // 选择越过窗口底部时向下滚动一行。
+  assert.equal(candidateWindow(15, 8, 8), 1);
+  // 选择到末尾时窗口贴底。
+  assert.equal(candidateWindow(15, 14, 8), 7);
+});
+
+test("LineEditor scrolls candidates so the selection stays visible", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput(80);
+  const terminal = new VirtualTerminal();
+  const rawWrite = output.write.bind(output);
+  output.write = (text) => {
+    terminal.write(text);
+    return rawWrite(text);
+  };
+  const editor = new LineEditor({ input, output, complete });
+
+  const pending = editor.readLine("❯ ");
+  input.emit("keypress", "/", undefined);
+
+  const selectedLine = () =>
+    terminal.lines().find((line) => /^\s*❯ \/[a-z]/.test(line));
+
+  // 连按 8 次下键越过可见窗口，选择应滚到 /status 而不是隐形地停在
+  // 未渲染的候选上。
+  for (let i = 0; i < 8; i += 1) {
+    input.emit("keypress", "", key("down"));
+  }
+  assert.match(selectedLine(), /❯ \/status/);
+
+  // 继续按到最后一个候选 /quit，再按一次应回到第一个 /new。
+  for (let i = 0; i < 6; i += 1) {
+    input.emit("keypress", "", key("down"));
+  }
+  assert.match(selectedLine(), /❯ \/quit/);
+  input.emit("keypress", "", key("down"));
+  assert.match(selectedLine(), /❯ \/new/);
+
+  input.emit("keypress", "", key("escape"));
   input.emit("keypress", "\r", key("return"));
   await pending;
 });
