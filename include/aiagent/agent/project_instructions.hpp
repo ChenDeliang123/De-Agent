@@ -1,7 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "aiagent/config.hpp"
@@ -20,6 +24,8 @@ struct LoadedInstructions {
     std::string rendered;
     std::vector<InstructionFile> files;
     std::size_t total_bytes = 0;
+    std::size_t cache_hits = 0;
+    std::size_t cache_misses = 0;
 
     bool empty() const noexcept { return files.empty(); }
 };
@@ -40,7 +46,14 @@ public:
     const InstructionsConfig& config() const noexcept { return config_; }
 
 private:
+    struct CachedFile;
+
+    bool ReadFileCached(const std::filesystem::path& path, std::string* content,
+                        bool* binary, bool* cache_hit, std::string* error) const;
+
     InstructionsConfig config_;
+    mutable std::mutex cache_mutex_;
+    mutable std::unordered_map<std::string, std::shared_ptr<const CachedFile>> cache_;
 };
 
 }  // namespace aiagent::agent

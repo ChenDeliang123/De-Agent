@@ -16,6 +16,17 @@ namespace fs = std::filesystem;
 
 constexpr std::size_t kBinaryProbeBytes = 8192;
 
+std::string JoinPaths(const std::vector<InstructionFile>& files) {
+    std::string result;
+    for (const auto& file : files) {
+        if (!result.empty()) {
+            result += ";";
+        }
+        result += file.path;
+    }
+    return result;
+}
+
 fs::path NormalizeDirectory(const std::string& value) {
     if (value.empty()) {
         return {};
@@ -154,8 +165,61 @@ std::string RenderInstructions(const LoadedInstructions& loaded,
 
 }  // namespace
 
+struct ProjectInstructionsLoader::CachedFile {
+    std::filesystem::file_time_type mtime;
+    std::uintmax_t size = 0;
+    std::string content;
+    bool binary = false;
+};
+
 ProjectInstructionsLoader::ProjectInstructionsLoader(InstructionsConfig config)
     : config_(std::move(config)) {}
+
+bool ProjectInstructionsLoader::ReadFileCached(
+        const fs::path& path, std::string* content, bool* binary,
+        bool* cache_hit, std::string* error) const {
+    std::error_code ec;
+    const fs::file_time_type mtime = fs::last_write_time(path, ec);
+    if (ec) {
+        *error = "cannot stat file";
+        return false;
+    }
+    const std::uintmax_t size = fs::file_size(path, ec);
+    if (ec) {
+        *error = "cannot stat file size";
+        return false;
+    }
+
+    const std::string key = path.string();
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        const auto it = cache_.find(key);
+        if (it != cache_.end() && it->second->mtime == mtime &&
+            it->second->size == size) {
+            *content = it->second->content;
+            *binary = it->second->binary;
+            *cache_hit = true;
+            return true;
+        }
+    }
+
+    if (!ReadFile(path, content, error)) {
+        return false;
+    }
+    *binary = LooksBinary(*content);
+    *cache_hit = false;
+
+    auto cached = std::make_shared<CachedFile>();
+    cached->mtime = mtime;
+    cached->size = size;
+    cached->content = *content;
+    cached->binary = *binary;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        cache_[key] = std::move(cached);
+    }
+    return true;
+}
 
 LoadedInstructions ProjectInstructionsLoader::Load(
         const std::string& working_directory,
@@ -210,15 +274,22 @@ LoadedInstructions ProjectInstructionsLoader::Load(
         }
 
         std::string content;
+        bool binary = false;
+        bool cache_hit = false;
         std::string read_error;
-        if (!ReadFile(path, &content, &read_error)) {
+        if (!ReadFileCached(path, &content, &binary, &cache_hit, &read_error)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
                     "event=instructions_skip path=" + path.string() +
                             " reason=read_error error=" + read_error);
             continue;
         }
-        if (LooksBinary(content)) {
+        if (cache_hit) {
+            ++loaded.cache_hits;
+        } else {
+            ++loaded.cache_misses;
+        }
+        if (binary) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
                     "event=instructions_skip path=" + path.string() +
@@ -284,7 +355,10 @@ LoadedInstructions ProjectInstructionsLoader::Load(
             aiagent::LogLevel::kInfo, "instructions",
             "event=instructions_load cwd=" + start.string() +
                     " files=" + std::to_string(loaded.files.size()) +
-                    " bytes=" + std::to_string(loaded.total_bytes));
+                    " bytes=" + std::to_string(loaded.total_bytes) +
+                    " cache_hits=" + std::to_string(loaded.cache_hits) +
+                    " cache_misses=" + std::to_string(loaded.cache_misses) +
+                    " sources=" + JoinPaths(loaded.files));
     return loaded;
 }
 

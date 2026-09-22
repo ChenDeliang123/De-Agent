@@ -165,6 +165,17 @@ void TestLoadOrderAndPriority() {
            "rendered instructions should contain both files");
     Expect(root_pos < sub_pos, "nested instructions should have higher priority order");
 
+    const auto cached = loader.Load(sub.string(), {});
+    Expect(cached.cache_hits == 2 && cached.cache_misses == 0,
+           "second load should hit the mtime cache for both files");
+
+    WriteFile(root / "AGENTS.md", "root-rule-changed\n");
+    const auto refreshed = loader.Load(sub.string(), {});
+    Expect(refreshed.cache_hits == 1 && refreshed.cache_misses == 1,
+           "changed file should invalidate its cache entry");
+    Expect(refreshed.rendered.find("root-rule-changed") != std::string::npos,
+           "changed file should be reloaded");
+
     aiagent::InstructionsConfig no_parents;
     no_parents.agents_md_search_parents = false;
     const auto only_sub =
