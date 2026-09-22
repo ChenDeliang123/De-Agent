@@ -1,0 +1,32 @@
+# 项目统一格式化配置（与 vendor/a2a-protocol、vendor/mcp-extension-platform 一致）
+#
+# 以 Google 风格为基础，放宽到 100 列、固定 C++20，并改用 4 空格缩进。
+BasedOnStyle: Google
+
+Language: Cpp
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 4
+# 访问修饰符相对成员缩进外推 4 格，即 public:/private: 顶格：
+#   class Foo {
+#   public:
+#       void bar();
+#   };
+AccessModifierOffset: -4
+
+# 头文件排序：先放与源文件同名的主头文件，再按类别/字母序排列其余头文件。
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+
+# 指针/引用贴在类型一侧：const Foo& foo、Foo* foo
+PointerAlignment: Left
+
+# 长表达式换行后相对上一层缩进 8 格（两倍基础缩进）。
+ContinuationIndentWidth: 8
+
+# 命名空间内的代码不额外缩进。
+NamespaceIndentation: None
+
+# 行尾注释尽量右对齐；不自动重排注释文字，避免误改文档内容。
+AlignTrailingComments: true
+ReflowComments: false

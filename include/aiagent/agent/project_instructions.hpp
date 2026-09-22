@@ -48,8 +48,8 @@ public:
 private:
     struct CachedFile;
 
-    bool ReadFileCached(const std::filesystem::path& path, std::string* content,
-                        bool* binary, bool* cache_hit, std::string* error) const;
+    bool ReadFileCached(const std::filesystem::path& path, std::string* content, bool* binary,
+                        bool* cache_hit, std::string* error) const;
 
     InstructionsConfig config_;
     mutable std::mutex cache_mutex_;

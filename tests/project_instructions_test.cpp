@@ -1,3 +1,5 @@
+#include "aiagent/agent/project_instructions.hpp"
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -8,7 +10,6 @@
 #include <vector>
 
 #include "aiagent/agent/agent_runtime.hpp"
-#include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/config.hpp"
 
 namespace {
@@ -28,8 +29,7 @@ class TempDir {
 public:
     TempDir() {
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path_ = fs::temp_directory_path() /
-                ("aiagent-instructions-" + std::to_string(stamp));
+        path_ = fs::temp_directory_path() / ("aiagent-instructions-" + std::to_string(stamp));
         fs::create_directories(path_);
     }
 
@@ -56,10 +56,9 @@ public:
     std::string system_content;
     std::vector<aiagent::llm::ChatMessage> last_messages;
 
-    aiagent::llm::ChatResult Chat(
-            const std::vector<aiagent::llm::ChatMessage>& messages,
-            const std::vector<aiagent::llm::ToolSpec>&,
-            const std::optional<std::string>&) override {
+    aiagent::llm::ChatResult Chat(const std::vector<aiagent::llm::ChatMessage>& messages,
+                                  const std::vector<aiagent::llm::ToolSpec>&,
+                                  const std::optional<std::string>&) override {
         last_messages = messages;
         aiagent::llm::ChatResult result;
         aiagent::llm::ChatChoice choice;
@@ -72,8 +71,7 @@ public:
     void ChatStream(
             const std::vector<aiagent::llm::ChatMessage>& messages,
             const std::vector<aiagent::llm::ToolSpec>&,
-            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
-            override {
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event) override {
         last_messages = messages;
         for (const auto& message : messages) {
             if (message.role == "system") {
@@ -106,22 +104,16 @@ void TestParseInstructionsConfig() {
     Expect(parsed.has_value(), "instructions config should parse");
     if (parsed.has_value()) {
         Expect(!parsed->agents_md, "agents_md should parse false");
-        Expect(parsed->agents_md_file_name == "RULES.md",
-               "agents_md_file_name should parse");
-        Expect(!parsed->agents_md_search_parents,
-               "agents_md_search_parents should parse false");
+        Expect(parsed->agents_md_file_name == "RULES.md", "agents_md_file_name should parse");
+        Expect(!parsed->agents_md_search_parents, "agents_md_search_parents should parse false");
         Expect(parsed->agents_md_max_files == 3, "max_files should parse");
-        Expect(parsed->agents_md_max_file_bytes == 100,
-               "max_file_bytes should parse");
-        Expect(parsed->agents_md_max_total_bytes == 200,
-               "max_total_bytes should parse");
-        Expect(parsed->agents_md_follow_symlinks,
-               "follow_symlinks should parse true");
+        Expect(parsed->agents_md_max_file_bytes == 100, "max_file_bytes should parse");
+        Expect(parsed->agents_md_max_total_bytes == 200, "max_total_bytes should parse");
+        Expect(parsed->agents_md_follow_symlinks, "follow_symlinks should parse true");
         Expect(parsed->agents_md_max_depth == 4, "max_depth should parse");
     }
 
-    const auto defaults = aiagent::ParseInstructionsConfig(
-            "[deepseek]\nmodel = test\n", &error);
+    const auto defaults = aiagent::ParseInstructionsConfig("[deepseek]\nmodel = test\n", &error);
     Expect(defaults.has_value(), "missing instructions section should use defaults");
     if (defaults.has_value()) {
         Expect(defaults->agents_md, "agents_md default should be true");
@@ -129,12 +121,12 @@ void TestParseInstructionsConfig() {
                "default file name should be AGENTS.md");
     }
 
-    const auto invalid = aiagent::ParseInstructionsConfig(
-            "[instructions]\nagents_md_max_files = 0\n", &error);
+    const auto invalid =
+            aiagent::ParseInstructionsConfig("[instructions]\nagents_md_max_files = 0\n", &error);
     Expect(!invalid.has_value(), "zero max_files should be rejected");
 
-    const auto negative = aiagent::ParseInstructionsConfig(
-            "[instructions]\nagents_md_max_depth = -1\n", &error);
+    const auto negative =
+            aiagent::ParseInstructionsConfig("[instructions]\nagents_md_max_depth = -1\n", &error);
     Expect(!negative.has_value(), "negative max_depth should be rejected");
 
     const auto bad_name = aiagent::ParseInstructionsConfig(
@@ -185,8 +177,7 @@ void TestLoadOrderAndPriority() {
 
     aiagent::InstructionsConfig disabled;
     disabled.agents_md = false;
-    const auto none =
-            aiagent::agent::ProjectInstructionsLoader(disabled).Load(sub.string(), {});
+    const auto none = aiagent::agent::ProjectInstructionsLoader(disabled).Load(sub.string(), {});
     Expect(none.empty(), "disabled instructions should not load files");
 }
 
@@ -210,8 +201,7 @@ void TestLimitsAndSkipRules() {
     }
 
     WriteFile(sub / "AGENTS.md", std::string("abc\0def", 7));
-    const auto binary =
-            aiagent::agent::ProjectInstructionsLoader().Load(sub.string(), {});
+    const auto binary = aiagent::agent::ProjectInstructionsLoader().Load(sub.string(), {});
     Expect(binary.empty(), "binary AGENTS.md should be skipped");
 
     WriteFile(sub / "AGENTS.md", "regular\n");
@@ -222,17 +212,14 @@ void TestLimitsAndSkipRules() {
     symlink_error.clear();
     fs::create_symlink(root_file, sub / "AGENTS.md", symlink_error);
     if (!symlink_error) {
-        const auto no_follow =
-                aiagent::agent::ProjectInstructionsLoader().Load(sub.string(), {});
-        Expect(no_follow.files.size() == 1,
-               "default loader should skip symlinked AGENTS.md");
+        const auto no_follow = aiagent::agent::ProjectInstructionsLoader().Load(sub.string(), {});
+        Expect(no_follow.files.size() == 1, "default loader should skip symlinked AGENTS.md");
 
         aiagent::InstructionsConfig follow;
         follow.agents_md_follow_symlinks = true;
         const auto followed =
                 aiagent::agent::ProjectInstructionsLoader(follow).Load(sub.string(), {});
-        Expect(followed.files.size() == 2,
-               "follow_symlinks=true should load symlinked AGENTS.md");
+        Expect(followed.files.size() == 2, "follow_symlinks=true should load symlinked AGENTS.md");
     }
 }
 
@@ -250,10 +237,10 @@ void TestRuntimeStreamingInjectsInstructions() {
     runtime.SetProjectInstructionsLoader(
             std::make_shared<aiagent::agent::ProjectInstructionsLoader>());
 
-    const a2a::models::Message user = a2a::models::MakeTextMessage(
-            a2a::models::Role::kUser, "hello", "text/plain");
-    const std::string reply = runtime.HandleMessageStreamingEvents(
-            user, {user}, "ctx-instructions", nullptr, sub.string());
+    const a2a::models::Message user =
+            a2a::models::MakeTextMessage(a2a::models::Role::kUser, "hello", "text/plain");
+    const std::string reply = runtime.HandleMessageStreamingEvents(user, {user}, "ctx-instructions",
+                                                                   nullptr, sub.string());
     Expect(reply == "ok", "streaming should return the model reply");
     Expect(model->system_content.find("base-system") != std::string::npos,
            "system message should retain the base prompt");
@@ -265,12 +252,10 @@ void TestRuntimeStreamingInjectsInstructions() {
     Expect(model->system_content.find("Current working directory: " + sub.string()) !=
                    std::string::npos,
            "system message should include the working directory");
-    Expect(model->last_messages.size() == 2,
-           "instructions should not add extra history messages");
+    Expect(model->last_messages.size() == 2, "instructions should not add extra history messages");
 
     const std::string first_system = model->system_content;
-    runtime.HandleMessageStreamingEvents(user, {user}, "ctx-root", nullptr,
-                                         root.string());
+    runtime.HandleMessageStreamingEvents(user, {user}, "ctx-root", nullptr, root.string());
     Expect(model->system_content.find("root-rule") != std::string::npos,
            "root cwd should load root instructions");
     Expect(model->system_content.find("sub-rule") == std::string::npos,
@@ -289,10 +274,10 @@ void TestCompactHistoryUsesWorkingDirectory() {
 
     std::vector<a2a::models::Message> history;
     for (int i = 0; i < 6; ++i) {
-        history.push_back(a2a::models::MakeTextMessage(
-                a2a::models::Role::kUser, "user-" + std::to_string(i), "text/plain"));
-        history.push_back(a2a::models::MakeTextMessage(
-                a2a::models::Role::kAgent, "agent-" + std::to_string(i), "text/plain"));
+        history.push_back(a2a::models::MakeTextMessage(a2a::models::Role::kUser,
+                                                       "user-" + std::to_string(i), "text/plain"));
+        history.push_back(a2a::models::MakeTextMessage(a2a::models::Role::kAgent,
+                                                       "agent-" + std::to_string(i), "text/plain"));
     }
 
     aiagent::agent::CompactionSettings settings;
@@ -307,9 +292,8 @@ void TestCompactHistoryUsesWorkingDirectory() {
     std::vector<a2a::models::Message> without_output;
     aiagent::agent::CompactionRecord without_record;
     std::string without_error;
-    const bool without_ok =
-            without.CompactHistory("ctx-without", history, &without_output,
-                                   &without_record, &without_error);
+    const bool without_ok = without.CompactHistory("ctx-without", history, &without_output,
+                                                   &without_record, &without_error);
     Expect(without_ok, "compact without instructions should succeed");
 
     auto with_model = std::make_shared<CaptureStreamModel>();
@@ -320,8 +304,8 @@ void TestCompactHistoryUsesWorkingDirectory() {
     std::vector<a2a::models::Message> with_output;
     aiagent::agent::CompactionRecord with_record;
     std::string with_error;
-    const bool with_ok = with.CompactHistory("ctx-with", history, &with_output,
-                                             &with_record, &with_error, sub.string());
+    const bool with_ok = with.CompactHistory("ctx-with", history, &with_output, &with_record,
+                                             &with_error, sub.string());
     Expect(with_ok, "compact with instructions should succeed");
     Expect(with_record.tokens_before > without_record.tokens_before,
            "compact should account for injected project instructions");
@@ -337,8 +321,7 @@ int main() {
     TestCompactHistoryUsesWorkingDirectory();
 
     if (g_failures != 0) {
-        std::cerr << "project instructions test failed with " << g_failures
-                  << " failure(s)\n";
+        std::cerr << "project instructions test failed with " << g_failures << " failure(s)\n";
         return 1;
     }
     std::cout << "project instructions test passed\n";

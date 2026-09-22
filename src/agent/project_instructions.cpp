@@ -52,23 +52,20 @@ fs::path NormalizeDirectory(const std::string& value) {
     return path;
 }
 
-fs::path ResolveWorkingDirectory(const std::string& requested,
-                                 const std::string& fallback) {
+fs::path ResolveWorkingDirectory(const std::string& requested, const std::string& fallback) {
     if (!requested.empty()) {
         if (const fs::path resolved = NormalizeDirectory(requested); !resolved.empty()) {
             return resolved;
         }
-        aiagent::DefaultLogger().Log(
-                aiagent::LogLevel::kWarning, "instructions",
-                "event=instructions_cwd_invalid cwd=" + requested);
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
+                                     "event=instructions_cwd_invalid cwd=" + requested);
     }
     if (!fallback.empty()) {
         if (const fs::path resolved = NormalizeDirectory(fallback); !resolved.empty()) {
             return resolved;
         }
-        aiagent::DefaultLogger().Log(
-                aiagent::LogLevel::kWarning, "instructions",
-                "event=instructions_fallback_invalid cwd=" + fallback);
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
+                                     "event=instructions_fallback_invalid cwd=" + fallback);
     }
 
     std::error_code ec;
@@ -79,8 +76,7 @@ fs::path ResolveWorkingDirectory(const std::string& requested,
     return cwd;
 }
 
-std::vector<fs::path> CollectDirectories(const fs::path& start,
-                                         const InstructionsConfig& config) {
+std::vector<fs::path> CollectDirectories(const fs::path& start, const InstructionsConfig& config) {
     std::vector<fs::path> directories;
     fs::path current = start;
     for (std::size_t depth = 0;; ++depth) {
@@ -128,8 +124,7 @@ std::string TruncateUtf8(const std::string& content, std::size_t limit) {
         return content;
     }
     std::size_t end = limit;
-    while (end > 0 &&
-           (static_cast<unsigned char>(content[end]) & 0xC0) == 0x80) {
+    while (end > 0 && (static_cast<unsigned char>(content[end]) & 0xC0) == 0x80) {
         --end;
     }
     return content.substr(0, end);
@@ -140,8 +135,7 @@ bool LooksBinary(const std::string& content) {
     return content.substr(0, probe).find('\0') != std::string::npos;
 }
 
-std::string RenderInstructions(const LoadedInstructions& loaded,
-                               const std::string& file_name) {
+std::string RenderInstructions(const LoadedInstructions& loaded, const std::string& file_name) {
     std::ostringstream output;
     output << "<project-instructions>\n"
            << "These instructions are loaded from " << file_name
@@ -175,9 +169,9 @@ struct ProjectInstructionsLoader::CachedFile {
 ProjectInstructionsLoader::ProjectInstructionsLoader(InstructionsConfig config)
     : config_(std::move(config)) {}
 
-bool ProjectInstructionsLoader::ReadFileCached(
-        const fs::path& path, std::string* content, bool* binary,
-        bool* cache_hit, std::string* error) const {
+bool ProjectInstructionsLoader::ReadFileCached(const fs::path& path, std::string* content,
+                                               bool* binary, bool* cache_hit,
+                                               std::string* error) const {
     std::error_code ec;
     const fs::file_time_type mtime = fs::last_write_time(path, ec);
     if (ec) {
@@ -194,8 +188,7 @@ bool ProjectInstructionsLoader::ReadFileCached(
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const auto it = cache_.find(key);
-        if (it != cache_.end() && it->second->mtime == mtime &&
-            it->second->size == size) {
+        if (it != cache_.end() && it->second->mtime == mtime && it->second->size == size) {
             *content = it->second->content;
             *binary = it->second->binary;
             *cache_hit = true;
@@ -221,16 +214,14 @@ bool ProjectInstructionsLoader::ReadFileCached(
     return true;
 }
 
-LoadedInstructions ProjectInstructionsLoader::Load(
-        const std::string& working_directory,
-        const std::string& fallback_directory) const {
+LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_directory,
+                                                   const std::string& fallback_directory) const {
     LoadedInstructions loaded;
     if (!config_.agents_md) {
         return loaded;
     }
 
-    const fs::path start =
-            ResolveWorkingDirectory(working_directory, fallback_directory);
+    const fs::path start = ResolveWorkingDirectory(working_directory, fallback_directory);
     if (start.empty()) {
         return loaded;
     }
@@ -251,15 +242,13 @@ LoadedInstructions ProjectInstructionsLoader::Load(
         if (ec || !fs::exists(symlink_status)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kDebug, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=missing");
+                    "event=instructions_skip path=" + path.string() + " reason=missing");
             continue;
         }
         if (fs::is_symlink(symlink_status) && !config_.agents_md_follow_symlinks) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=symlink");
+                    "event=instructions_skip path=" + path.string() + " reason=symlink");
             continue;
         }
 
@@ -268,8 +257,7 @@ LoadedInstructions ProjectInstructionsLoader::Load(
         if (ec || !fs::is_regular_file(status)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=not_regular_file");
+                    "event=instructions_skip path=" + path.string() + " reason=not_regular_file");
             continue;
         }
 
@@ -278,10 +266,9 @@ LoadedInstructions ProjectInstructionsLoader::Load(
         bool cache_hit = false;
         std::string read_error;
         if (!ReadFileCached(path, &content, &binary, &cache_hit, &read_error)) {
-            aiagent::DefaultLogger().Log(
-                    aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=read_error error=" + read_error);
+            aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
+                                         "event=instructions_skip path=" + path.string() +
+                                                 " reason=read_error error=" + read_error);
             continue;
         }
         if (cache_hit) {
@@ -292,44 +279,37 @@ LoadedInstructions ProjectInstructionsLoader::Load(
         if (binary) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=binary");
+                    "event=instructions_skip path=" + path.string() + " reason=binary");
             continue;
         }
         if (content.empty()) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kDebug, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=empty");
+                    "event=instructions_skip path=" + path.string() + " reason=empty");
             continue;
         }
 
-        const std::size_t remaining =
-                used_bytes >= config_.agents_md_max_total_bytes
-                        ? 0
-                        : config_.agents_md_max_total_bytes - used_bytes;
+        const std::size_t remaining = used_bytes >= config_.agents_md_max_total_bytes
+                                              ? 0
+                                              : config_.agents_md_max_total_bytes - used_bytes;
         if (remaining == 0) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() +
-                            " reason=total_bytes_limit");
+                    "event=instructions_skip path=" + path.string() + " reason=total_bytes_limit");
             continue;
         }
 
-        const std::size_t limit =
-                std::min(config_.agents_md_max_file_bytes, remaining);
+        const std::size_t limit = std::min(config_.agents_md_max_file_bytes, remaining);
         bool truncated = false;
         if (content.size() > limit) {
             const std::size_t original_size = content.size();
             content = TruncateUtf8(content, limit);
             truncated = true;
-            aiagent::DefaultLogger().Log(
-                    aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_truncate path=" + path.string() +
-                            " limit=" + std::to_string(limit) +
-                            " actual=" + std::to_string(original_size));
-            content += "\n[... truncated: " +
-                       std::to_string(original_size - content.size()) +
+            aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
+                                         "event=instructions_truncate path=" + path.string() +
+                                                 " limit=" + std::to_string(limit) +
+                                                 " actual=" + std::to_string(original_size));
+            content += "\n[... truncated: " + std::to_string(original_size - content.size()) +
                        " bytes omitted]";
         }
         if (content.empty()) {
@@ -351,14 +331,13 @@ LoadedInstructions ProjectInstructionsLoader::Load(
     loaded.total_bytes = used_bytes;
     loaded.rendered = RenderInstructions(loaded, config_.agents_md_file_name);
 
-    aiagent::DefaultLogger().Log(
-            aiagent::LogLevel::kInfo, "instructions",
-            "event=instructions_load cwd=" + start.string() +
-                    " files=" + std::to_string(loaded.files.size()) +
-                    " bytes=" + std::to_string(loaded.total_bytes) +
-                    " cache_hits=" + std::to_string(loaded.cache_hits) +
-                    " cache_misses=" + std::to_string(loaded.cache_misses) +
-                    " sources=" + JoinPaths(loaded.files));
+    aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "instructions",
+                                 "event=instructions_load cwd=" + start.string() +
+                                         " files=" + std::to_string(loaded.files.size()) +
+                                         " bytes=" + std::to_string(loaded.total_bytes) +
+                                         " cache_hits=" + std::to_string(loaded.cache_hits) +
+                                         " cache_misses=" + std::to_string(loaded.cache_misses) +
+                                         " sources=" + JoinPaths(loaded.files));
     return loaded;
 }
 
