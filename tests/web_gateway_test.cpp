@@ -206,6 +206,17 @@ int main() {
         // ---- P1: 会话命名 / 统计 / 复制 / 删除 / 工具清单 ----
         aiagent::agent::SessionMetaStore meta_store;
         gateway.SetSessionMetaStore(&meta_store);
+        gateway.SetSessionDetailsHandler(
+                [&](const std::string& id, std::string* cwd,
+                    std::vector<aiagent::web::InstructionSourceInfo>* instructions) {
+                    if (id != session_id) {
+                        return false;
+                    }
+                    *cwd = "/tmp/stats-project";
+                    instructions->push_back(aiagent::web::InstructionSourceInfo{
+                            "/tmp/stats-project/AGENTS.md", 32, false});
+                    return true;
+                });
         gateway.SetDeleteHandler([&](const std::string& id, std::string* error) {
             std::vector<std::string> task_ids;
             for (const auto& task : task_store->ListAll()) {
@@ -290,6 +301,12 @@ int main() {
         Expect(stats_json.value("assistant_messages", 0) == 1,
                "stats assistant messages should be 1");
         Expect(stats_json.contains("compaction"), "stats should include compaction");
+        Expect(stats_json.value("cwd", std::string()) == "/tmp/stats-project",
+               "stats should include the session cwd");
+        Expect(stats_json.contains("instructions") &&
+                       stats_json["instructions"].is_array() &&
+                       stats_json["instructions"].size() == 1,
+               "stats should include instruction sources");
 
         const auto cloned = http.Post(
                 base + "/api/v1/sessions/" + session_id + "/clone", "",

@@ -283,9 +283,10 @@ int main(int argc, char** argv) {
         const std::string fallback_working_directory =
                 std::filesystem::current_path().string();
         runtime.SetFallbackWorkingDirectory(fallback_working_directory);
-        runtime.SetProjectInstructionsLoader(
+        auto instructions_loader =
                 std::make_shared<aiagent::agent::ProjectInstructionsLoader>(
-                        instructions_config));
+                        instructions_config);
+        runtime.SetProjectInstructionsLoader(instructions_loader);
         // 最近一次压缩记录（按会话），供 REST 查询/前端展示。
         std::map<std::string, aiagent::agent::CompactionRecord> compaction_records;
         std::mutex compaction_records_mutex;
@@ -375,6 +376,13 @@ int main(int argc, char** argv) {
         web_gateway.SetCompactHandler(
                 [&](const std::string& session_id, const std::string& cwd,
                     std::string* error) {
+                    const std::string effective_cwd =
+                            !cwd.empty()
+                                    ? cwd
+                                    : session_meta.GetCwd(session_id).value_or("");
+                    if (!effective_cwd.empty()) {
+                        session_meta.SetCwd(session_id, effective_cwd);
+                    }
                     std::vector<a2a::models::Message> history =
                             LoadLatestHistory(history_cache, *task_store, session_id);
                     if (history.empty()) {
@@ -387,7 +395,8 @@ int main(int argc, char** argv) {
                     aiagent::agent::CompactionRecord record;
                     std::string compact_error;
                     if (!runtime.CompactHistory(session_id, history, &compacted,
-                                                &record, &compact_error, cwd)) {
+                                                &record, &compact_error,
+                                                effective_cwd)) {
                         if (error != nullptr) {
                             *error = compact_error;
                         }
@@ -425,6 +434,27 @@ int main(int argc, char** argv) {
                     return true;
                 });
         web_gateway.SetSessionMetaStore(&session_meta);
+        web_gateway.SetSessionDetailsHandler(
+                [&, instructions_loader, fallback_working_directory](
+                        const std::string& session_id, std::string* cwd,
+                        std::vector<aiagent::web::InstructionSourceInfo>* instructions) {
+                    if (cwd == nullptr || instructions == nullptr) {
+                        return false;
+                    }
+                    const auto stored_cwd = session_meta.GetCwd(session_id);
+                    if (!stored_cwd.has_value()) {
+                        return false;
+                    }
+                    *cwd = *stored_cwd;
+                    const auto loaded = instructions_loader->Load(
+                            *stored_cwd, fallback_working_directory);
+                    instructions->reserve(loaded.files.size());
+                    for (const auto& file : loaded.files) {
+                        instructions->push_back(aiagent::web::InstructionSourceInfo{
+                                file.path, file.content.size(), file.truncated});
+                    }
+                    return true;
+                });
         // 删除会话：删除其全部任务，并清理缓存/标题/压缩记录。
         web_gateway.SetDeleteHandler(
                 [&](const std::string& session_id, std::string* error) {
@@ -484,6 +514,10 @@ int main(int argc, char** argv) {
                         base = DeriveShortTitle(history);
                     }
                     session_meta.SetTitle(target, base + " (copy)");
+                    if (auto source_cwd = session_meta.GetCwd(source_id);
+                        source_cwd.has_value()) {
+                        session_meta.SetCwd(target, *source_cwd);
+                    }
                     if (new_id != nullptr) {
                         *new_id = target;
                     }
@@ -507,6 +541,9 @@ int main(int argc, char** argv) {
                     const std::string& cwd,
                     const aiagent::agent::AgentEventCallback& on_event,
                     const aiagent::web::WebGateway::CancelCallback& should_cancel) {
+                    if (!cwd.empty()) {
+                        session_meta.SetCwd(session_id, cwd);
+                    }
                     std::vector<a2a::models::Message> history =
                             LoadLatestHistory(history_cache, *task_store, session_id);
 

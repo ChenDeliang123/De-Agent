@@ -27,9 +27,13 @@ int main() {
             Expect(!store.GetTitle("s1").has_value(), "empty store should have no title");
             store.SetTitle("s1", "hello");
             Expect(store.GetTitle("s1").value_or("") == "hello", "title should round-trip");
+            store.SetCwd("s1", "/tmp/project");
+            Expect(store.GetCwd("s1").value_or("") == "/tmp/project",
+                   "cwd should round-trip");
             Expect(store.Size() == 1, "size should count titles");
             store.Remove("s1");
             Expect(!store.GetTitle("s1").has_value(), "removed title should be gone");
+            Expect(!store.GetCwd("s1").has_value(), "removed cwd should be gone");
             Expect(store.Size() == 0, "size should drop after remove");
         }
 
@@ -46,6 +50,8 @@ int main() {
             aiagent::agent::SessionMetaStore store(path);
             store.SetTitle("s1", "first");
             store.SetTitle("s2", "second");
+            store.SetCwd("s1", "/tmp/project-a");
+            store.SetCwd("s2", "/tmp/project-b");
         }
         {
             aiagent::agent::SessionMetaStore reloaded(path);
@@ -53,6 +59,10 @@ int main() {
                    "title should persist across instances");
             Expect(reloaded.GetTitle("s2").value_or("") == "second",
                    "second title should persist");
+            Expect(reloaded.GetCwd("s1").value_or("") == "/tmp/project-a",
+                   "cwd should persist across instances");
+            Expect(reloaded.GetCwd("s2").value_or("") == "/tmp/project-b",
+                   "second cwd should persist across instances");
             Expect(reloaded.Size() == 2, "persisted size should match");
             reloaded.Remove("s1");
         }
@@ -60,14 +70,20 @@ int main() {
             aiagent::agent::SessionMetaStore reloaded(path);
             Expect(!reloaded.GetTitle("s1").has_value(),
                    "removed title should stay removed after reload");
+            Expect(!reloaded.GetCwd("s1").has_value(),
+                   "removed cwd should stay removed after reload");
             Expect(reloaded.GetTitle("s2").value_or("") == "second",
                    "other titles should survive removal");
+            Expect(reloaded.GetCwd("s2").value_or("") == "/tmp/project-b",
+                   "other cwd should survive removal");
             reloaded.Clear();
             Expect(reloaded.Size() == 0, "clear should empty the store");
         }
         {
             aiagent::agent::SessionMetaStore reloaded(path);
             Expect(reloaded.Size() == 0, "cleared store should stay empty after reload");
+            Expect(!reloaded.GetCwd("s2").has_value(),
+                   "cleared cwd should stay empty after reload");
         }
 
         // 损坏文件不应抛异常，按空处理。

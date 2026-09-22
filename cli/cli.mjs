@@ -5,11 +5,23 @@ import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
-import { cancelChat, listSessions, loadHistory, renameSession, streamChat } from "./session.mjs";
+import {
+  cancelChat,
+  listSessions,
+  loadHistory,
+  renameSession,
+  streamChat,
+} from "./session.mjs";
 import { LineEditor, renderHotkeys } from "./editor.mjs";
 import { loadCliConfig } from "./config.mjs";
 import { resolveEditorCommand } from "./external-editor.mjs";
-import { commands, completeCommands, renderHelp, runCommand } from "./commands.mjs";
+import {
+  commands,
+  completeCommands,
+  renderHelp,
+  restoreSessionCwd,
+  runCommand,
+} from "./commands.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 const renderer = new TranscriptRenderer();
@@ -135,7 +147,11 @@ async function sendMessage(ctx, text) {
   const cwd = ctx.state.cwd || process.cwd();
   clearInputLine();
   const requestSessionId = sessionId ?? randomUUID();
-  log("info", "cli", `event=user_message session=${requestSessionId} bytes=${text.length}`);
+  log(
+    "info",
+    "cli",
+    `event=user_message session=${requestSessionId} bytes=${text.length} cwd=${cwd}`,
+  );
   renderer.user(text);
   renderer.startReply();
   const controller = new AbortController();
@@ -225,6 +241,7 @@ async function main() {
   const state = {
     sessionId: options.session,
     cwd: options.cwd ? path.resolve(options.cwd) : process.cwd(),
+    cwdExplicit: options.cwd != null,
     shouldExit: false,
     pendingName: null,
   };
@@ -301,6 +318,11 @@ async function main() {
     } else {
       state.pendingName = options.name;
     }
+  }
+
+  const restoredCwd = await restoreSessionCwd(ctx);
+  if (restoredCwd) {
+    console.log(`restored cwd ${restoredCwd}`);
   }
 
   if (state.sessionId) {

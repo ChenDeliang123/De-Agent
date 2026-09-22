@@ -61,6 +61,27 @@ function listSessionsFormatted(ctx, all) {
   });
 }
 
+export async function restoreSessionCwd(ctx) {
+  if (!ctx.state.sessionId || ctx.state.cwdExplicit) {
+    return null;
+  }
+  try {
+    const stats = await sessionStats(ctx.backend, ctx.state.sessionId);
+    if (typeof stats.cwd === "string" && stats.cwd) {
+      ctx.state.cwd = stats.cwd;
+      ctx.log(
+        "info",
+        "cli",
+        `event=session_cwd_restored session=${ctx.state.sessionId} cwd=${stats.cwd}`,
+      );
+      return stats.cwd;
+    }
+  } catch {
+    // 旧后端或不带 cwd 的会话不影响打开流程。
+  }
+  return null;
+}
+
 async function openSession(ctx, all, target) {
   const numeric = Number(target);
   const entry =
@@ -72,6 +93,10 @@ async function openSession(ctx, all, target) {
     return false;
   }
   ctx.state.sessionId = sessionId(entry);
+  const restoredCwd = await restoreSessionCwd(ctx);
+  if (restoredCwd) {
+    ctx.print(`cwd: ${restoredCwd}`);
+  }
   ctx.clearInputLine();
   await ctx.renderHistory(ctx.backend, ctx.state.sessionId);
   ctx.log("info", "cli", `event=open_session session=${ctx.state.sessionId}`);
@@ -163,7 +188,23 @@ export const commands = [
         } else {
           ctx.print("compaction: (none)");
         }
-        ctx.print(`cwd:        ${ctx.state.cwd}`);
+        const backendCwd =
+          typeof stats.cwd === "string" && stats.cwd ? stats.cwd : ctx.state.cwd;
+        if (!ctx.state.cwdExplicit) {
+          ctx.state.cwd = backendCwd;
+        }
+        ctx.print(`cwd:        ${backendCwd}`);
+        if (Array.isArray(stats.instructions)) {
+          if (stats.instructions.length === 0) {
+            ctx.print("instructions: (none)");
+          } else {
+            ctx.print(`instructions: ${stats.instructions.length} file(s)`);
+            for (const file of stats.instructions) {
+              const suffix = file.truncated ? " (truncated)" : "";
+              ctx.print(`  - ${file.path}${suffix}`);
+            }
+          }
+        }
       } catch (error) {
         ctx.print(`session info failed: ${error.message}`);
       }
@@ -347,6 +388,7 @@ export const commands = [
         return;
       }
       ctx.state.cwd = resolved;
+      ctx.state.cwdExplicit = true;
       ctx.print(`cwd: ${resolved}`);
     },
   },

@@ -231,6 +231,10 @@ public:
         compact_handler_ = std::move(handler);
     }
 
+    void SetSessionDetailsHandler(WebGateway::SessionDetailsHandler handler) {
+        session_details_handler_ = std::move(handler);
+    }
+
     void SetCompactionInfoHandler(WebGateway::CompactionInfoHandler handler) {
         compaction_info_handler_ = std::move(handler);
     }
@@ -601,6 +605,27 @@ private:
                                                      {"messages_before", record.messages_before},
                                                      {"messages_after", record.messages_after}};
                         }
+                        std::string details_cwd;
+                        std::vector<InstructionSourceInfo> instructions;
+                        if (session_details_handler_ != nullptr &&
+                            session_details_handler_(it->second, &details_cwd,
+                                                     &instructions)) {
+                            if (!details_cwd.empty()) {
+                                payload["cwd"] = details_cwd;
+                            }
+                            nlohmann::json files = nlohmann::json::array();
+                            for (const auto& file : instructions) {
+                                files.push_back({{"path", file.path},
+                                                 {"bytes", file.bytes},
+                                                 {"truncated", file.truncated}});
+                            }
+                            payload["instructions"] = std::move(files);
+                        } else if (session_meta_store_ != nullptr) {
+                            if (auto cwd = session_meta_store_->GetCwd(it->second);
+                                cwd.has_value()) {
+                                payload["cwd"] = *cwd;
+                            }
+                        }
                         response.set_content(payload.dump(), "application/json");
                     });
 
@@ -836,6 +861,7 @@ private:
     WebGateway::StreamChatHandler stream_handler_;
     WebGateway::StreamEventHandler stream_event_handler_;
     WebGateway::CompactHandler compact_handler_;
+    WebGateway::SessionDetailsHandler session_details_handler_;
     WebGateway::CompactionInfoHandler compaction_info_handler_;
     WebGateway::DeleteHandler delete_handler_;
     WebGateway::CloneHandler clone_handler_;
@@ -866,6 +892,10 @@ void WebGateway::SetStreamEventHandler(WebGateway::StreamEventHandler handler) {
 
 void WebGateway::SetCompactHandler(WebGateway::CompactHandler handler) {
     impl_->SetCompactHandler(std::move(handler));
+}
+
+void WebGateway::SetSessionDetailsHandler(WebGateway::SessionDetailsHandler handler) {
+    impl_->SetSessionDetailsHandler(std::move(handler));
 }
 
 void WebGateway::SetCompactionInfoHandler(WebGateway::CompactionInfoHandler handler) {

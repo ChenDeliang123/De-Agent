@@ -56,6 +56,11 @@ function startBackend() {
         characters: 40,
         tasks: 3,
         compaction: { tokens_before: 100, tokens_after: 20 },
+        cwd: "/tmp/restored-project",
+        instructions: [
+          { path: "/tmp/restored-project/AGENTS.md", bytes: 32, truncated: false },
+          { path: "/tmp/restored-project/sub/AGENTS.md", bytes: 64, truncated: true },
+        ],
       });
     }
     if (request.url === "/api/v1/sessions/s1/messages") {
@@ -86,6 +91,7 @@ function makeContext(backend, overrides = {}) {
   const state = {
     sessionId: null,
     cwd: process.cwd(),
+    cwdExplicit: false,
     shouldExit: false,
     ...(stateOverride ?? {}),
   };
@@ -132,6 +138,7 @@ test("resume by index and by id both open a session", async () => {
     const first = makeContext(backend);
     await runCommand(first.ctx, "/resume 1");
     assert.equal(first.state.sessionId, "s1");
+    assert.equal(first.state.cwd, "/tmp/restored-project");
 
     const second = makeContext(backend);
     await runCommand(second.ctx, "/open s2");
@@ -187,6 +194,9 @@ test("session prints stats and compaction info", async () => {
     await runCommand(ctx, "/session");
     assert.ok(printed.some((line) => line.includes("messages:   4")));
     assert.ok(printed.some((line) => line.includes("compaction: 100")));
+    assert.ok(printed.some((line) => line.includes("cwd:        /tmp/restored-project")));
+    assert.ok(printed.some((line) => line.includes("instructions: 2 file(s)")));
+    assert.ok(printed.some((line) => line.includes("/tmp/restored-project/sub/AGENTS.md (truncated)")));
   });
 });
 
@@ -219,5 +229,6 @@ test("cwd shows and changes the working directory", async () => {
   const target = os.tmpdir();
   await runCommand(ctx, `/cwd ${target}`);
   assert.equal(state.cwd, target);
+  assert.equal(state.cwdExplicit, true);
   assert.match(printed.at(-1), /^cwd: /);
 });

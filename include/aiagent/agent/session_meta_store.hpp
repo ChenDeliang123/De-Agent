@@ -29,6 +29,10 @@ public:
     // 设置/覆盖显式标题并落盘。
     void SetTitle(const std::string& session_id, const std::string& title);
 
+    // 会话最近使用的工作目录；用于重连续聊与 /compact 恢复项目指令上下文。
+    std::optional<std::string> GetCwd(const std::string& session_id) const;
+    void SetCwd(const std::string& session_id, const std::string& cwd);
+
     // 删除某个会话的显式标题。
     void Remove(const std::string& session_id);
 
@@ -48,6 +52,7 @@ private:
     std::string path_;
     mutable std::mutex mutex_;
     std::map<std::string, std::string> titles_;
+    std::map<std::string, std::string> cwds_;
 };
 
 }  // namespace aiagent::agent

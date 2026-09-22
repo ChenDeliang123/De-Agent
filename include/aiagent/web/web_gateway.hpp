@@ -27,6 +27,13 @@ struct ToolInfo {
     std::string description;
 };
 
+// 会话最近一次加载的项目指令来源（只含路径/大小，不含指令正文）。
+struct InstructionSourceInfo {
+    std::string path;
+    std::size_t bytes = 0;
+    bool truncated = false;
+};
+
 // 面向 Node/浏览器前端的 REST + SSE Gateway。
 // 只做协议转换与会话编排，业务逻辑仍由 AgentServer/TaskManager 承担。
 class WebGateway {
@@ -71,6 +78,13 @@ public:
     // 工具清单（GET /api/v1/tools）。
     using ToolsHandler = std::function<std::vector<ToolInfo>()>;
 
+    // 会话详情补充（GET /api/v1/sessions/:id/stats）：最近 cwd 与项目指令来源。
+    // 返回 false 时 stats 不附带 cwd/instructions。
+    using SessionDetailsHandler =
+            std::function<bool(const std::string& session_id,
+                               std::string* cwd,
+                               std::vector<InstructionSourceInfo>* instructions)>;
+
     WebGateway(a2a::server::AgentServer& agent_server,
                a2a::server::ITaskStore& task_store);
     ~WebGateway();
@@ -91,6 +105,9 @@ public:
 
     // 注入手动压缩处理逻辑。未设置时 /compact 接口返回 501。
     void SetCompactHandler(CompactHandler handler);
+
+    // 注入会话详情补充逻辑（cwd / 项目指令来源）。
+    void SetSessionDetailsHandler(SessionDetailsHandler handler);
 
     // 注入压缩记录查询逻辑。未设置时 /compaction 接口返回 404。
     void SetCompactionInfoHandler(CompactionInfoHandler handler);
