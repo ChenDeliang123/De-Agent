@@ -377,6 +377,34 @@ keep_recent_tokens = 20000
 - 手动 `/compact`（或 REST 接口）会把压缩后的更短历史作为新任务落库，
   后续请求直接使用；自动压缩仍为请求内内存操作。
 
+## 项目指令（AGENTS.md）
+
+终端 Agent 会在每次请求时按 CLI 的工作目录自动加载 `AGENTS.md`，并注入
+system prompt；项目指令不会写入会话历史。查找顺序从当前工作目录向父目录
+回溯，找到最近的 `.git` 根后停止；如果工作目录在子目录，仓库根和子目录的
+`AGENTS.md` 会一起加载，离工作目录越近的优先级越高。
+
+```ini
+[instructions]
+agents_md = true
+agents_md_file_name = AGENTS.md
+agents_md_search_parents = true
+agents_md_max_files = 8
+agents_md_max_file_bytes = 16384
+agents_md_max_total_bytes = 32768
+agents_md_follow_symlinks = false
+agents_md_max_depth = 16
+```
+
+说明：
+
+- 终端通过 `--cwd` 或 `/cwd` 切换工作目录；切换后，聊天与 `/compact`
+  都会使用新的工作目录加载项目指令。
+- 默认不跟随符号链接；文件过大时按 UTF-8 安全截断，并限制文件数与总字节数。
+- 项目指令只对当前项目生效，不能覆盖 Agent 的基础安全规则。
+- 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；浏览器 Web UI、同步
+  `/api/v1/chat` 和 A2A `SendMessage` 暂不保证使用项目指令。
+
 ## A2A
 
 Agent 通过 A2A v1.0 JSON-RPC 暴露能力：

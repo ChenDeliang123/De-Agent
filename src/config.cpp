@@ -426,6 +426,114 @@ std::optional<CompactionConfig> LoadCompactionConfigFile(const std::string& path
     return ParseCompactionConfig(content.str(), error);
 }
 
+std::optional<InstructionsConfig> ParseInstructionsConfig(const std::string& content,
+                                                          std::string* error) {
+    InstructionsConfig config;
+    bool in_instructions = false;
+
+    auto parse_size = [error](const std::string& key, const std::string& value,
+                              std::size_t* output, bool allow_zero) {
+        if (!value.empty() && value.front() == '-') {
+            if (error != nullptr) {
+                *error = key + " must be non-negative";
+            }
+            return false;
+        }
+        try {
+            const unsigned long long parsed = std::stoull(value);
+            if (!allow_zero && parsed == 0) {
+                if (error != nullptr) {
+                    *error = key + " must be positive";
+                }
+                return false;
+            }
+            *output = static_cast<std::size_t>(parsed);
+            return true;
+        } catch (const std::exception&) {
+            if (error != nullptr) {
+                *error = "invalid " + key + ": " + value;
+            }
+            return false;
+        }
+    };
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_instructions = (section == "instructions");
+            continue;
+        }
+        if (!in_instructions) {
+            continue;
+        }
+
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "agents_md") {
+            config.agents_md = Lower(value) == "true" || value == "1";
+        } else if (key == "agents_md_file_name") {
+            if (value.empty() || value.find('/') != std::string::npos ||
+                value.find('\\') != std::string::npos) {
+                if (error != nullptr) {
+                    *error = "agents_md_file_name must be a plain file name";
+                }
+                return std::nullopt;
+            }
+            config.agents_md_file_name = value;
+        } else if (key == "agents_md_search_parents") {
+            config.agents_md_search_parents =
+                    Lower(value) == "true" || value == "1";
+        } else if (key == "agents_md_max_files") {
+            if (!parse_size(key, value, &config.agents_md_max_files, false)) {
+                return std::nullopt;
+            }
+        } else if (key == "agents_md_max_file_bytes") {
+            if (!parse_size(key, value, &config.agents_md_max_file_bytes, false)) {
+                return std::nullopt;
+            }
+        } else if (key == "agents_md_max_total_bytes") {
+            if (!parse_size(key, value, &config.agents_md_max_total_bytes, false)) {
+                return std::nullopt;
+            }
+        } else if (key == "agents_md_follow_symlinks") {
+            config.agents_md_follow_symlinks =
+                    Lower(value) == "true" || value == "1";
+        } else if (key == "agents_md_max_depth") {
+            if (!parse_size(key, value, &config.agents_md_max_depth, false)) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    return config;
+}
+
+std::optional<InstructionsConfig> LoadInstructionsConfigFile(const std::string& path,
+                                                             std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseInstructionsConfig(content.str(), error);
+}
+
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config) {
     constexpr const char* kSuffix = "/chat/completions";
     if (config.base_url.size() >= 18 &&

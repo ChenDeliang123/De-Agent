@@ -12,6 +12,7 @@
 
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/compaction.hpp"
+#include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -34,6 +35,11 @@ public:
     void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);
     void SetMaxToolRounds(int rounds);
 
+    // 可选：注入项目指令加载器（AGENTS.md）与无 cwd 请求的默认工作目录。
+    void SetProjectInstructionsLoader(
+            std::shared_ptr<ProjectInstructionsLoader> loader);
+    void SetFallbackWorkingDirectory(std::string directory);
+
     // 设置上下文压缩参数；默认 enabled，阈值见 CompactionSettings。
     void SetCompactionSettings(const CompactionSettings& settings);
 
@@ -48,7 +54,8 @@ public:
                         const std::vector<a2a::models::Message>& history,
                         std::vector<a2a::models::Message>* compacted_history,
                         CompactionRecord* record,
-                        std::string* error);
+                        std::string* error,
+                        const std::string& working_directory = {});
 
     // history 应包含本次用户消息（续聊时由调用方从 TaskStore 取回）。
     // 返回一个已完成 Task，其 history 追加了 assistant 回复。
@@ -82,6 +89,10 @@ private:
                              const std::string& working_directory,
                              const CancelCallback& should_cancel);
 
+    // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录。
+    llm::ChatMessage BuildSystemMessage(
+            const std::string& working_directory) const;
+
     // 模型调用前的阈值压缩。命中阈值时把较早的消息摘要成一条 user 消息，
     // 并重置 usage 跟踪；同一批消息（size 未变）不重复压缩。
     // force=true 时跳过阈值判断与去重（用于 overflow 恢复）。
@@ -97,6 +108,8 @@ private:
 
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
+    std::shared_ptr<ProjectInstructionsLoader> instructions_loader_;
+    std::string fallback_working_directory_;
     std::string system_prompt_;
     // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。
     // 显式设置正数时作为可选安全上限。

@@ -96,6 +96,7 @@ add_library(aiagent_agent STATIC
   src/agent/agent_runtime.cpp
   src/agent/compaction.cpp
   src/agent/history_cache.cpp
+  src/agent/project_instructions.cpp
   src/agent/session_meta_store.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
@@ -191,6 +192,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(compaction_test tests/compaction_test.cpp)
   target_link_libraries(compaction_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_compaction COMMAND compaction_test)
+
+  add_executable(project_instructions_test tests/project_instructions_test.cpp)
+  target_link_libraries(project_instructions_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_project_instructions COMMAND project_instructions_test)
 
   add_executable(local_tools_test tests/local_tools_test.cpp)
   target_link_libraries(local_tools_test PRIVATE aiagent_agent)

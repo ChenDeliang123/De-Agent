@@ -40,6 +40,18 @@ struct CompactionConfig {
     int keep_recent_tokens = 20000;
 };
 
+// 终端 Agent 的项目指令（AGENTS.md）配置。
+struct InstructionsConfig {
+    bool agents_md = true;
+    std::string agents_md_file_name = "AGENTS.md";
+    bool agents_md_search_parents = true;
+    std::size_t agents_md_max_files = 8;
+    std::size_t agents_md_max_file_bytes = 16384;
+    std::size_t agents_md_max_total_bytes = 32768;
+    bool agents_md_follow_symlinks = false;
+    std::size_t agents_md_max_depth = 16;
+};
+
 // 解析 INI 文本中的 [deepseek] 段。api_key 缺失或为占位值时，
 // 若环境变量 DEEPSEEK_API_KEY 存在则回退使用。
 std::optional<DeepSeekConfig> ParseDeepSeekConfig(const std::string& content,
@@ -68,6 +80,15 @@ std::optional<CompactionConfig> ParseCompactionConfig(const std::string& content
 
 std::optional<CompactionConfig> LoadCompactionConfigFile(const std::string& path,
                                                          std::string* error = nullptr);
+
+// 解析 INI 文本中的 [instructions] 段；没有该段时返回默认值。
+std::optional<InstructionsConfig> ParseInstructionsConfig(
+        const std::string& content,
+        std::string* error = nullptr);
+
+std::optional<InstructionsConfig> LoadInstructionsConfigFile(
+        const std::string& path,
+        std::string* error = nullptr);
 
 // 返回实际请求地址：base_url 已带 /chat/completions 时原样使用，否则补全。
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config);

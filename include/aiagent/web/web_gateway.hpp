@@ -49,7 +49,9 @@ public:
     // 手动压缩某个会话（POST /api/v1/sessions/:id/compact）。
     // 返回 false 时写入 error。
     using CompactHandler =
-            std::function<bool(const std::string& session_id, std::string* error)>;
+            std::function<bool(const std::string& session_id,
+                               const std::string& cwd,
+                               std::string* error)>;
 
     // 查询某个会话最近一次压缩记录（GET /api/v1/sessions/:id/compaction）。
     // 返回 false 表示该会话没有记录。

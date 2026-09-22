@@ -76,11 +76,17 @@ test("cli session client lists, resumes, and streams", async () => {
 
 test("cli session client compacts a session", async () => {
   let compacted = false;
+  let compactBody = null;
   const backend = http.createServer((request, response) => {
     if (request.url === "/api/v1/sessions/s1/compact" && request.method === "POST") {
       compacted = true;
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end('{"compacted":true}');
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        compactBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"compacted":true}');
+      });
       return;
     }
     if (request.url === "/api/v1/sessions/s2/compact" && request.method === "POST") {
@@ -94,9 +100,14 @@ test("cli session client compacts a session", async () => {
 
   const port = await listen(backend);
   try {
-    const result = await compactSession(`http://127.0.0.1:${port}`, "s1");
+    const result = await compactSession(
+      `http://127.0.0.1:${port}`,
+      "s1",
+      "/tmp/compact-project",
+    );
     assert.equal(result.compacted, true);
     assert.equal(compacted, true);
+    assert.equal(compactBody.cwd, "/tmp/compact-project");
     await assert.rejects(
       compactSession(`http://127.0.0.1:${port}`, "s2"),
       /nothing to compact/,

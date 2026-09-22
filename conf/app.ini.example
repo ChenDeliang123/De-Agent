@@ -29,3 +29,19 @@ enabled = true
 context_window = 64000
 reserve_tokens = 16384
 keep_recent_tokens = 20000
+
+[instructions]
+; 终端 Agent 是否自动加载工作目录相关的 AGENTS.md。
+agents_md = true
+agents_md_file_name = AGENTS.md
+; 是否向祖先目录查找；找到 .git 根后停止。
+agents_md_search_parents = true
+; 最多加载多少个文件。
+agents_md_max_files = 8
+; 单个文件与全部项目指令的最大字节数。
+agents_md_max_file_bytes = 16384
+agents_md_max_total_bytes = 32768
+; 默认不跟随符号链接。
+agents_md_follow_symlinks = false
+; 没有 .git 根时最多向上查找的层数。
+agents_md_max_depth = 16

@@ -23,10 +23,14 @@ export async function loadHistory(backendUrl, sessionId) {
   return response.json();
 }
 
-export async function compactSession(backendUrl, sessionId) {
+export async function compactSession(backendUrl, sessionId, cwd = process.cwd()) {
   const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: encoder.encode(JSON.stringify({ cwd })),
+    },
   );
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {

@@ -61,6 +61,39 @@ void AgentRuntime::SetMaxToolRounds(int rounds) {
     max_tool_rounds_ = rounds > 0 ? rounds : 0;
 }
 
+void AgentRuntime::SetProjectInstructionsLoader(
+        std::shared_ptr<ProjectInstructionsLoader> loader) {
+    instructions_loader_ = std::move(loader);
+}
+
+void AgentRuntime::SetFallbackWorkingDirectory(std::string directory) {
+    fallback_working_directory_ = std::move(directory);
+}
+
+llm::ChatMessage AgentRuntime::BuildSystemMessage(
+        const std::string& working_directory) const {
+    llm::ChatMessage system;
+    system.role = "system";
+    system.content = system_prompt_;
+
+    if (instructions_loader_ != nullptr) {
+        const std::string load_directory =
+                working_directory.empty() ? fallback_working_directory_
+                                          : working_directory;
+        const LoadedInstructions instructions =
+                instructions_loader_->Load(load_directory,
+                                           fallback_working_directory_);
+        if (!instructions.rendered.empty()) {
+            system.content += "\n\n" + instructions.rendered;
+        }
+    }
+
+    if (!working_directory.empty()) {
+        system.content += "\n\nCurrent working directory: " + working_directory;
+    }
+    return system;
+}
+
 void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
     compaction_settings_ = settings;
 }
@@ -138,7 +171,8 @@ bool AgentRuntime::CompactHistory(
         const std::vector<a2a::models::Message>& history,
         std::vector<a2a::models::Message>* compacted_history,
         CompactionRecord* record,
-        std::string* error) {
+        std::string* error,
+        const std::string& working_directory) {
     if (compacted_history == nullptr || record == nullptr) {
         if (error != nullptr) {
             *error = "invalid compact output arguments";
@@ -147,10 +181,7 @@ bool AgentRuntime::CompactHistory(
     }
 
     std::vector<llm::ChatMessage> chat_messages;
-    llm::ChatMessage system;
-    system.role = "system";
-    system.content = system_prompt_;
-    chat_messages.push_back(std::move(system));
+    chat_messages.push_back(BuildSystemMessage(working_directory));
     for (const auto& message : history) {
         const std::string role = RoleToLlmRole(message.role);
         const std::string text = FirstText(message);
@@ -413,13 +444,7 @@ std::string AgentRuntime::RunStreaming(
                     std::to_string(history.size()));
 
     std::vector<llm::ChatMessage> chat_messages;
-    llm::ChatMessage system;
-    system.role = "system";
-    system.content = system_prompt_;
-    if (!working_directory.empty()) {
-        system.content += "\n\nCurrent working directory: " + working_directory;
-    }
-    chat_messages.push_back(std::move(system));
+    chat_messages.push_back(BuildSystemMessage(working_directory));
 
     bool has_user_message = false;
     for (const auto& message : history) {

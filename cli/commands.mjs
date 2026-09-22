@@ -266,7 +266,7 @@ export const commands = [
         return;
       }
       try {
-        await compactSession(ctx.backend, ctx.state.sessionId);
+        await compactSession(ctx.backend, ctx.state.sessionId, ctx.state.cwd);
         ctx.print("context compacted");
         ctx.log("info", "cli", `event=compact session=${ctx.state.sessionId}`);
       } catch (error) {

@@ -150,8 +150,10 @@ int main() {
         Expect(stream_body.find(R"({"content":"好"})") != std::string::npos,
                "stream body should contain the second token");
 
+        std::string compact_cwd;
         gateway.SetCompactHandler(
-                [](const std::string& id, std::string* error) {
+                [&](const std::string& id, const std::string& cwd, std::string* error) {
+                    compact_cwd = cwd;
                     if (id == "ctx-compact") {
                         return true;
                     }
@@ -174,8 +176,11 @@ int main() {
                 });
 
         const auto compact = http.Post(
-                base + "/api/v1/sessions/ctx-compact/compact", "", "application/json");
+                base + "/api/v1/sessions/ctx-compact/compact",
+                R"({"cwd":"/tmp/compact-project"})", "application/json");
         Expect(compact.IsSuccess(), "compact endpoint should succeed");
+        Expect(compact_cwd == "/tmp/compact-project",
+               "compact endpoint should forward cwd");
         Expect(nlohmann::json::parse(compact.body).value("compacted", false),
                "compact response should report success");
 

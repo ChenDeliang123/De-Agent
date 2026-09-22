@@ -381,8 +381,24 @@ private:
                                      "application/json");
                              return;
                          }
+                         std::string cwd;
+                         if (!request.body.empty()) {
+                             try {
+                                 const auto body = nlohmann::json::parse(request.body);
+                                 cwd = StringValue(body, "cwd");
+                             } catch (const nlohmann::json::exception& e) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         nlohmann::json{
+                                                 {"error", std::string("invalid JSON: ") +
+                                                                   e.what()}}
+                                                 .dump(),
+                                         "application/json");
+                                 return;
+                             }
+                         }
                          std::string error;
-                         if (!compact_handler_(it->second, &error)) {
+                         if (!compact_handler_(it->second, cwd, &error)) {
                              response.status = 409;
                              response.set_content(
                                      nlohmann::json{{"compacted", false},

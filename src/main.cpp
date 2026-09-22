@@ -26,6 +26,7 @@
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/agent/history_cache.hpp"
+#include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
@@ -270,6 +271,21 @@ int main(int argc, char** argv) {
                 "verify when useful.\n"
                 "- After making changes, summarize which files were created or modified.";
         aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
+        aiagent::InstructionsConfig instructions_config;
+        std::string instructions_error;
+        const auto parsed_instructions = aiagent::LoadInstructionsConfigFile(
+                options.config_path, &instructions_error);
+        if (!parsed_instructions.has_value()) {
+            std::cerr << "配置错误: " << instructions_error << '\n';
+            return 1;
+        }
+        instructions_config = *parsed_instructions;
+        const std::string fallback_working_directory =
+                std::filesystem::current_path().string();
+        runtime.SetFallbackWorkingDirectory(fallback_working_directory);
+        runtime.SetProjectInstructionsLoader(
+                std::make_shared<aiagent::agent::ProjectInstructionsLoader>(
+                        instructions_config));
         // 最近一次压缩记录（按会话），供 REST 查询/前端展示。
         std::map<std::string, aiagent::agent::CompactionRecord> compaction_records;
         std::mutex compaction_records_mutex;
@@ -357,7 +373,8 @@ int main(int argc, char** argv) {
         web_gateway.SetHistoryCache(&history_cache);
         // 手动压缩：压缩后把更短的历史作为新任务落库，并刷新缓存。
         web_gateway.SetCompactHandler(
-                [&](const std::string& session_id, std::string* error) {
+                [&](const std::string& session_id, const std::string& cwd,
+                    std::string* error) {
                     std::vector<a2a::models::Message> history =
                             LoadLatestHistory(history_cache, *task_store, session_id);
                     if (history.empty()) {
@@ -370,7 +387,7 @@ int main(int argc, char** argv) {
                     aiagent::agent::CompactionRecord record;
                     std::string compact_error;
                     if (!runtime.CompactHistory(session_id, history, &compacted,
-                                                &record, &compact_error)) {
+                                                &record, &compact_error, cwd)) {
                         if (error != nullptr) {
                             *error = compact_error;
                         }
