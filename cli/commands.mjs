@@ -25,6 +25,7 @@ import {
   deleteSession,
   effectivePermission,
   health,
+  initProjectPermissions,
   listPermissions,
   listSessions,
   listTools,
@@ -464,13 +465,16 @@ export const commands = [
       ctx.state.cwd = resolved;
       ctx.state.cwdExplicit = true;
       ctx.print(`cwd: ${resolved}`);
+      if (typeof ctx.promptProjectTrust === "function") {
+        await ctx.promptProjectTrust();
+      }
     },
   },
   {
     name: "permissions",
     aliases: ["perms", "permission"],
     description: "Show or change the permission mode for the current directory",
-    argHint: "[confirm|workspace|full|show|list|reset]",
+    argHint: "[confirm|workspace|full|show|list|reset|init]",
     category: "local",
     handler: async (ctx, arg) => {
       const cwd = ctx.state.cwd ?? process.cwd();
@@ -504,6 +508,20 @@ export const commands = [
           );
         } catch (error) {
           ctx.print(`permission reset failed: ${error.message}`);
+        }
+        return;
+      }
+
+      if (token === "init") {
+        try {
+          const result = await initProjectPermissions(ctx.backend, cwd, false);
+          const created =
+            Array.isArray(result.created) && result.created.length > 0
+              ? result.created.join(", ")
+              : "already present";
+          ctx.print(`initialized ${result.root}/.de (${created})`);
+        } catch (error) {
+          ctx.print(`init failed: ${error.message}`);
         }
         return;
       }

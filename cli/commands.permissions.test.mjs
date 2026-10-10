@@ -51,6 +51,13 @@ function startBackend() {
         paths: [{ path: "/tmp/perm-test", mode: currentMode }],
       });
     }
+    if (request.url === "/api/v1/permissions/init" && request.method === "POST") {
+      const parsed = JSON.parse(body || "{}");
+      return send(200, {
+        root: parsed.path,
+        created: ["permissions.json", "bash_policy.rules", ".gitignore"],
+      });
+    }
     return send(404, { error: "not found" });
   });
   return { server, requests };
@@ -176,5 +183,16 @@ test("permissions rejects unknown mode names", async () => {
     await runCommand(ctx, "/permissions bogus");
     assert.equal(requests.filter((r) => r.method === "PUT").length, 0);
     assert.ok(printed.some((line) => line.includes("unknown mode")));
+  });
+});
+
+test("permissions init initializes the project config", async () => {
+  await withBackend(async (backend, requests) => {
+    const { ctx, printed } = makeContext(backend);
+    await runCommand(ctx, "/permissions init");
+    const init = requests.find((r) => r.url === "/api/v1/permissions/init");
+    assert.ok(init, "init request should be sent");
+    assert.ok(printed.some((line) => line.includes("initialized")));
+    assert.ok(printed.some((line) => line.includes("permissions.json")));
   });
 });

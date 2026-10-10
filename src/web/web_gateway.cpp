@@ -276,6 +276,18 @@ public:
         permission_remove_handler_ = std::move(handler);
     }
 
+    void SetProjectPermissionHandler(WebGateway::ProjectPermissionHandler handler) {
+        project_permission_handler_ = std::move(handler);
+    }
+
+    void SetTrustSetHandler(WebGateway::TrustSetHandler handler) {
+        trust_set_handler_ = std::move(handler);
+    }
+
+    void SetPermissionInitHandler(WebGateway::PermissionInitHandler handler) {
+        permission_init_handler_ = std::move(handler);
+    }
+
     void SetApproveHandler(WebGateway::ApproveHandler handler) {
         approve_handler_ = std::move(handler);
     }
@@ -791,6 +803,124 @@ private:
                                    "application/json");
                        });
 
+        // 项目级 `.de/`：查询、信任、初始化。
+        server_.Get("/api/v1/permissions/project",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        if (!project_permission_handler_) {
+                            response.status = 501;
+                            response.set_content(
+                                    R"({"error":"project permissions not available"})",
+                                    "application/json");
+                            return;
+                        }
+                        const std::string path = request.has_param("path")
+                                                         ? request.get_param_value("path")
+                                                         : std::string();
+                        if (path.empty()) {
+                            response.status = 400;
+                            response.set_content(R"({"error":"path is required"})",
+                                                 "application/json");
+                            return;
+                        }
+                        const auto info = project_permission_handler_(path);
+                        response.set_content(
+                                nlohmann::json{{"path", info.path},
+                                               {"root", info.root},
+                                               {"has_config", info.has_config},
+                                               {"trusted", info.trusted}}
+                                        .dump(),
+                                "application/json");
+                    });
+
+        server_.Put("/api/v1/permissions/trust",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        if (!trust_set_handler_) {
+                            response.status = 501;
+                            response.set_content(
+                                    R"({"error":"trust not available"})",
+                                    "application/json");
+                            return;
+                        }
+                        try {
+                            const auto body = nlohmann::json::parse(request.body);
+                            const std::string path = StringValue(body, "path");
+                            if (path.empty() || !body.contains("trusted") ||
+                                !body["trusted"].is_boolean()) {
+                                response.status = 400;
+                                response.set_content(
+                                        R"({"error":"path and boolean trusted are required"})",
+                                        "application/json");
+                                return;
+                            }
+                            const bool trusted = body["trusted"].get<bool>();
+                            std::string root;
+                            std::string error;
+                            if (!trust_set_handler_(path, trusted, &root, &error)) {
+                                response.status = 400;
+                                response.set_content(
+                                        nlohmann::json{{"error", error}}.dump(),
+                                        "application/json");
+                                return;
+                            }
+                            response.set_content(
+                                    nlohmann::json{{"root", root}, {"trusted", trusted}}
+                                            .dump(),
+                                    "application/json");
+                        } catch (const nlohmann::json::exception& e) {
+                            response.status = 400;
+                            response.set_content(
+                                    nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                     e.what()}}
+                                            .dump(),
+                                    "application/json");
+                        }
+                    });
+
+        server_.Post("/api/v1/permissions/init",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!permission_init_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"init not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             const std::string path = StringValue(body, "path");
+                             if (path.empty()) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         R"({"error":"path is required"})",
+                                         "application/json");
+                                 return;
+                             }
+                             const bool seed = body.value("seed_from_global", false);
+                             std::string root;
+                             std::vector<std::string> created;
+                             std::string error;
+                             if (!permission_init_handler_(path, seed, &root, &created,
+                                                           &error)) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         nlohmann::json{{"error", error}}.dump(),
+                                         "application/json");
+                                 return;
+                             }
+                             response.set_content(
+                                     nlohmann::json{{"root", root}, {"created", created}}
+                                             .dump(),
+                                     "application/json");
+                         } catch (const nlohmann::json::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                      e.what()}}
+                                             .dump(),
+                                     "application/json");
+                         }
+                     });
+
         server_.Post("/api/v1/chat/approve",
                      [this](const httplib::Request& request, httplib::Response& response) {
                          if (!approve_handler_) {
@@ -1061,6 +1191,9 @@ private:
     WebGateway::PermissionResolveHandler permission_resolve_handler_;
     WebGateway::PermissionSetHandler permission_set_handler_;
     WebGateway::PermissionRemoveHandler permission_remove_handler_;
+    WebGateway::ProjectPermissionHandler project_permission_handler_;
+    WebGateway::TrustSetHandler trust_set_handler_;
+    WebGateway::PermissionInitHandler permission_init_handler_;
     WebGateway::ApproveHandler approve_handler_;
     WebGateway::CancelObserver cancel_observer_;
     aiagent::agent::SessionMetaStore* session_meta_store_ = nullptr;
@@ -1127,6 +1260,20 @@ void WebGateway::SetPermissionSetHandler(WebGateway::PermissionSetHandler handle
 void WebGateway::SetPermissionRemoveHandler(
         WebGateway::PermissionRemoveHandler handler) {
     impl_->SetPermissionRemoveHandler(std::move(handler));
+}
+
+void WebGateway::SetProjectPermissionHandler(
+        WebGateway::ProjectPermissionHandler handler) {
+    impl_->SetProjectPermissionHandler(std::move(handler));
+}
+
+void WebGateway::SetTrustSetHandler(WebGateway::TrustSetHandler handler) {
+    impl_->SetTrustSetHandler(std::move(handler));
+}
+
+void WebGateway::SetPermissionInitHandler(
+        WebGateway::PermissionInitHandler handler) {
+    impl_->SetPermissionInitHandler(std::move(handler));
 }
 
 void WebGateway::SetApproveHandler(WebGateway::ApproveHandler handler) {

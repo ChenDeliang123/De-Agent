@@ -39,6 +39,14 @@ struct PermissionsSnapshot {
     std::vector<PermissionInfo> entries;
 };
 
+// 项目级权限信息（GET /api/v1/permissions/project）。
+struct ProjectPermissionInfo {
+    std::string path;
+    std::string root;
+    bool has_config = false;
+    bool trusted = false;
+};
+
 // 会话最近一次加载的项目指令来源（只含路径/大小，不含指令正文）。
 struct InstructionSourceInfo {
     std::string path;
@@ -111,6 +119,20 @@ public:
     using PermissionRemoveHandler =
             std::function<bool(const std::string& path, std::string* error)>;
 
+    // 项目级权限信息（GET /api/v1/permissions/project?path=）。
+    using ProjectPermissionHandler =
+            std::function<ProjectPermissionInfo(const std::string& path)>;
+
+    // 设置项目信任（PUT /api/v1/permissions/trust）。
+    using TrustSetHandler =
+            std::function<bool(const std::string& path, bool trusted,
+                               std::string* root, std::string* error)>;
+
+    // 初始化项目 `.de/`（POST /api/v1/permissions/init）。
+    using PermissionInitHandler = std::function<bool(
+            const std::string& path, bool seed_from_global, std::string* root,
+            std::vector<std::string>* created, std::string* error)>;
+
     // 工具审批（POST /api/v1/chat/approve）。
     // decision 取 allow_once / allow_session / deny；命中等待中的请求返回 true。
     using ApproveHandler = std::function<bool(const std::string& session_id,
@@ -169,6 +191,9 @@ public:
     void SetPermissionResolveHandler(PermissionResolveHandler handler);
     void SetPermissionSetHandler(PermissionSetHandler handler);
     void SetPermissionRemoveHandler(PermissionRemoveHandler handler);
+    void SetProjectPermissionHandler(ProjectPermissionHandler handler);
+    void SetTrustSetHandler(TrustSetHandler handler);
+    void SetPermissionInitHandler(PermissionInitHandler handler);
 
     // 注入工具审批处理逻辑。未设置时 /chat/approve 返回 501。
     void SetApproveHandler(ApproveHandler handler);

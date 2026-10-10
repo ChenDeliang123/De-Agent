@@ -3,11 +3,13 @@
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -37,6 +39,7 @@
 #include "aiagent/permissions/bash_policy.hpp"
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/permissions/project_config.hpp"
+#include "aiagent/permissions/trust_store.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
 #include "aiagent/version.hpp"
@@ -439,6 +442,20 @@ int main(int argc, char** argv) {
                     return project_config_cache->Get(cwd);
                 });
 
+        // 用户级信任存储：项目 `.de/` 被信任后才允许放松权限。
+        std::string trust_path = storage_config.trust_file;
+        if (trust_path.empty()) {
+            trust_path = app_paths.trust_file;
+        }
+        if (trust_path.empty()) {
+            std::filesystem::path fallback = db_path;
+            fallback.replace_filename("trust.json");
+            trust_path = fallback.string();
+        }
+        auto trust_store =
+                std::make_shared<aiagent::permissions::TrustStore>(trust_path);
+        runtime.SetTrustStore(trust_store);
+
         auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
         tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
                 std::filesystem::current_path().string(), tools_config.sandbox_roots));
@@ -715,6 +732,117 @@ int main(int argc, char** argv) {
                     aiagent::DefaultLogger().Log(
                             aiagent::LogLevel::kInfo, "main",
                             "event=permission_reset path=" + path);
+                    return true;
+                });
+        // 项目级 `.de/`：查询 / 信任 / 初始化。
+        web_gateway.SetProjectPermissionHandler([&](const std::string& path) {
+            aiagent::web::ProjectPermissionInfo info;
+            info.path = path;
+            info.root = aiagent::permissions::FindProjectRoot(path);
+            if (!info.root.empty()) {
+                info.has_config = project_config_cache->Get(path) != nullptr;
+                info.trusted = trust_store->IsTrusted(info.root);
+            }
+            return info;
+        });
+        web_gateway.SetTrustSetHandler(
+                [&](const std::string& path, bool trusted, std::string* root,
+                    std::string* error) {
+                    const std::string project_root =
+                            aiagent::permissions::FindProjectRoot(
+                                    path, /*fallback_to_cwd=*/true);
+                    if (project_root.empty()) {
+                        if (error != nullptr) {
+                            *error = "no project root for path";
+                        }
+                        return false;
+                    }
+                    trust_store->Set(project_root, trusted);
+                    if (root != nullptr) {
+                        *root = project_root;
+                    }
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            std::string("event=project_trust path=") + project_root +
+                                    " trusted=" + (trusted ? "true" : "false"));
+                    return true;
+                });
+        web_gateway.SetPermissionInitHandler(
+                [&](const std::string& path, bool seed_from_global, std::string* root,
+                    std::vector<std::string>* created, std::string* error) {
+                    const std::string project_root =
+                            aiagent::permissions::FindProjectRoot(
+                                    path, /*fallback_to_cwd=*/true);
+                    if (project_root.empty()) {
+                        if (error != nullptr) {
+                            *error = "no project root for path";
+                        }
+                        return false;
+                    }
+                    const std::filesystem::path de_dir =
+                            std::filesystem::path(project_root) / ".de";
+                    std::error_code ec;
+                    std::filesystem::create_directories(de_dir, ec);
+                    if (ec) {
+                        if (error != nullptr) {
+                            *error = "cannot create " + de_dir.string();
+                        }
+                        return false;
+                    }
+                    const auto ensure_file = [&](const std::string& name,
+                                                 const std::string& content) {
+                        const std::filesystem::path target = de_dir / name;
+                        if (std::filesystem::exists(target, ec)) {
+                            return true;
+                        }
+                        std::ofstream output(target, std::ios::trunc);
+                        if (!output) {
+                            return false;
+                        }
+                        output << content;
+                        if (created != nullptr) {
+                            created->push_back(name);
+                        }
+                        return output.good();
+                    };
+                    if (!ensure_file("permissions.json",
+                                     "{\n  \"version\": 1,\n  \"paths\": {}\n}\n")) {
+                        if (error != nullptr) {
+                            *error = "cannot write permissions.json";
+                        }
+                        return false;
+                    }
+                    std::string bash_content;
+                    if (seed_from_global && !bash_policy_path.empty() &&
+                        std::filesystem::exists(bash_policy_path, ec)) {
+                        std::ifstream input(bash_policy_path);
+                        std::stringstream buffer;
+                        buffer << input.rdbuf();
+                        bash_content = buffer.str();
+                    } else {
+                        bash_content =
+                                aiagent::permissions::DefaultBashPolicyFileContent();
+                    }
+                    if (!ensure_file("bash_policy.rules", bash_content)) {
+                        if (error != nullptr) {
+                            *error = "cannot write bash_policy.rules";
+                        }
+                        return false;
+                    }
+                    if (!ensure_file(".gitignore", "*\n")) {
+                        if (error != nullptr) {
+                            *error = "cannot write .gitignore";
+                        }
+                        return false;
+                    }
+                    // 新写入的项目配置立即生效。
+                    project_config_cache->Clear();
+                    if (root != nullptr) {
+                        *root = project_root;
+                    }
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "event=project_init path=" + project_root);
                     return true;
                 });
         // 工具审批：CLI 收到 approval_request 后回传决定，唤醒阻塞中的 Agent。

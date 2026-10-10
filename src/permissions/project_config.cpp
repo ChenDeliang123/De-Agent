@@ -5,7 +5,7 @@
 
 namespace aiagent::permissions {
 
-std::string FindProjectRoot(const std::string& cwd) {
+std::string FindProjectRoot(const std::string& cwd, bool fallback_to_cwd) {
     if (cwd.empty()) {
         return {};
     }
@@ -30,7 +30,10 @@ std::string FindProjectRoot(const std::string& cwd) {
         current = parent;
     }
 
-    // 非 git 项目：若当前目录自身有 .de/ 也认作项目根。
+    // 非 git 项目：init 时直接认 cwd；读取时只在 cwd 已有 .de/ 时认。
+    if (fallback_to_cwd) {
+        return dir.string();
+    }
     if (std::filesystem::is_directory(dir / ".de", ec)) {
         return dir.string();
     }

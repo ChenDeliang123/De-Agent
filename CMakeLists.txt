@@ -104,6 +104,7 @@ add_library(aiagent_agent STATIC
   src/permissions/permission_policy.cpp
   src/permissions/permission_store.cpp
   src/permissions/project_config.cpp
+  src/permissions/trust_store.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
@@ -214,6 +215,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(project_config_test tests/project_config_test.cpp)
   target_link_libraries(project_config_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_project_config COMMAND project_config_test)
+
+  add_executable(trust_store_test tests/trust_store_test.cpp)
+  target_link_libraries(trust_store_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_trust_store COMMAND trust_store_test)
 
   add_executable(app_paths_test tests/app_paths_test.cpp)
   target_link_libraries(app_paths_test PRIVATE aiagent_agent)

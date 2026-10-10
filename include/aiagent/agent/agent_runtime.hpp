@@ -22,6 +22,7 @@
 #include "aiagent/permissions/permission_policy.hpp"
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/permissions/project_config.hpp"
+#include "aiagent/permissions/trust_store.hpp"
 #include "aiagent/tools/tool_context.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -79,6 +80,9 @@ public:
             std::function<std::shared_ptr<const permissions::ProjectConfig>(
                     const std::string& cwd)>;
     void SetProjectConfigProvider(ProjectConfigProvider provider);
+
+    // 可选：注入用户级信任存储。项目 `.de/` 被信任后才允许放松权限。
+    void SetTrustStore(std::shared_ptr<permissions::TrustStore> store);
 
     // 可选：注入审批回调。未注入时“需要确认”的工具直接拒绝。
     void SetApprovalHandler(ApprovalHandler handler);
@@ -165,6 +169,9 @@ private:
     std::shared_ptr<const permissions::ProjectConfig> ResolveProjectConfig(
             const std::string& directory) const;
 
+    // 项目是否被信任（项目自带标记或信任存储）。
+    bool IsProjectTrusted(const permissions::ProjectConfig& project) const;
+
     // 合并全局与项目级 bash 规则：deny 叠加；allow 仅当项目被信任时叠加。
     std::shared_ptr<const permissions::BashPolicy> BuildEffectiveBashPolicy(
             const std::string& directory) const;
@@ -204,6 +211,7 @@ private:
     PermissionSettings permission_settings_;
     permissions::BashPolicy bash_policy_;
     ProjectConfigProvider project_config_provider_;
+    std::shared_ptr<permissions::TrustStore> trust_store_;
     ApprovalHandler approval_handler_;
     mutable std::mutex session_allow_mutex_;
     // context_id -> 本会话「总是允许」的工具名集合（仅内存，不持久化）。

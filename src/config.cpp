@@ -635,6 +635,8 @@ std::optional<StorageConfig> ParseStorageConfig(const std::string& content,
             config.permissions_file = value;
         } else if (key == "bash_policy_file") {
             config.bash_policy_file = value;
+        } else if (key == "trust_file") {
+            config.trust_file = value;
         }
     }
     return config;

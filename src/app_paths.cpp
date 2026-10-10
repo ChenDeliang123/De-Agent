@@ -53,6 +53,7 @@ AppPaths ResolveAppPaths(const std::string& explicit_data_dir) {
     if (!dir.empty()) {
         paths.permissions_file = dir + "/permissions.json";
         paths.bash_policy_file = dir + "/bash_policy.rules";
+        paths.trust_file = dir + "/trust.json";
     }
     return paths;
 }

@@ -244,3 +244,41 @@ export async function approveChat(backendUrl, sessionId, toolCallId, decision) {
   }
   return body;
 }
+
+export async function getProjectPermission(backendUrl, path) {
+  const url = `${normalizeBackendUrl(backendUrl)}/api/v1/permissions/project?path=${encodeURIComponent(path)}`;
+  const response = await fetch(url);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `project permission failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function setTrust(backendUrl, path, trusted) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/permissions/trust`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(JSON.stringify({ path, trusted })),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `set trust failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function initProjectPermissions(backendUrl, path, seedFromGlobal = false) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/permissions/init`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(
+      JSON.stringify({ path, seed_from_global: seedFromGlobal }),
+    ),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `init failed: HTTP ${response.status}`);
+  }
+  return body;
+}

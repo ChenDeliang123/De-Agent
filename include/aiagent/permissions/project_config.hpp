@@ -20,8 +20,9 @@ struct ProjectConfig {
 };
 
 // 从 cwd 向上找最近包含 `.git` 的祖先作为项目根；
-// 找不到时，若 cwd 自身有 `.de/` 则用 cwd，否则返回空。
-std::string FindProjectRoot(const std::string& cwd);
+// 找不到时：fallback_to_cwd=true 则直接返回 cwd（供 init 使用）；
+// 否则若 cwd 自身有 `.de/` 则用 cwd，否则返回空。
+std::string FindProjectRoot(const std::string& cwd, bool fallback_to_cwd = false);
 
 // 进程内缓存的项目级配置。按项目根缓存，首次读取后不再失效
 // （与全局配置一致：改动需重启后端）。

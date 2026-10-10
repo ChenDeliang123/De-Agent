@@ -8,9 +8,11 @@ import { log } from "./logger.mjs";
 import {
   approveChat,
   cancelChat,
+  getProjectPermission,
   listSessions,
   loadHistory,
   renameSession,
+  setTrust,
   streamChat,
 } from "./session.mjs";
 import { LineEditor, renderHotkeys } from "./editor.mjs";
@@ -236,6 +238,32 @@ function makeSelect(editor) {
   return (items, prompt) => editor.selectList(items, prompt);
 }
 
+// 检测当前工作目录的项目级 `.de/` 配置；未信任时提示用户是否信任。
+async function maybePromptProjectTrust(ctx) {
+  if (typeof ctx.confirm !== "function") {
+    return;
+  }
+  try {
+    const info = await getProjectPermission(ctx.backend, ctx.state.cwd ?? process.cwd());
+    if (!info.root || !info.has_config || info.trusted) {
+      return;
+    }
+    ctx.print(`project config found: ${info.root}/.de (currently untrusted)`);
+    const ok = await ctx.confirm(
+      "Trust this project's .de/ config? (untrusted = can only tighten permissions)",
+    );
+    await setTrust(ctx.backend, info.root, Boolean(ok));
+    ctx.print(ok ? "project trusted" : "project kept untrusted (tighten-only)");
+    ctx.log(
+      "info",
+      "cli",
+      `event=project_trust path=${info.root} trusted=${Boolean(ok)}`,
+    );
+  } catch (error) {
+    ctx.log("warning", "cli", `event=project_trust_check_failed message=${error.message}`);
+  }
+}
+
 // 处理 approval_request：弹交互提示并把决定回传后端。
 async function handleApproval(ctx, sessionId, data) {
   const toolCallId = data.id ?? "";
@@ -331,6 +359,7 @@ async function main() {
         }
       : null,
   };
+  ctx.promptProjectTrust = () => maybePromptProjectTrust(ctx);
 
   const sessions = await listSessions(backend).catch(() => []);
   if (sessions.length > 0) {
@@ -372,6 +401,8 @@ async function main() {
   if (restoredCwd) {
     console.log(`restored cwd ${restoredCwd}`);
   }
+
+  await ctx.promptProjectTrust();
 
   if (state.sessionId) {
     try {

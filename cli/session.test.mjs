@@ -2,7 +2,17 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { cancelChat, compactSession, listSessions, loadHistory, streamChat, approveChat } from "./session.mjs";
+import {
+  approveChat,
+  cancelChat,
+  compactSession,
+  getProjectPermission,
+  initProjectPermissions,
+  listSessions,
+  loadHistory,
+  setTrust,
+  streamChat,
+} from "./session.mjs";
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -222,6 +232,55 @@ test("cli session client sends approval decisions", async () => {
       session_id: "s1",
       tool_call_id: "call-1",
       decision: "allow_once",
+    });
+  } finally {
+    await close(backend);
+  }
+});
+
+test("cli session client reads project permission, sets trust, and inits", async () => {
+  const requests = [];
+  const backend = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ method: request.method, url: request.url, body });
+      const send = (payload) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(payload));
+      };
+      if (request.url.startsWith("/api/v1/permissions/project")) {
+        return send({ path: "/tmp/proj", root: "/tmp/proj", has_config: true, trusted: false });
+      }
+      if (request.url === "/api/v1/permissions/trust" && request.method === "PUT") {
+        return send({ root: "/tmp/proj", trusted: true });
+      }
+      if (request.url === "/api/v1/permissions/init" && request.method === "POST") {
+        return send({ root: "/tmp/proj", created: ["permissions.json"] });
+      }
+      response.writeHead(404);
+      response.end("not found");
+    });
+  });
+
+  const port = await listen(backend);
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    const info = await getProjectPermission(base, "/tmp/proj/sub");
+    assert.equal(info.root, "/tmp/proj");
+    assert.equal(info.has_config, true);
+    assert.equal(info.trusted, false);
+
+    const trust = await setTrust(base, "/tmp/proj", true);
+    assert.deepEqual(trust, { root: "/tmp/proj", trusted: true });
+    assert.deepEqual(JSON.parse(requests.at(-1).body), { path: "/tmp/proj", trusted: true });
+
+    const init = await initProjectPermissions(base, "/tmp/proj", true);
+    assert.deepEqual(init, { root: "/tmp/proj", created: ["permissions.json"] });
+    assert.deepEqual(JSON.parse(requests.at(-1).body), {
+      path: "/tmp/proj",
+      seed_from_global: true,
     });
   } finally {
     await close(backend);

@@ -102,6 +102,20 @@ void AgentRuntime::SetProjectConfigProvider(ProjectConfigProvider provider) {
     project_config_provider_ = std::move(provider);
 }
 
+void AgentRuntime::SetTrustStore(std::shared_ptr<permissions::TrustStore> store) {
+    trust_store_ = std::move(store);
+}
+
+bool AgentRuntime::IsProjectTrusted(const permissions::ProjectConfig& project) const {
+    if (project.trusted) {
+        return true;
+    }
+    if (trust_store_ != nullptr && !project.root.empty()) {
+        return trust_store_->IsTrusted(project.root);
+    }
+    return false;
+}
+
 std::shared_ptr<const permissions::ProjectConfig> AgentRuntime::ResolveProjectConfig(
         const std::string& directory) const {
     if (!project_config_provider_ || directory.empty()) {
@@ -118,8 +132,8 @@ AgentRuntime::BuildEffectiveBashPolicy(const std::string& directory) const {
         // deny 永远叠加（项目级总能加严）。
         merged->deny.insert(merged->deny.end(), project->bash_policy->deny.begin(),
                             project->bash_policy->deny.end());
-        // allow 仅当项目被信任时叠加（P0 恒为未信任）。
-        if (project->trusted) {
+        // allow 仅当项目被信任时叠加。
+        if (IsProjectTrusted(*project)) {
             merged->allow.insert(merged->allow.end(),
                                  project->bash_policy->allow.begin(),
                                  project->bash_policy->allow.end());
@@ -144,7 +158,7 @@ permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
         project && project->permissions != nullptr) {
         if (const auto entry = project->permissions->Resolve(directory);
             entry.has_value()) {
-            if (project->trusted) {
+            if (IsProjectTrusted(*project)) {
                 mode = entry->mode;
             } else if (permissions::ModeRank(entry->mode) <
                        permissions::ModeRank(mode)) {
