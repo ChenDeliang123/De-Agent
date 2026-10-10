@@ -1,8 +1,8 @@
 # ai-agent-cpp
 
-一个基于 C++ 的 AI Agent 项目，支持通过 DeepSeek 进行对话、按需调用 MCP
-工具，并以 A2A（Agent-to-Agent）协议对外提供服务；同时附带一个轻量的
-Node.js Web 前端用于快速体验。
+一个基于 C++ 的终端 coding agent：通过 DeepSeek 进行对话、按需调用 MCP
+与内置文件/命令工具，并以 A2A（Agent-to-Agent）协议对外提供服务，配套
+一个零 npm 依赖的 Node.js 终端客户端（`cli/`）。
 
 ## 特性
 
@@ -17,7 +17,7 @@ Node.js Web 前端用于快速体验。
 - 任务与消息历史通过 SQLite 持久化。
 - 上下文压缩：超阈值时自动摘要较早消息，避免长会话撞上下文窗口。
 - 文件工具路径沙箱：`read`/`write`/`edit` 默认只能访问工作目录及其子目录。
-- 内置 Web Gateway（REST + SSE）与零 npm 依赖的 Node BFF 前端。
+- 内置本地 REST + SSE 后端，配套零 npm 依赖的终端 coding 客户端。
 
 [a2a-protocol]: https://gitee.com/chen_dl/a2a-protocol
 [mcp-extension-platform]: https://gitee.com/chen_dl/mcp-extension-platform
@@ -25,27 +25,26 @@ Node.js Web 前端用于快速体验。
 ## 系统架构
 
 ```text
-┌──────────────┐      ┌──────────────────┐      ┌──────────────────┐
-│   Browser    │ ───▶ │    Node BFF      │ ───▶ │   Web Gateway    │
-│              │      │  web/node_frontend│      │  C++ REST + SSE  │
-└──────────────┘      └──────────────────┘      └────────┬─────────┘
-                                                         │
-┌──────────────┐                                          │
-│ A2A Client   │ ─────────────────────────────────────┐   │
-└──────────────┘                                      │   │
-                                                      ▼   ▼
-                                          ┌──────────────────────────┐
-                                          │      AgentRuntime         │
-                                          │  消息历史 / 工具调用循环   │
-                                          └──────┬──────────┬─────────┘
-                                                 │          │
-                                    ┌────────────▼────┐  ┌──▼────────────┐
-                                    │    DeepSeek     │  │  MCP Server   │
-                                    │ Chat Completions│  │ stdio JSON-RPC│
-                                    └─────────────────┘  └───────────────┘
+┌──────────────┐      ┌──────────────────────┐
+│  Terminal    │ ───▶ │  Local HTTP Backend  │
+│  CLI (node)  │      │   C++ REST + SSE     │
+└──────────────┘      └──────────┬───────────┘
+                                 │
+┌──────────────┐                 │
+│  A2A Client  │ ────────────────┤
+└──────────────┘                 ▼
+                    ┌──────────────────────────┐
+                    │      AgentRuntime         │
+                    │  消息历史 / 工具调用循环   │
+                    └──────┬──────────┬─────────┘
+                           │          │
+              ┌────────────▼────┐  ┌──▼────────────┐
+              │    DeepSeek     │  │  MCP Server   │
+              │ Chat Completions│  │ stdio JSON-RPC│
+              └─────────────────┘  └───────────────┘
 
-                                    SQLite TaskStore
-                                    （任务与会话历史）
+              SQLite TaskStore
+              （任务与会话历史）
 ```
 
 核心链路：
@@ -73,14 +72,13 @@ Node.js Web 前端用于快速体验。
 │   ├── llm/                    # DeepSeek Client
 │   ├── mcp/                    # MCP stdio 客户端桥
 │   ├── tools/                  # 工具抽象接口
-│   └── web/                    # Web Gateway
+│   └── web/                    # 本地 HTTP 后端（终端 CLI 使用）
 ├── src/                        # 对应实现
 ├── tests/                      # C++ 测试
 ├── examples/                   # CLI 示例
 ├── cli/                        # 终端 coding 客户端（Node，零依赖）
 ├── de                          # 一键启动器（守护后端 + CLI）
 ├── scripts/                    # install/uninstall de
-├── web/node_frontend/          # Node BFF + 静态前端
 ├── vendor/
 │   ├── a2a-protocol/           # Git submodule
 │   └── mcp-extension-platform/ # Git submodule
@@ -93,7 +91,7 @@ Node.js Web 前端用于快速体验。
 - CMake ≥ 3.21
 - 支持 C++20 的编译器（GCC 11+ / Clang 14+）
 - libcurl 开发库
-- Node.js ≥ 18（仅运行 Web 前端时）
+- Node.js ≥ 18（运行终端 CLI 时）
 - Python 3（可选，MCP Python 插件需要）
 
 CMake 配置阶段会自动获取 `cpp-httplib` 与 SQLite，需要可用的网络连接。
@@ -146,28 +144,9 @@ export DEEPSEEK_API_KEY=sk-your-deepseek-api-key
 默认端口：
 
 - A2A：`http://127.0.0.1:18080/`
-- Web Gateway：`http://127.0.0.1:18081/`
+- 本地 HTTP 后端（终端 CLI 使用）：`http://127.0.0.1:18081/`
 
-### 5. 启动 Web 前端
-
-```bash
-cd web/node_frontend
-npm start
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:3000/
-```
-
-如果 C++ Web Gateway 不是 `18081`：
-
-```bash
-AIAGENT_BACKEND_URL=http://127.0.0.1:18082 npm start
-```
-
-### 6.（可选）启用 MCP 工具
+### 5.（可选）启用 MCP 工具
 
 构建 MCP Server：
 
@@ -180,7 +159,7 @@ cmake --build vendor/mcp-extension-platform/build -j
 
 再次启动 `aiagent_app`，终端出现 `MCP tools loaded: N` 即表示已启用。
 
-### 7. 终端 coding 客户端
+### 6. 终端 coding 客户端
 
 安装 `de` 快捷命令（只需一次）：
 
@@ -243,7 +222,7 @@ de logs      # 查看后端日志
 CLI 启动参数：
 
 ```bash
---backend <url>    Web Gateway 地址（默认 http://127.0.0.1:18081）
+--backend <url>    本地后端地址（默认 http://127.0.0.1:18081）
 --session <id>     直接续聊指定会话
 -c, --continue     继续最近一次会话
 -r, --resume       启动时选择要续聊的会话
@@ -266,7 +245,7 @@ de --session <session-id>
 node cli/cli.mjs --backend http://127.0.0.1:18081
 ```
 
-## Web API
+## 本地后端 API（终端 CLI 使用）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -303,20 +282,19 @@ curl -X POST http://127.0.0.1:18081/api/v1/chat \
 .runtime/backend.log          # 结构化 INFO/ERROR 日志
 .runtime/backend-console.log  # 后端 stdout/stderr 原始输出
 .runtime/cli.log              # CLI 事件日志
-.runtime/web.log              # Node BFF 请求日志
 ```
 
-P1 后，`backend.log` 可串联 WebGateway / AgentRuntime / DeepSeek 的
+P1 后，`backend.log` 可串联 本地后端 / AgentRuntime / DeepSeek 的
 请求生命周期：`event=chat_start → request_start → request_end → chat_end`，
 并记录耗时、session、reply 大小与 DeepSeek 错误/重试。
 
 P2 后，`tools` / `mcp` 模块还会记录 read/write/edit/bash 与
 MCP `tools/list` / `tools/call` 的执行时长、输出大小和退出状态。
 
-P3 后，CLI 与 Node BFF 也会写文件日志；`de` 会把自己的 `.runtime`
+P3 后，CLI 也会写文件日志；`de` 会把自己的 `.runtime`
 传给 CLI，方便统一查看。
 
-P4 后，日志支持线程级 `req=` request id 串联 Web → Agent → DeepSeek，
+P4 后，日志支持线程级 `req=` request id 串联 后端 → Agent → DeepSeek，
 自动脱敏 `sk-...` API Key，并按大小轮转文件。
 
 查看结构化日志：
@@ -324,7 +302,6 @@ P4 后，日志支持线程级 `req=` request id 串联 Web → Agent → DeepSe
 ```bash
 de logs
 de logs cli
-de logs web
 ```
 
 配置：
@@ -407,8 +384,8 @@ agents_md_max_depth = 16
 - 默认不跟随符号链接；文件过大时按 UTF-8 安全截断，并限制文件数与总字节数。
 - 同一进程内按文件 mtime/size 缓存已读取内容，文件变化后自动重新加载。
 - 项目指令只对当前项目生效，不能覆盖 Agent 的基础安全规则。
-- 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；浏览器 Web UI、同步
-  `/api/v1/chat` 和 A2A `SendMessage` 暂不保证使用项目指令。
+- 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；同步 `/api/v1/chat`
+  和 A2A `SendMessage` 暂不保证使用项目指令。
 
 ## 工具沙箱
 
@@ -452,10 +429,10 @@ Agent 通过 A2A v1.0 JSON-RPC 暴露能力：
 ctest --test-dir build --output-on-failure
 ```
 
-运行 Node 前端测试：
+运行 CLI 测试：
 
 ```bash
-cd web/node_frontend && npm test
+cd cli && npm test
 ```
 
 当前测试不依赖真实 DeepSeek API：模型与 MCP 均使用 fake 实现验证链路。
@@ -476,8 +453,7 @@ cd web/node_frontend && npm test
 - A2A Agent 骨架与 HTTP/SSE 服务端
 - DeepSeek 同步/流式客户端
 - MCP 工具桥接与工具调用循环
-- Web Gateway
-- Node 前端
+- 本地 HTTP 后端与终端 CLI coding 客户端
 
 后续可继续完善：
 

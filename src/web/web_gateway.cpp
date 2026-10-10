@@ -124,12 +124,6 @@ std::string SessionTitleFromHistory(const std::vector<a2a::models::Message>& his
     return "新对话";
 }
 
-void SetCommonHeaders(httplib::Response& response) {
-    response.set_header("Access-Control-Allow-Origin", "*");
-    response.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    response.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-}
-
 // 将 AgentEvent 序列化为 SSE 帧（event + data）。arguments 原始 JSON 若能
 // 解析则作为对象嵌入，否则按字符串透传。
 void WriteAgentEventFrame(
@@ -265,19 +259,12 @@ public:
 
 private:
     void SetupRoutes() {
-        server_.Options("/.*", [](const httplib::Request&, httplib::Response& response) {
-            SetCommonHeaders(response);
-            response.status = 204;
-        });
-
         server_.Get("/health", [this](const httplib::Request&, httplib::Response& response) {
-            SetCommonHeaders(response);
             response.set_content(R"({"status":"ok"})", "application/json");
         });
 
         server_.Get("/api/v1/sessions",
                     [this](const httplib::Request&, httplib::Response& response) {
-                        SetCommonHeaders(response);
                         // 单次遍历任务表：每个 context 取写入时间最新的历史，
                         // 同时记录 updated_at 以便按最近使用排序。
                         struct Entry {
@@ -351,7 +338,6 @@ private:
 
         server_.Get("/api/v1/sessions/:id/messages",
                     [this](const httplib::Request& request, httplib::Response& response) {
-                        SetCommonHeaders(response);
                         const auto it = request.path_params.find("id");
                         if (it == request.path_params.end()) {
                             response.status = 400;
@@ -370,7 +356,6 @@ private:
 
         server_.Post("/api/v1/sessions/:id/compact",
                      [this](const httplib::Request& request, httplib::Response& response) {
-                         SetCommonHeaders(response);
                          const auto it = request.path_params.find("id");
                          if (it == request.path_params.end()) {
                              response.status = 400;
@@ -418,7 +403,6 @@ private:
 
         server_.Get("/api/v1/sessions/:id/compaction",
                     [this](const httplib::Request& request, httplib::Response& response) {
-                        SetCommonHeaders(response);
                         const auto it = request.path_params.find("id");
                         if (it == request.path_params.end()) {
                             response.status = 400;
@@ -448,7 +432,6 @@ private:
         // 设置会话显式标题（/name）。
         server_.Patch("/api/v1/sessions/:id",
                       [this](const httplib::Request& request, httplib::Response& response) {
-                          SetCommonHeaders(response);
                           const auto it = request.path_params.find("id");
                           if (it == request.path_params.end()) {
                               response.status = 400;
@@ -494,7 +477,6 @@ private:
         // 删除会话及其全部任务。
         server_.Delete("/api/v1/sessions/:id",
                        [this](const httplib::Request& request, httplib::Response& response) {
-                           SetCommonHeaders(response);
                            const auto it = request.path_params.find("id");
                            if (it == request.path_params.end()) {
                                response.status = 400;
@@ -525,7 +507,6 @@ private:
         // 复制会话（/clone、/fork）：以最新完整历史创建新会话。
         server_.Post("/api/v1/sessions/:id/clone",
                      [this](const httplib::Request& request, httplib::Response& response) {
-                         SetCommonHeaders(response);
                          const auto it = request.path_params.find("id");
                          if (it == request.path_params.end()) {
                              response.status = 400;
@@ -555,7 +536,6 @@ private:
         // 会话统计（/session）：消息数、字符数、任务数与最近一次压缩。
         server_.Get("/api/v1/sessions/:id/stats",
                     [this](const httplib::Request& request, httplib::Response& response) {
-                        SetCommonHeaders(response);
                         const auto it = request.path_params.find("id");
                         if (it == request.path_params.end()) {
                             response.status = 400;
@@ -632,7 +612,6 @@ private:
         // 可用工具清单（/tools）：内置 coding 工具 + MCP 工具。
         server_.Get("/api/v1/tools",
                     [this](const httplib::Request&, httplib::Response& response) {
-                        SetCommonHeaders(response);
                         if (!tools_handler_) {
                             response.status = 501;
                             response.set_content(R"({"error":"tools not available"})",
@@ -649,7 +628,6 @@ private:
 
         server_.Post("/api/v1/chat",
                      [this](const httplib::Request& request, httplib::Response& response) {
-                         SetCommonHeaders(response);
                          try {
                              const auto body = nlohmann::json::parse(request.body);
                              const std::string content = StringValue(body, "message");
@@ -683,7 +661,6 @@ private:
 
         server_.Post("/api/v1/chat/stream",
                      [this](const httplib::Request& request, httplib::Response& response) {
-                         SetCommonHeaders(response);
                          try {
                              const auto body = nlohmann::json::parse(request.body);
                              const std::string content = StringValue(body, "message");
@@ -709,7 +686,6 @@ private:
 
         server_.Post("/api/v1/chat/cancel",
                      [this](const httplib::Request& request, httplib::Response& response) {
-                         SetCommonHeaders(response);
                          try {
                              const auto body = nlohmann::json::parse(request.body);
                              const std::string session_id = StringValue(body, "session_id");

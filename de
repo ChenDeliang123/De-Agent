@@ -19,7 +19,8 @@ LOG_FILE="${RUNTIME_DIR}/backend.log"
 CONSOLE_LOG_FILE="${RUNTIME_DIR}/backend-console.log"
 
 A2A_PORT="${AIAGENT_PORT:-18080}"
-WEB_PORT="${AIAGENT_WEB_PORT:-18081}"
+# 本地 HTTP 后端（终端 CLI 的通信端口）；保留 AIAGENT_WEB_PORT 兼容旧用法。
+BACKEND_PORT="${AIAGENT_BACKEND_PORT:-${AIAGENT_WEB_PORT:-18081}}"
 CONFIG_FILE="${AIAGENT_CONFIG:-${ROOT_DIR}/conf/conf.ini}"
 DB_PATH="${AIAGENT_DB:-${ROOT_DIR}/build/db/aiagent_tasks.db}"
 BACKEND_BIN="${ROOT_DIR}/build/aiagent_app"
@@ -39,13 +40,14 @@ commands:
   stop             stop the daemonized backend
   status           show backend status
   restart          stop then start backend
-  logs [target]    tail log: backend (default) | cli | web
+  logs [target]    tail log: backend (default) | cli
   help             show this help
 
 options:
   --no-backend     only run CLI, do not start backend
   --a2a-port N     A2A port (default 18080)
-  --web-port N     Web Gateway port (default 18081)
+  --backend-port N local backend API port for CLI (default 18081)
+  --web-port N     alias of --backend-port (deprecated)
   --config FILE    DeepSeek config file
   --db FILE        SQLite database path
   --log-level N    backend log level (trace/debug/info/warn/error/fatal)
@@ -53,7 +55,8 @@ options:
   --               pass remaining arguments to cli.mjs
 
 environment:
-  AIAGENT_PORT / AIAGENT_WEB_PORT / AIAGENT_CONFIG / AIAGENT_DB
+  AIAGENT_PORT / AIAGENT_BACKEND_PORT / AIAGENT_CONFIG / AIAGENT_DB
+  AIAGENT_WEB_PORT (deprecated alias of AIAGENT_BACKEND_PORT)
   AIAGENT_RUNTIME_DIR
 EOF
 }
@@ -63,7 +66,7 @@ ensure_runtime_dir() {
 }
 
 health_check() {
-  curl -sf "http://127.0.0.1:${WEB_PORT}/health" >/dev/null 2>&1
+  curl -sf "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1
 }
 
 pid_alive() {
@@ -106,7 +109,7 @@ stop_backend() {
 start_backend() {
   ensure_runtime_dir
   if health_check; then
-    echo "backend already running on http://127.0.0.1:${WEB_PORT}"
+    echo "backend already running on http://127.0.0.1:${BACKEND_PORT}"
     return 0
   fi
 
@@ -114,7 +117,7 @@ start_backend() {
     echo "waiting for backend to become healthy..."
     for _ in $(seq 1 40); do
       if health_check; then
-        echo "backend already running on http://127.0.0.1:${WEB_PORT}"
+        echo "backend already running on http://127.0.0.1:${BACKEND_PORT}"
         return 0
       fi
       sleep 0.25
@@ -136,7 +139,7 @@ start_backend() {
     --config "${CONFIG_FILE}"
     --db "${DB_PATH}"
     --port "${A2A_PORT}"
-    --web-port "${WEB_PORT}"
+    --web-port "${BACKEND_PORT}"
   )
   if [ -n "${LOG_LEVEL}" ]; then
     backend_args+=(--log-level "${LOG_LEVEL}")
@@ -152,7 +155,7 @@ start_backend() {
 
   for _ in $(seq 1 120); do
     if health_check; then
-      echo "backend ready on http://127.0.0.1:${WEB_PORT}"
+      echo "backend ready on http://127.0.0.1:${BACKEND_PORT}"
       return 0
     fi
     if ! pid_alive; then
@@ -198,8 +201,8 @@ while [ "$#" -gt 0 ]; do
       A2A_PORT="$2"
       shift 2
       ;;
-    --web-port)
-      WEB_PORT="$2"
+    --backend-port|--web-port)
+      BACKEND_PORT="$2"
       shift 2
       ;;
     --config)
@@ -238,9 +241,9 @@ case "${ACTION}" in
     ensure_runtime_dir
     if health_check; then
       if [ -f "${PID_FILE}" ]; then
-        echo "running (pid $(cat "${PID_FILE}")) on http://127.0.0.1:${WEB_PORT}"
+        echo "running (pid $(cat "${PID_FILE}")) on http://127.0.0.1:${BACKEND_PORT}"
       else
-        echo "running (external) on http://127.0.0.1:${WEB_PORT}"
+        echo "running (external) on http://127.0.0.1:${BACKEND_PORT}"
       fi
     else
       echo "stopped"
@@ -266,11 +269,8 @@ case "${ACTION}" in
       cli)
         LOG_TARGET="${RUNTIME_DIR}/cli.log"
         ;;
-      web)
-        LOG_TARGET="${RUNTIME_DIR}/web.log"
-        ;;
       *)
-        echo "unknown log target: ${target}; use backend|cli|web" >&2
+        echo "unknown log target: ${target}; use backend|cli" >&2
         exit 1
         ;;
     esac
@@ -288,10 +288,10 @@ case "${ACTION}" in
       exit 1
     fi
 
-    echo "starting CLI (backend http://127.0.0.1:${WEB_PORT})..."
+    echo "starting CLI (backend http://127.0.0.1:${BACKEND_PORT})..."
     AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
     "${NODE_BIN}" "${ROOT_DIR}/cli/cli.mjs" \
-      --backend "http://127.0.0.1:${WEB_PORT}" \
+      --backend "http://127.0.0.1:${BACKEND_PORT}" \
       "${CLI_ARGS[@]}"
     cli_status=$?
 
