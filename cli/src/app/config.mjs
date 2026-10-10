@@ -6,14 +6,15 @@
 //   external = code --wait
 //
 // 查找顺序：
-//   --cli-config <file> > $AIAGENT_CLI_CONFIG > ./conf/cli.ini > <cli>/../conf/cli.ini
+//   --cli-config <file> > $AIAGENT_CLI_CONFIG > ./conf/cli.ini > <repo>/conf/cli.ini
 // 找不到文件不报错，返回空配置。
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+// 本文件位于 cli/src/app/：CLI 包根目录是它的上两级。
+const CLI_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export function parseIni(content) {
   const result = {};

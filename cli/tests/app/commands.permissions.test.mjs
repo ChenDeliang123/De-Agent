@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { commands, runCommand } from "./commands.mjs";
+import { commands, runCommand } from "../../src/app/commands/index.mjs";
 
 function listen(server) {
   return new Promise((resolve) => {

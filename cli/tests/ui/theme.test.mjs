@@ -8,7 +8,7 @@ import {
   detectColorMode,
   makeStyler,
   pickSymbols,
-} from "./theme.mjs";
+} from "../../src/ui/theme.mjs";
 
 test("detectColorMode honors NO_COLOR, TTY, TERM and COLORTERM", () => {
   assert.equal(detectColorMode({ NO_COLOR: "1" }, { isTTY: true }), "none");

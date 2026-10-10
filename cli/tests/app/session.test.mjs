@@ -12,7 +12,7 @@ import {
   loadHistory,
   setTrust,
   streamChat,
-} from "./session.mjs";
+} from "../../src/app/session.mjs";
 
 function listen(server) {
   return new Promise((resolve) => {

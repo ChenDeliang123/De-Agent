@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadCliConfig, parseIni, resolveCliConfigPath, updateCliUiConfig } from "./config.mjs";
+import { loadCliConfig, parseIni, resolveCliConfigPath, updateCliUiConfig } from "../../src/app/config.mjs";
 
 test("parseIni reads sections, keys and values", () => {
   const ini = parseIni(`

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BottomRegion } from "./bottom.mjs";
-import { TranscriptRenderer } from "./renderer.mjs";
-import { captureOutput } from "./tests/virtual-terminal.mjs";
+import { BottomRegion } from "../../src/ui/bottom.mjs";
+import { TranscriptRenderer } from "../../src/ui/renderer.mjs";
+import { captureOutput } from "../helpers/virtual-terminal.mjs";
 
 const SPINNER_RE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 

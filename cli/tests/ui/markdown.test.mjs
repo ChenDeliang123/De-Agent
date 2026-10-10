@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMarkdownRenderer } from "./markdown.mjs";
-import { makeStyler } from "./theme.mjs";
+import { createMarkdownRenderer } from "../../src/ui/markdown.mjs";
+import { makeStyler } from "../../src/ui/theme.mjs";
 
 function plainMarkdown() {
   return createMarkdownRenderer(makeStyler("none"));

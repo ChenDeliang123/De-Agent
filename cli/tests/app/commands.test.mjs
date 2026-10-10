@@ -8,7 +8,7 @@ import {
   renderHelp,
   runCommand,
   suggestCommand,
-} from "./commands.mjs";
+} from "../../src/app/commands/index.mjs";
 
 function makeContext(overrides = {}) {
   const printed = [];

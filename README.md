@@ -81,6 +81,10 @@ DeepSeek 进行对话、按需调用 MCP 与内置文件/命令工具，并以 A
 ├── tests/                      # C++ 测试
 ├── examples/                   # CLI 示例
 ├── cli/                        # 终端 coding 客户端（Node，零依赖）
+│   ├── cli.mjs                 # 入口（de 启动器调用）
+│   ├── src/ui/                 # 呈现层：输入框/底部状态行/渲染/markdown/主题
+│   ├── src/app/                # 应用层：指令注册表、会话 API、配置、日志
+│   └── tests/                  # Node 测试（node --test）
 ├── de                          # 一键启动器（守护后端 + CLI）
 ├── scripts/                    # install/uninstall de
 ├── vendor/
@@ -213,7 +217,7 @@ de logs      # 查看后端日志
 /quit             退出（/exit 同义）
 ```
 
-命令列表由 `cli/commands.mjs` 的注册表统一生成，`/help`、候选提示与实际实现
+命令列表由 `cli/src/app/commands/` 的注册表统一生成，`/help`、候选提示与实际实现
 不会漂移。会话标题（`/name`）持久化在数据库同目录的 `aiagent_sessions.json`。
 
 流式输出期间可按 `Esc` 中断当前任务；CLI 会调用后端的取消接口，Agent

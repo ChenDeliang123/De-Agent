@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BottomRegion } from "./bottom.mjs";
-import { captureOutput } from "./tests/virtual-terminal.mjs";
+import { BottomRegion } from "../../src/ui/bottom.mjs";
+import { captureOutput } from "../helpers/virtual-terminal.mjs";
 
 test("region keeps the status row at the very bottom while output scrolls", () => {
   const { terminal, out, text } = captureOutput(40);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { askUser, askYesNo } from "./prompt.mjs";
+import { askUser, askYesNo } from "../../src/ui/prompt.mjs";
 
 class FakeInput extends EventEmitter {
   constructor(isTTY = true) {

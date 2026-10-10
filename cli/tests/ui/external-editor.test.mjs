@@ -9,9 +9,9 @@ import {
   editInExternalEditor,
   resolveEditorCommand,
   stripBom,
-} from "./external-editor.mjs";
+} from "../../src/ui/external-editor.mjs";
 
-const fixturePath = fileURLToPath(new URL("./tests/fixtures/fake-external-editor.mjs", import.meta.url));
+const fixturePath = fileURLToPath(new URL("../fixtures/fake-external-editor.mjs", import.meta.url));
 
 async function runExternalEditor(flag) {
   const captureDirectory = mkdtempSync(join(tmpdir(), "aiagent-external-editor-test-"));

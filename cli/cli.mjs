@@ -3,9 +3,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { stdin as input, stdout as output } from "node:process";
 
-import { TranscriptRenderer } from "./renderer.mjs";
-import { BottomRegion } from "./bottom.mjs";
-import { log } from "./logger.mjs";
+import { TranscriptRenderer } from "./src/ui/renderer.mjs";
+import { BottomRegion } from "./src/ui/bottom.mjs";
+import { log } from "./src/app/logger.mjs";
 import {
   approveChat,
   cancelChat,
@@ -16,20 +16,20 @@ import {
   renameSession,
   setTrust,
   streamChat,
-} from "./session.mjs";
-import { LineEditor, renderHotkeys } from "./editor.mjs";
-import { loadCliConfig, updateCliUiConfig } from "./config.mjs";
-import { PALETTES, detectColorMode, makeStyler, pickSymbols } from "./theme.mjs";
-import { resolveEditorCommand } from "./external-editor.mjs";
+} from "./src/app/session.mjs";
+import { LineEditor, renderHotkeys } from "./src/ui/editor.mjs";
+import { loadCliConfig, updateCliUiConfig } from "./src/app/config.mjs";
+import { PALETTES, detectColorMode, makeStyler, pickSymbols } from "./src/ui/theme.mjs";
+import { resolveEditorCommand } from "./src/ui/external-editor.mjs";
 import {
   commands,
   completeCommands,
   renderHelp,
   restoreSessionCwd,
   runCommand,
-} from "./commands.mjs";
-import { PROMPT_LABEL, formatStatusLine, gitBranch } from "./statusbar.mjs";
-import { askUser, askYesNo } from "./prompt.mjs";
+} from "./src/app/commands/index.mjs";
+import { PROMPT_LABEL, formatStatusLine, gitBranch } from "./src/ui/statusbar.mjs";
+import { askUser, askYesNo } from "./src/ui/prompt.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 // 与 renderer / editor 共享的 styler，支持运行时换主题。

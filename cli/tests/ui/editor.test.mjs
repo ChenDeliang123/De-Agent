@@ -10,11 +10,11 @@ import {
   displayWidth,
   formatCandidate,
   slashCandidates,
-} from "./editor.mjs";
-import { BottomRegion } from "./bottom.mjs";
-import { PROMPT_LABEL } from "./statusbar.mjs";
-import { commands, completeCommands } from "./commands.mjs";
-import { captureOutput, VirtualTerminal } from "./tests/virtual-terminal.mjs";
+} from "../../src/ui/editor.mjs";
+import { BottomRegion } from "../../src/ui/bottom.mjs";
+import { PROMPT_LABEL } from "../../src/ui/statusbar.mjs";
+import { commands, completeCommands } from "../../src/app/commands/index.mjs";
+import { captureOutput, VirtualTerminal } from "../helpers/virtual-terminal.mjs";
 
 const complete = (prefix) => completeCommands(prefix, commands);
 

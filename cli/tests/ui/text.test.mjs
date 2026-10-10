@@ -8,7 +8,7 @@ import {
   stripAnsi,
   visibleWidth,
   wrapVisible,
-} from "./text.mjs";
+} from "../../src/ui/text.mjs";
 
 test("visibleWidth ignores ANSI sequences but counts wide characters", () => {
   assert.equal(visibleWidth("\x1b[31mabc\x1b[0m"), 3);

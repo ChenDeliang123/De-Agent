@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { PROMPT_LABEL, formatStatusLine, gitBranch, modeColor, shortCwd } from "./statusbar.mjs";
-import { visibleWidth } from "./text.mjs";
-import { makeStyler } from "./theme.mjs";
+import { PROMPT_LABEL, formatStatusLine, gitBranch, modeColor, shortCwd } from "../../src/ui/statusbar.mjs";
+import { visibleWidth } from "../../src/ui/text.mjs";
+import { makeStyler } from "../../src/ui/theme.mjs";
 
 test("shortCwd replaces the home directory with ~", () => {
   assert.equal(shortCwd("/home/u/proj", "/home/u"), "~/proj");
