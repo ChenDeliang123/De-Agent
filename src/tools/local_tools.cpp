@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -14,6 +15,8 @@
 
 namespace aiagent::tools {
 namespace {
+
+namespace fs = std::filesystem;
 
 constexpr size_t kReadMaxBytes = 50 * 1024;
 constexpr int kReadMaxLines = 2000;
@@ -89,19 +92,86 @@ std::string ReadFile(const std::string& path, bool* ok, std::string* error) {
     return content.str();
 }
 
+// child 是否位于 root 之内（或等于 root）。按路径分量比较，
+// 避免 /foo 误判 /foobar。
+bool IsWithin(const fs::path& child, const fs::path& root) {
+    if (root.empty()) {
+        return false;
+    }
+    auto root_it = root.begin();
+    auto child_it = child.begin();
+    for (; root_it != root.end(); ++root_it, ++child_it) {
+        if (child_it == child.end() || *child_it != *root_it) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// canonical 化；失败（如路径不可访问）时退回 lexically_normal，不抛异常。
+fs::path CanonicalOrNormal(const fs::path& path) {
+    std::error_code ec;
+    const fs::path canonical = fs::weakly_canonical(path, ec);
+    if (ec) {
+        return path.lexically_normal();
+    }
+    return canonical;
+}
+
 }  // namespace
 
-LocalCodingTools::LocalCodingTools(std::string working_directory)
-    : cwd_(std::move(working_directory)) {}
+LocalCodingTools::LocalCodingTools(std::string working_directory,
+                                   SandboxPolicy sandbox)
+    : cwd_(std::move(working_directory)), sandbox_(std::move(sandbox)) {}
 
-std::string LocalCodingTools::ResolvePath(const std::string& path,
-                                          const std::string& working_directory) const {
-    const std::filesystem::path target(path);
-    if (target.is_absolute()) {
-        return path;
+bool LocalCodingTools::ResolvePath(const std::string& path,
+                                   const std::string& working_directory,
+                                   std::string* resolved,
+                                   std::string* error) const {
+    if (path.empty()) {
+        if (error != nullptr) {
+            *error = "path must not be empty";
+        }
+        return false;
     }
-    const std::string base = working_directory.empty() ? cwd_ : working_directory;
-    return (std::filesystem::path(base) / target).string();
+
+    const fs::path base =
+            working_directory.empty() ? fs::path(cwd_) : fs::path(working_directory);
+    fs::path target(path);
+    if (!target.is_absolute()) {
+        target = base / target;
+    }
+    const fs::path effective = CanonicalOrNormal(target);
+
+    if (!sandbox_.enabled) {
+        *resolved = effective.string();
+        return true;
+    }
+
+    std::vector<fs::path> roots;
+    roots.push_back(CanonicalOrNormal(base));
+    for (const std::string& extra : sandbox_.roots) {
+        if (extra.empty()) {
+            continue;
+        }
+        fs::path root(extra);
+        if (!root.is_absolute()) {
+            root = base / root;
+        }
+        roots.push_back(CanonicalOrNormal(root));
+    }
+
+    for (const fs::path& root : roots) {
+        if (IsWithin(effective, root)) {
+            *resolved = effective.string();
+            return true;
+        }
+    }
+
+    if (error != nullptr) {
+        *error = "path escapes sandbox: " + path;
+    }
+    return false;
 }
 
 std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
@@ -171,10 +241,11 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
     ToolExecutionResult result;
 
     if (name == "read") {
-        const std::string path =
-                ResolvePath(arguments.value("path", std::string()), working_directory);
-        if (path.empty()) {
-            result.error = "read requires a path";
+        std::string path;
+        std::string resolve_error;
+        if (!ResolvePath(arguments.value("path", std::string()), working_directory,
+                         &path, &resolve_error)) {
+            result.error = resolve_error;
             return result;
         }
         aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
@@ -201,13 +272,14 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
     }
 
     if (name == "write") {
-        const std::string path =
-                ResolvePath(arguments.value("path", std::string()), working_directory);
-        const std::string content = arguments.value("content", std::string());
-        if (path.empty()) {
-            result.error = "write requires a path";
+        std::string path;
+        std::string resolve_error;
+        if (!ResolvePath(arguments.value("path", std::string()), working_directory,
+                         &path, &resolve_error)) {
+            result.error = resolve_error;
             return result;
         }
+        const std::string content = arguments.value("content", std::string());
         aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
                                      "tool=write path=" + path +
                                              " event=start content_bytes=" +
@@ -233,11 +305,16 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
     }
 
     if (name == "edit") {
-        const std::string path =
-                ResolvePath(arguments.value("path", std::string()), working_directory);
+        std::string path;
+        std::string resolve_error;
+        if (!ResolvePath(arguments.value("path", std::string()), working_directory,
+                         &path, &resolve_error)) {
+            result.error = resolve_error;
+            return result;
+        }
         const std::string old_text = arguments.value("oldText", std::string());
         const std::string new_text = arguments.value("newText", std::string());
-        if (path.empty() || old_text.empty()) {
+        if (old_text.empty()) {
             result.error = "edit requires path and non-empty oldText";
             return result;
         }

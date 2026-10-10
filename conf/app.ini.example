@@ -45,3 +45,12 @@ agents_md_max_total_bytes = 32768
 agents_md_follow_symlinks = false
 ; 没有 .git 根时最多向上查找的层数。
 agents_md_max_depth = 16
+
+[tools]
+; 文件工具（read/write/edit）沙箱：默认只允许访问本次请求的工作目录
+; 及其子目录，`../`、绝对路径与指向外部的符号链接都会被拒绝。
+; 需要额外放行的目录用逗号分隔（相对路径相对工作目录解析）。
+; 注意：bash 工具本身不受该限制。
+; 设为 false 可完全关闭沙箱（不推荐）。
+sandbox_enabled = true
+sandbox_roots =

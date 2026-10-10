@@ -16,6 +16,7 @@ Node.js Web 前端用于快速体验。
   - 模型发起 `tool_calls` 后自动执行并回填结果
 - 任务与消息历史通过 SQLite 持久化。
 - 上下文压缩：超阈值时自动摘要较早消息，避免长会话撞上下文窗口。
+- 文件工具路径沙箱：`read`/`write`/`edit` 默认只能访问工作目录及其子目录。
 - 内置 Web Gateway（REST + SSE）与零 npm 依赖的 Node BFF 前端。
 
 [a2a-protocol]: https://gitee.com/chen_dl/a2a-protocol
@@ -408,6 +409,31 @@ agents_md_max_depth = 16
 - 项目指令只对当前项目生效，不能覆盖 Agent 的基础安全规则。
 - 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；浏览器 Web UI、同步
   `/api/v1/chat` 和 A2A `SendMessage` 暂不保证使用项目指令。
+
+## 工具沙箱
+
+`read` / `write` / `edit` 三个文件工具默认启用路径沙箱：路径会被
+canonical 化（解析 `.`、`..` 与符号链接），解析结果必须落在「本次请求的
+工作目录」或其子目录之内，否则直接拒绝并返回 `path escapes sandbox`。
+这可以阻止模型通过 `../`、绝对路径或指向外部的符号链接越权读写文件。
+
+```ini
+[tools]
+sandbox_enabled = true
+; 额外放行的根目录，逗号分隔；相对路径相对工作目录解析。
+sandbox_roots =
+```
+
+说明：
+
+- 沙箱以「每次请求携带的 cwd」为根，所以终端 `/cwd` 切换目录后，新目录
+  即成为允许范围；A2A/同步接口没有 cwd 时退回后端启动目录。
+- 需要访问工作目录之外的目录时，用 `sandbox_roots` 显式放行，不要图省事
+  关掉沙箱。
+- **`bash` 工具不受该策略约束**：它在工作目录下执行任意命令，仍可访问
+  全盘。文件沙箱是「文件工具」的边界，不是进程级沙箱；需要更强隔离请
+  后续引入审批/容器化。
+- 关闭沙箱（`sandbox_enabled = false`）会恢复为「任意路径可读写」，不推荐。
 
 ## A2A
 

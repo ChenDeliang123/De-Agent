@@ -162,6 +162,73 @@ void TestComposite() {
     Expect(!unknown.ok, "composite should fail on unknown tool");
 }
 
+void TestSandbox() {
+    const auto parent = TempDir();
+    const auto work = parent / "work";
+    const auto outside = parent / "outside";
+    std::filesystem::create_directories(work);
+    std::filesystem::create_directories(outside);
+    WriteFile(work / "inside.txt", "inside");
+    WriteFile(outside / "secret.txt", "secret");
+
+    aiagent::tools::LocalCodingTools guarded(work.string());
+
+    // 工作目录内正常读写。
+    auto result = guarded.Execute("read", {{"path", "inside.txt"}});
+    Expect(result.ok && result.text == "inside",
+           "sandbox should allow files inside cwd");
+
+    // `..` 规范化后仍在工作目录内，应允许。
+    result = guarded.Execute("read", {{"path", "../work/inside.txt"}});
+    Expect(result.ok && result.text == "inside",
+           "sandbox should allow paths that normalize back inside cwd");
+
+    // 相对路径逃逸。
+    result = guarded.Execute("read", {{"path", "../outside/secret.txt"}});
+    Expect(!result.ok, "sandbox should block ../ escape");
+    Expect(result.error.find("sandbox") != std::string::npos,
+           "escape error should mention sandbox");
+
+    // 绝对路径逃逸（write 不得创建文件）。
+    result = guarded.Execute("write", {{"path", (outside / "hack.txt").string()},
+                                       {"content", "x"}});
+    Expect(!result.ok, "sandbox should block absolute path outside");
+    Expect(!std::filesystem::exists(outside / "hack.txt"),
+           "blocked write must not create file");
+
+    // edit 逃逸。
+    result = guarded.Execute("edit", {{"path", (outside / "secret.txt").string()},
+                                       {"oldText", "secret"},
+                                       {"newText", "x"}});
+    Expect(!result.ok, "sandbox should block edit outside");
+
+    // 符号链接逃逸：工作目录内的链接指向外部，canonical 化后应被拒绝。
+    std::error_code ec;
+    std::filesystem::create_symlink(outside / "secret.txt", work / "link.txt", ec);
+    if (!ec) {
+        result = guarded.Execute("read", {{"path", "link.txt"}});
+        Expect(!result.ok, "sandbox should block symlink escape");
+    }
+
+    // 配置额外放行的根目录。
+    aiagent::tools::SandboxPolicy policy;
+    policy.enabled = true;
+    policy.roots = {outside.string()};
+    aiagent::tools::LocalCodingTools allowed(work.string(), policy);
+    result = allowed.Execute("read", {{"path", (outside / "secret.txt").string()}});
+    Expect(result.ok && result.text == "secret",
+           "sandbox_roots should allow extra root");
+
+    // 关闭沙箱时允许任意路径。
+    aiagent::tools::SandboxPolicy off;
+    off.enabled = false;
+    aiagent::tools::LocalCodingTools unrestricted(work.string(), off);
+    result = unrestricted.Execute("read", {{"path", (outside / "secret.txt").string()}});
+    Expect(result.ok, "disabled sandbox should allow outside path");
+
+    std::filesystem::remove_all(parent);
+}
+
 void TestWorkingDirectoryOverride() {
     const auto parent = TempDir();
     const auto dir_a = parent / "dir_a";
@@ -195,6 +262,7 @@ int main() {
     TestReadWriteEdit();
     TestBash();
     TestComposite();
+    TestSandbox();
     TestWorkingDirectoryOverride();
 
     if (g_failures != 0) {

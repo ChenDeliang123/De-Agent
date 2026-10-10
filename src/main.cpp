@@ -314,10 +314,27 @@ int main(int argc, char** argv) {
         aiagent::agent::HistoryCache history_cache;
 
         // 内置 coding 工具（read/write/edit/bash）+ 可选的 MCP 工具，合并为一个 provider。
+        // 文件工具默认启用路径沙箱：只允许访问本次请求的工作目录（可额外放行配置的根）。
+        aiagent::ToolsConfig tools_config;
+        std::string tools_error;
+        const auto parsed_tools =
+                aiagent::LoadToolsConfigFile(options.config_path, &tools_error);
+        if (parsed_tools.has_value()) {
+            tools_config = *parsed_tools;
+        }
+        aiagent::tools::SandboxPolicy sandbox_policy;
+        sandbox_policy.enabled = tools_config.sandbox_enabled;
+        sandbox_policy.roots = tools_config.sandbox_roots;
         auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
         tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
-                std::filesystem::current_path().string()));
+                std::filesystem::current_path().string(), sandbox_policy));
         runtime.SetToolProvider(tools);
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "main",
+                std::string("file tool sandbox: ") +
+                        (sandbox_policy.enabled ? "enabled" : "disabled") +
+                        " extra_roots=" +
+                        std::to_string(sandbox_policy.roots.size()));
 
         // MCP：优先读 [mcp] 配置；没有时尝试根目录 vendor 的本地构建。
         aiagent::MCPConfig mcp_config;

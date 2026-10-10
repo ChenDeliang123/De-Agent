@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace aiagent {
 
@@ -38,6 +39,16 @@ struct CompactionConfig {
     int context_window = 64000;
     int reserve_tokens = 16384;
     int keep_recent_tokens = 20000;
+};
+
+// 文件工具（read/write/edit）的访问沙箱配置（[tools]）。
+// sandbox_enabled=true 时，解析后的路径必须落在本次请求的工作目录
+// 或 sandbox_roots 的某个根目录之内；越界直接拒绝。
+// 注意：bash 工具不受该策略约束。
+struct ToolsConfig {
+    bool sandbox_enabled = true;
+    // 额外放行的根目录；相对路径相对工作目录解析。
+    std::vector<std::string> sandbox_roots;
 };
 
 // 终端 Agent 的项目指令（AGENTS.md）配置。
@@ -82,6 +93,13 @@ std::optional<CompactionConfig> LoadCompactionConfigFile(const std::string& path
                                                          std::string* error = nullptr);
 
 // 解析 INI 文本中的 [instructions] 段；没有该段时返回默认值。
+// 解析 INI 文本中的 [tools] 段；没有该段时返回默认值（沙箱开启）。
+std::optional<ToolsConfig> ParseToolsConfig(const std::string& content,
+                                            std::string* error = nullptr);
+
+std::optional<ToolsConfig> LoadToolsConfigFile(const std::string& path,
+                                               std::string* error = nullptr);
+
 std::optional<InstructionsConfig> ParseInstructionsConfig(
         const std::string& content,
         std::string* error = nullptr);
