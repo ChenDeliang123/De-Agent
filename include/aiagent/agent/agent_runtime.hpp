@@ -61,7 +61,8 @@ public:
 
     explicit AgentRuntime(std::shared_ptr<llm::IModelClient> model,
                           std::string system_prompt =
-                                  "You are a helpful AI agent implemented in C++.");
+                                  "You are de agent, a general-purpose coding agent "
+                                  "created by 德先生.");
 
     // 可选：注入 MCP/工具提供者后，Agent 会自动执行 model 的 tool_calls。
     void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);

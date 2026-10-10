@@ -202,13 +202,13 @@ a2a::models::AgentCard BuildAgentCard(int port) {
     capabilities.push_notifications = false;
 
     AgentSkill skill;
-    skill.id = "deepseek-chat";
-    skill.name = "DeepSeek Chat";
-    skill.description = "多轮对话，使用 DeepSeek 模型回复用户消息。";
-    skill.tags = {"chat", "deepseek"};
+    skill.id = "de-agent";
+    skill.name = "de agent";
+    skill.description =
+            "通用 coding agent：读写文件、执行命令、调用工具。";
+    skill.tags = {"coding", "agent", "tools"};
 
-    AgentCard card("ai-agent-cpp DeepSeek Agent",
-                   "A2A agent backed by DeepSeek Chat Completions.",
+    AgentCard card(aiagent::kAgentName, aiagent::kAgentDescription,
                    aiagent::kVersion);
     card.WithInterface(std::move(iface))
             .WithCapabilities(std::move(capabilities))
@@ -266,8 +266,18 @@ int main(int argc, char** argv) {
         aiagent::agent::SessionMetaStore session_meta(meta_path.string());
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         const std::string coding_system_prompt =
-                "You are a terminal coding agent implemented in C++. You help the user by "
-                "reading, editing, and writing files and running bash commands.\n"
+                std::string("You are ") + aiagent::kAgentName +
+                ", a general-purpose coding agent created by " +
+                aiagent::kAgentAuthor +
+                ".\n"
+                "You work on software projects in any language: reading, editing and "
+                "writing files, running shell commands, and calling tools. You are not "
+                "bound to a specific repository, language, or model.\n"
+                "If the user asks who you are, your name, or who created you, answer "
+                "that you are " +
+                std::string(aiagent::kAgentName) +
+                ", a general-purpose coding agent by " + aiagent::kAgentAuthor +
+                ".\n"
                 "Available tools: read, write, edit, bash.\n"
                 "Rules:\n"
                 "- When the user asks to create or modify code/files, use write or edit in "
@@ -913,7 +923,8 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, OnSignal);
         std::signal(SIGTERM, OnSignal);
 
-        std::cout << "ai-agent-cpp listening on http://127.0.0.1:" << options.port << "/\n";
+        std::cout << aiagent::kAgentName << " listening on http://127.0.0.1:"
+                  << options.port << "/\n";
         std::cout << "Web Gateway: http://127.0.0.1:" << options.web_port << "/\n";
         std::cout << "Agent Card: http://127.0.0.1:" << options.port
                   << "/.well-known/agent-card.json\n";

@@ -309,7 +309,7 @@ async function main() {
   }
 
   const backend = options.backend.replace(/\/+$/, "");
-  console.log(`ai-agent-cli  backend=${backend}`);
+  console.log(`de agent  backend=${backend}`);
   log("info", "cli", `event=cli_start backend=${backend}`);
 
   const state = {

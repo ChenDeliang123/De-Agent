@@ -1,5 +1,6 @@
 #include "aiagent/mcp/mcp_client_bridge.hpp"
 #include "aiagent/log.hpp"
+#include "aiagent/version.hpp"
 
 #include <json.hpp>
 
@@ -148,7 +149,8 @@ public:
             const nlohmann::json params = {
                     {"protocolVersion", kMcpProtocolVersion},
                     {"capabilities", nlohmann::json::object()},
-                    {"clientInfo", {{"name", "ai-agent-cpp"}, {"version", "0.1.0"}}}};
+                    {"clientInfo", {{ "name", aiagent::kAgentName },
+                                      { "version", aiagent::kVersion }}}};
             Call("initialize", params);
             SendNotification("notifications/initialized", nlohmann::json::object());
         } catch (...) {

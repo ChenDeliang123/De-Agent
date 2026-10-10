@@ -1,8 +1,11 @@
-# ai-agent-cpp
+# de agent
 
-一个基于 C++ 的终端 coding agent：通过 DeepSeek 进行对话、按需调用 MCP
-与内置文件/命令工具，并以 A2A（Agent-to-Agent）协议对外提供服务，配套
-一个零 npm 依赖的 Node.js 终端客户端（`cli/`）。
+**de agent** 是一个通用型 coding agent（作者：**德先生**）：基于 C++ 实现，通过
+DeepSeek 进行对话、按需调用 MCP 与内置文件/命令工具，并以 A2A
+（Agent-to-Agent）协议对外提供服务，配套一个零 npm 依赖的 Node.js 终端
+客户端（`cli/`）。
+
+它面向任意语言、任意仓库的软件开发，而不是绑定某个特定项目或模型。
 
 ## 特性
 
