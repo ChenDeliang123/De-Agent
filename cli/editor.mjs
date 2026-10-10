@@ -465,6 +465,8 @@ export class LineEditor {
         }
         resolve(result);
       };
+      // 幂等挂载：先移除再添加，避免重复 readLine 导致一个按键被处理多次。
+      input.removeListener("keypress", this.#handleKeypress);
       input.on("keypress", this.#handleKeypress);
     });
   }
@@ -542,6 +544,7 @@ export class LineEditor {
         input.setRawMode(true);
       }
       if (this.#resolveLine) {
+        input.removeListener("keypress", this.#handleKeypress);
         input.on("keypress", this.#handleKeypress);
         this.#drawn = 0;
         this.#redraw();

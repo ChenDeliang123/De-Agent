@@ -28,6 +28,7 @@ import {
   runCommand,
 } from "./commands.mjs";
 import { formatPromptLabel, gitBranch } from "./statusbar.mjs";
+import { askUser, askYesNo } from "./prompt.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 // 与 renderer / editor 共享的 styler，支持运行时换主题。
@@ -276,10 +277,9 @@ async function handleApproval(ctx, sessionId, data) {
   let decision = "deny";
   approvalPending = true;
   try {
-    const editor = ctx.editor ?? null;
-    if (editor && typeof editor.readLine === "function") {
-      const answer = await editor.readLine("[y]es once / [a]lways this session / [N]o: ");
-      const text = String(answer?.text ?? "").trim().toLowerCase();
+    if (input.isTTY) {
+      const answer = await askUser("[y]es once / [a]lways this session / [N]o: ");
+      const text = String(answer ?? "").trim().toLowerCase();
       if (text === "y" || text === "yes") {
         decision = "allow_once";
       } else if (text === "a" || text === "always") {
@@ -372,11 +372,8 @@ async function main() {
     renderHistory: (backendUrl, sessionId) => renderHistory(backendUrl, sessionId),
     selectSession: editor ? makeSelector(editor) : null,
     select: editor ? makeSelect(editor) : null,
-    confirm: editor
-      ? async (message) => {
-          const result = await editor.readLine(`${message} (y/N) `);
-          return !result.exit && /^y(es)?$/i.test((result.text ?? "").trim());
-        }
+    confirm: input.isTTY
+      ? async (message) => askYesNo(`${message} (y/N) `, { input, output })
       : null,
   };
   ctx.promptProjectTrust = () => maybePromptProjectTrust(ctx);
