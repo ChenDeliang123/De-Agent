@@ -98,6 +98,36 @@ void AgentRuntime::SetBashPolicy(permissions::BashPolicy policy) {
     bash_policy_ = std::move(policy);
 }
 
+void AgentRuntime::SetProjectConfigProvider(ProjectConfigProvider provider) {
+    project_config_provider_ = std::move(provider);
+}
+
+std::shared_ptr<const permissions::ProjectConfig> AgentRuntime::ResolveProjectConfig(
+        const std::string& directory) const {
+    if (!project_config_provider_ || directory.empty()) {
+        return nullptr;
+    }
+    return project_config_provider_(directory);
+}
+
+std::shared_ptr<const permissions::BashPolicy>
+AgentRuntime::BuildEffectiveBashPolicy(const std::string& directory) const {
+    auto merged = std::make_shared<permissions::BashPolicy>(bash_policy_);
+    if (const auto project = ResolveProjectConfig(directory);
+        project && project->bash_policy != nullptr) {
+        // deny 永远叠加（项目级总能加严）。
+        merged->deny.insert(merged->deny.end(), project->bash_policy->deny.begin(),
+                            project->bash_policy->deny.end());
+        // allow 仅当项目被信任时叠加（P0 恒为未信任）。
+        if (project->trusted) {
+            merged->allow.insert(merged->allow.end(),
+                                 project->bash_policy->allow.begin(),
+                                 project->bash_policy->allow.end());
+        }
+    }
+    return merged;
+}
+
 permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
         const std::string& working_directory, bool interactive) const {
     permissions::PermissionMode mode = permission_settings_.default_mode;
@@ -107,6 +137,19 @@ permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
         if (const auto entry = permission_store_->Resolve(directory);
             entry.has_value()) {
             mode = entry->mode;
+        }
+    }
+    // 项目级权限：已信任则覆盖，未信任只能收紧（P0 恒为未信任）。
+    if (const auto project = ResolveProjectConfig(directory);
+        project && project->permissions != nullptr) {
+        if (const auto entry = project->permissions->Resolve(directory);
+            entry.has_value()) {
+            if (project->trusted) {
+                mode = entry->mode;
+            } else if (permissions::ModeRank(entry->mode) <
+                       permissions::ModeRank(mode)) {
+                mode = entry->mode;
+            }
         }
     }
     // 非交互调用方：取 max_mode 与 non_interactive_max_mode 中更严的一档，
@@ -130,6 +173,7 @@ tools::ToolContext AgentRuntime::BuildToolContext(
             working_directory.empty() ? fallback_working_directory_ : working_directory;
     context.policy =
             permissions::PolicyForMode(ResolvePermissionMode(working_directory, interactive));
+    context.bash_policy = BuildEffectiveBashPolicy(context.working_directory);
     return context;
 }
 
@@ -152,9 +196,10 @@ void AgentRuntime::GrantSessionAllow(const std::string& context_id,
 
 AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         const std::string& tool_name,
-        const permissions::PermissionPolicy& policy,
+        const tools::ToolContext& context,
         const std::string& context_id,
         const std::string& bash_command) const {
+    const permissions::PermissionPolicy& policy = context.policy;
     if (tool_name == "read") {
         if (!policy.allow_read) {
             return {ToolGate::kDeny,
@@ -175,9 +220,11 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
     }
     if (tool_name == "bash") {
         // 命令级白/黑名单优先于模式：deny 不可被确认绕过，allow 免确认。
+        const permissions::BashPolicy& effective_policy =
+                context.bash_policy ? *context.bash_policy : bash_policy_;
         if (!bash_command.empty()) {
             const permissions::BashDecision bash_decision =
-                    permissions::EvaluateBashPolicy(bash_command, bash_policy_);
+                    permissions::EvaluateBashPolicy(bash_command, effective_policy);
             if (bash_decision == permissions::BashDecision::kDeny) {
                 return {ToolGate::kDeny,
                         "permission denied: command blocked by bash policy"};
@@ -212,7 +259,7 @@ AgentRuntime::ToolDecision AgentRuntime::DecideTool(
         bash_command = BashCommandFromArguments(call.arguments);
     }
     const ToolGateResult gate =
-            CheckToolGate(call.name, context.policy, context_id, bash_command);
+            CheckToolGate(call.name, context, context_id, bash_command);
     if (gate.gate == ToolGate::kAllow) {
         return {true, {}};
     }

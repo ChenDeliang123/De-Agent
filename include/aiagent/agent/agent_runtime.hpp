@@ -21,6 +21,7 @@
 #include "aiagent/permissions/bash_policy.hpp"
 #include "aiagent/permissions/permission_policy.hpp"
 #include "aiagent/permissions/permission_store.hpp"
+#include "aiagent/permissions/project_config.hpp"
 #include "aiagent/tools/tool_context.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -71,6 +72,13 @@ public:
 
     // 可选：注入 bash 命令白/黑名单。未注入时不做命令级拦截。
     void SetBashPolicy(permissions::BashPolicy policy);
+
+    // 可选：注入项目级配置提供者（读 `<project>/.de/`）。
+    // 未注入时只用用户级/全局配置。
+    using ProjectConfigProvider =
+            std::function<std::shared_ptr<const permissions::ProjectConfig>(
+                    const std::string& cwd)>;
+    void SetProjectConfigProvider(ProjectConfigProvider provider);
 
     // 可选：注入审批回调。未注入时“需要确认”的工具直接拒绝。
     void SetApprovalHandler(ApprovalHandler handler);
@@ -149,9 +157,17 @@ private:
         std::string reason;
     };
     ToolGateResult CheckToolGate(const std::string& tool_name,
-                                 const permissions::PermissionPolicy& policy,
+                                 const tools::ToolContext& context,
                                  const std::string& context_id,
                                  const std::string& bash_command) const;
+
+    // 解析 cwd 对应项目的只读配置（可能为空）。
+    std::shared_ptr<const permissions::ProjectConfig> ResolveProjectConfig(
+            const std::string& directory) const;
+
+    // 合并全局与项目级 bash 规则：deny 叠加；allow 仅当项目被信任时叠加。
+    std::shared_ptr<const permissions::BashPolicy> BuildEffectiveBashPolicy(
+            const std::string& directory) const;
 
     // 结合审批通道得出工具是否可执行；needs-approval 时会发 kApprovalRequest
     // 事件并调用 approval_handler_ 阻塞等待。
@@ -187,6 +203,7 @@ private:
     std::shared_ptr<permissions::PermissionStore> permission_store_;
     PermissionSettings permission_settings_;
     permissions::BashPolicy bash_policy_;
+    ProjectConfigProvider project_config_provider_;
     ApprovalHandler approval_handler_;
     mutable std::mutex session_allow_mutex_;
     // context_id -> 本会话「总是允许」的工具名集合（仅内存，不持久化）。

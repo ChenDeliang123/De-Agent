@@ -1178,6 +1178,32 @@ int main() {
             Expect(provider->bash_calls == 1,
                    "bash policy allow skips the confirmation requirement");
         }
+        // 项目级收紧：全局 workspace（写允许），项目 confirm -> 写被拒。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            auto model = std::make_shared<OneShotToolModel>("write");
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(provider);
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = PermissionMode::kWorkspace;
+            runtime.SetPermissionSettings(settings);
+            runtime.SetFallbackWorkingDirectory("/tmp/aiagent-project-tighten");
+            auto store = std::make_shared<aiagent::permissions::PermissionStore>();
+            store->Set("/tmp/aiagent-project-tighten", PermissionMode::kConfirm);
+            auto project = std::make_shared<aiagent::permissions::ProjectConfig>();
+            project->root = "/tmp/aiagent-project-tighten";
+            project->permissions = store;
+            project->trusted = false;
+            runtime.SetProjectConfigProvider([project](const std::string&) {
+                return std::shared_ptr<const aiagent::permissions::ProjectConfig>(
+                        project);
+            });
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "run tool", "text/plain");
+            runtime.HandleMessageStreaming(user, {user}, "ctx-project-tighten", nullptr);
+            Expect(provider->write_calls == 0,
+                   "project config can tighten workspace to confirm (write denied)");
+        }
     } catch (const std::exception& e) {
         std::cerr << "agent runtime permission test failed: " << e.what() << '\n';
         return 1;

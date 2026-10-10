@@ -36,6 +36,7 @@
 #include "aiagent/mcp/mcp_client_bridge.hpp"
 #include "aiagent/permissions/bash_policy.hpp"
 #include "aiagent/permissions/permission_store.hpp"
+#include "aiagent/permissions/project_config.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
 #include "aiagent/version.hpp"
@@ -429,6 +430,14 @@ int main(int argc, char** argv) {
                 "bash policy file=" + bash_policy_path + " deny=" +
                         std::to_string(bash_policy.deny.size()) + " allow=" +
                         std::to_string(bash_policy.allow.size()));
+
+        // 项目级 `.de/` 只读分层：未信任的项目只能收紧（P0）。
+        auto project_config_cache =
+                std::make_shared<aiagent::permissions::ProjectConfigCache>();
+        runtime.SetProjectConfigProvider(
+                [project_config_cache](const std::string& cwd) {
+                    return project_config_cache->Get(cwd);
+                });
 
         auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
         tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
