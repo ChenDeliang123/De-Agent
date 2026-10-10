@@ -14,8 +14,10 @@
 #include <vector>
 
 #include "aiagent/llm/deepseek_types.hpp"
+#include "aiagent/permissions/permission_policy.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
+#include "aiagent/tools/tool_context.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
 namespace {
@@ -48,6 +50,18 @@ std::string ReadAll(const std::filesystem::path& path) {
     return content.str();
 }
 
+aiagent::tools::ToolContext ContextFor(aiagent::permissions::PermissionMode mode,
+                                       const std::string& cwd = {}) {
+    aiagent::tools::ToolContext context;
+    context.working_directory = cwd;
+    context.policy = aiagent::permissions::PolicyForMode(mode);
+    return context;
+}
+
+aiagent::tools::ToolContext FullContext(const std::string& cwd = {}) {
+    return ContextFor(aiagent::permissions::PermissionMode::kFull, cwd);
+}
+
 class NamedProvider final : public aiagent::tools::IToolProvider {
 public:
     explicit NamedProvider(std::string name) : name_(std::move(name)) {}
@@ -60,9 +74,10 @@ public:
         return {spec};
     }
 
-    aiagent::tools::ToolExecutionResult Execute(const std::string& name,
-                                                const nlohmann::json&,
-                                                const std::string&) override {
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string& name,
+            const nlohmann::json&,
+            const aiagent::tools::ToolContext&) override {
         aiagent::tools::ToolExecutionResult result;
         result.ok = (name == name_);
         result.text = "executed-" + name_;
@@ -79,43 +94,46 @@ private:
 void TestReadWriteEdit() {
     const auto dir = TempDir();
     aiagent::tools::LocalCodingTools tools(dir.string());
+    const auto context = FullContext();
 
     WriteFile(dir / "hello.txt", "line1\nline2\nline3\n");
 
     // read 全文件
-    auto result = tools.Execute("read", {{"path", "hello.txt"}});
+    auto result = tools.Execute("read", {{"path", "hello.txt"}}, context);
     Expect(result.ok, "read should succeed");
     Expect(result.text == "line1\nline2\nline3", "read should return full content");
 
     // read offset/limit
-    result = tools.Execute("read", {{"path", "hello.txt"}, {"offset", 2}, {"limit", 1}});
+    result = tools.Execute("read", {{"path", "hello.txt"}, {"offset", 2}, {"limit", 1}},
+                           context);
     Expect(result.ok, "read with offset should succeed");
     Expect(result.text == "line2", "read should honor offset/limit");
 
     // write
-    result = tools.Execute("write", {{"path", "out.txt"}, {"content", "hello world"}});
+    result = tools.Execute("write", {{"path", "out.txt"}, {"content", "hello world"}},
+                           context);
     Expect(result.ok, "write should succeed");
     Expect(ReadAll(dir / "out.txt") == "hello world", "write should persist content");
 
     // edit 唯一替换
     WriteFile(dir / "edit.txt", "foo bar baz");
-    result = tools.Execute("edit", {{"path", "edit.txt"},
-                                    {"oldText", "bar"},
-                                    {"newText", "qux"}});
+    result = tools.Execute("edit",
+                           {{"path", "edit.txt"}, {"oldText", "bar"}, {"newText", "qux"}},
+                           context);
     Expect(result.ok, "edit should succeed");
     Expect(ReadAll(dir / "edit.txt") == "foo qux baz", "edit should replace oldText");
 
     // edit oldText 不存在
-    result = tools.Execute("edit", {{"path", "edit.txt"},
-                                    {"oldText", "missing"},
-                                    {"newText", "x"}});
+    result = tools.Execute("edit",
+                           {{"path", "edit.txt"}, {"oldText", "missing"}, {"newText", "x"}},
+                           context);
     Expect(!result.ok, "edit should fail when oldText is absent");
 
     // edit oldText 不唯一
     WriteFile(dir / "dup.txt", "bar foo bar");
-    result = tools.Execute("edit", {{"path", "dup.txt"},
-                                    {"oldText", "bar"},
-                                    {"newText", "x"}});
+    result = tools.Execute("edit",
+                           {{"path", "dup.txt"}, {"oldText", "bar"}, {"newText", "x"}},
+                           context);
     Expect(!result.ok, "edit should fail when oldText is not unique");
 
     std::filesystem::remove_all(dir);
@@ -124,18 +142,19 @@ void TestReadWriteEdit() {
 void TestBash() {
     const auto dir = TempDir();
     aiagent::tools::LocalCodingTools tools(dir.string());
+    const auto context = FullContext();
 
-    auto result = tools.Execute("bash", {{"command", "echo hello"}});
+    auto result = tools.Execute("bash", {{"command", "echo hello"}}, context);
     Expect(result.ok, "bash echo should succeed");
     Expect(result.text.find("hello") != std::string::npos, "bash should capture stdout");
 
-    result = tools.Execute("bash", {{"command", "exit 3"}});
+    result = tools.Execute("bash", {{"command", "exit 3"}}, context);
     Expect(!result.ok, "bash non-zero exit should fail");
     Expect(result.error.find("code 3") != std::string::npos,
            "bash should report the exit code");
 
     // 超时：sleep 5s，timeout 1s。
-    result = tools.Execute("bash", {{"command", "sleep 5"}, {"timeout", 1}});
+    result = tools.Execute("bash", {{"command", "sleep 5"}, {"timeout", 1}}, context);
     Expect(!result.ok, "bash timeout should fail");
     Expect(result.error.find("timed out") != std::string::npos,
            "bash should report timeout");
@@ -154,11 +173,12 @@ void TestComposite() {
     Expect(tools[0].name == "fake_a" && tools[1].name == "fake_b",
            "composite should keep first provider's tools in order");
 
-    const auto result = composite->Execute("fake_b", nlohmann::json::object());
+    const auto context = FullContext();
+    const auto result = composite->Execute("fake_b", nlohmann::json::object(), context);
     Expect(result.ok && result.text == "executed-fake_b",
            "composite should route execution by name");
 
-    const auto unknown = composite->Execute("nope", nlohmann::json::object());
+    const auto unknown = composite->Execute("nope", nlohmann::json::object(), context);
     Expect(!unknown.ok, "composite should fail on unknown tool");
 }
 
@@ -172,59 +192,61 @@ void TestSandbox() {
     WriteFile(outside / "secret.txt", "secret");
 
     aiagent::tools::LocalCodingTools guarded(work.string());
+    const auto restricted = ContextFor(aiagent::permissions::PermissionMode::kWorkspace);
 
     // 工作目录内正常读写。
-    auto result = guarded.Execute("read", {{"path", "inside.txt"}});
+    auto result = guarded.Execute("read", {{"path", "inside.txt"}}, restricted);
     Expect(result.ok && result.text == "inside",
            "sandbox should allow files inside cwd");
 
     // `..` 规范化后仍在工作目录内，应允许。
-    result = guarded.Execute("read", {{"path", "../work/inside.txt"}});
+    result = guarded.Execute("read", {{"path", "../work/inside.txt"}}, restricted);
     Expect(result.ok && result.text == "inside",
            "sandbox should allow paths that normalize back inside cwd");
 
     // 相对路径逃逸。
-    result = guarded.Execute("read", {{"path", "../outside/secret.txt"}});
+    result = guarded.Execute("read", {{"path", "../outside/secret.txt"}}, restricted);
     Expect(!result.ok, "sandbox should block ../ escape");
     Expect(result.error.find("sandbox") != std::string::npos,
            "escape error should mention sandbox");
 
     // 绝对路径逃逸（write 不得创建文件）。
-    result = guarded.Execute("write", {{"path", (outside / "hack.txt").string()},
-                                       {"content", "x"}});
+    result = guarded.Execute("write",
+                             {{"path", (outside / "hack.txt").string()}, {"content", "x"}},
+                             restricted);
     Expect(!result.ok, "sandbox should block absolute path outside");
     Expect(!std::filesystem::exists(outside / "hack.txt"),
            "blocked write must not create file");
 
     // edit 逃逸。
-    result = guarded.Execute("edit", {{"path", (outside / "secret.txt").string()},
-                                       {"oldText", "secret"},
-                                       {"newText", "x"}});
+    result = guarded.Execute("edit",
+                             {{"path", (outside / "secret.txt").string()},
+                              {"oldText", "secret"},
+                              {"newText", "x"}},
+                             restricted);
     Expect(!result.ok, "sandbox should block edit outside");
 
     // 符号链接逃逸：工作目录内的链接指向外部，canonical 化后应被拒绝。
     std::error_code ec;
     std::filesystem::create_symlink(outside / "secret.txt", work / "link.txt", ec);
     if (!ec) {
-        result = guarded.Execute("read", {{"path", "link.txt"}});
+        result = guarded.Execute("read", {{"path", "link.txt"}}, restricted);
         Expect(!result.ok, "sandbox should block symlink escape");
     }
 
-    // 配置额外放行的根目录。
-    aiagent::tools::SandboxPolicy policy;
-    policy.enabled = true;
-    policy.roots = {outside.string()};
-    aiagent::tools::LocalCodingTools allowed(work.string(), policy);
-    result = allowed.Execute("read", {{"path", (outside / "secret.txt").string()}});
+    // full 策略不限制范围（allow_outside）。
+    aiagent::tools::LocalCodingTools unrestricted(work.string());
+    result = unrestricted.Execute("read", {{"path", (outside / "secret.txt").string()}},
+                                  FullContext());
     Expect(result.ok && result.text == "secret",
-           "sandbox_roots should allow extra root");
+           "full policy should allow outside path");
 
-    // 关闭沙箱时允许任意路径。
-    aiagent::tools::SandboxPolicy off;
-    off.enabled = false;
-    aiagent::tools::LocalCodingTools unrestricted(work.string(), off);
-    result = unrestricted.Execute("read", {{"path", (outside / "secret.txt").string()}});
-    Expect(result.ok, "disabled sandbox should allow outside path");
+    // 额外放行的根目录：构造时传入 extra_roots。
+    aiagent::tools::LocalCodingTools allowed(work.string(), {outside.string()});
+    result = allowed.Execute("read", {{"path", (outside / "secret.txt").string()}},
+                             restricted);
+    Expect(result.ok && result.text == "secret",
+           "extra_roots should allow extra root under restricted policy");
 
     std::filesystem::remove_all(parent);
 }
@@ -239,17 +261,19 @@ void TestWorkingDirectoryOverride() {
     WriteFile(dir_b / "hello.txt", "from-b");
 
     aiagent::tools::LocalCodingTools tools(dir_a.string());
+    const auto restricted = aiagent::permissions::PermissionMode::kWorkspace;
 
     // 默认 cwd 为 dir_a。
-    auto result = tools.Execute("read", {{"path", "hello.txt"}});
+    auto result = tools.Execute("read", {{"path", "hello.txt"}}, ContextFor(restricted));
     Expect(result.ok && result.text == "from-a", "default cwd should be dir_a");
 
-    // 显式传入 per-request cwd 后应改为 dir_b。
-    result = tools.Execute("read", {{"path", "hello.txt"}}, dir_b.string());
+    // 显式 per-request cwd 后应改为 dir_b（沙箱根随之变为 dir_b）。
+    result = tools.Execute("read", {{"path", "hello.txt"}},
+                           ContextFor(restricted, dir_b.string()));
     Expect(result.ok && result.text == "from-b",
            "per-request working_directory should override default cwd");
 
-    result = tools.Execute("bash", {{"command", "pwd"}}, dir_b.string());
+    result = tools.Execute("bash", {{"command", "pwd"}}, FullContext(dir_b.string()));
     Expect(result.ok && result.text.find(dir_b.string()) != std::string::npos,
            "bash should run in per-request working_directory");
 

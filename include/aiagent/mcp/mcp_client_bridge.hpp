@@ -25,7 +25,7 @@ public:
     std::vector<llm::ToolSpec> ListTools() override;
     tools::ToolExecutionResult Execute(const std::string& name,
                                        const nlohmann::json& arguments,
-                                       const std::string& working_directory = {}) override;
+                                       const tools::ToolContext& context) override;
 
 private:
     class Impl;

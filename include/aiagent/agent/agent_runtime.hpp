@@ -14,9 +14,19 @@
 #include "aiagent/agent/compaction.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/permissions/permission_policy.hpp"
+#include "aiagent/permissions/permission_store.hpp"
+#include "aiagent/tools/tool_context.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
 namespace aiagent::agent {
+
+// 权限模式配置（来自 [permissions]）。
+struct PermissionSettings {
+    permissions::PermissionMode default_mode = permissions::PermissionMode::kConfirm;
+    permissions::PermissionMode max_mode = permissions::PermissionMode::kFull;
+    bool allow_full_access = true;
+};
 
 // 把 A2A Message 历史翻译成 LLM messages，并执行一次对话。
 // 不负责 HTTP/任务存储，由 A2A 层把 TaskManager 与它接起来。
@@ -34,6 +44,10 @@ public:
     // 可选：注入 MCP/工具提供者后，Agent 会自动执行 model 的 tool_calls。
     void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);
     void SetMaxToolRounds(int rounds);
+
+    // 可选：注入按路径权限存储与默认设置。未注入时使用 default_mode。
+    void SetPermissionStore(std::shared_ptr<permissions::PermissionStore> store);
+    void SetPermissionSettings(const PermissionSettings& settings);
 
     // 可选：注入项目指令加载器（AGENTS.md）与无 cwd 请求的默认工作目录。
     void SetProjectInstructionsLoader(
@@ -89,9 +103,21 @@ private:
                              const std::string& working_directory,
                              const CancelCallback& should_cancel);
 
-    // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录。
+    // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录 + 权限模式。
     llm::ChatMessage BuildSystemMessage(
             const std::string& working_directory) const;
+
+    // 解析某工作目录当前生效的权限档位（含 max_mode/allow_full_access 夹取）。
+    permissions::PermissionMode ResolvePermissionMode(
+            const std::string& working_directory) const;
+
+    // 构造本次请求的工具上下文（工作目录 + 展开后的权限策略）。
+    tools::ToolContext BuildToolContext(const std::string& working_directory) const;
+
+    // 工具本身是否被权限策略允许；空字符串表示允许，否则为拒绝原因。
+    std::string CheckToolPermission(
+            const std::string& tool_name,
+            const permissions::PermissionPolicy& policy) const;
 
     // 模型调用前的阈值压缩。命中阈值时把较早的消息摘要成一条 user 消息，
     // 并重置 usage 跟踪；同一批消息（size 未变）不重复压缩。
@@ -109,6 +135,8 @@ private:
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
     std::shared_ptr<ProjectInstructionsLoader> instructions_loader_;
+    std::shared_ptr<permissions::PermissionStore> permission_store_;
+    PermissionSettings permission_settings_;
     std::string fallback_working_directory_;
     std::string system_prompt_;
     // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。

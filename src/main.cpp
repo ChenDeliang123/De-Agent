@@ -28,10 +28,12 @@
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
+#include "aiagent/app_paths.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/log.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
+#include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
 #include "aiagent/version.hpp"
@@ -314,7 +316,7 @@ int main(int argc, char** argv) {
         aiagent::agent::HistoryCache history_cache;
 
         // 内置 coding 工具（read/write/edit/bash）+ 可选的 MCP 工具，合并为一个 provider。
-        // 文件工具默认启用路径沙箱：只允许访问本次请求的工作目录（可额外放行配置的根）。
+        // 文件工具的路径范围与能力由「权限模式」逐请求决定（见 permissions 模块）。
         aiagent::ToolsConfig tools_config;
         std::string tools_error;
         const auto parsed_tools =
@@ -322,19 +324,66 @@ int main(int argc, char** argv) {
         if (parsed_tools.has_value()) {
             tools_config = *parsed_tools;
         }
-        aiagent::tools::SandboxPolicy sandbox_policy;
-        sandbox_policy.enabled = tools_config.sandbox_enabled;
-        sandbox_policy.roots = tools_config.sandbox_roots;
-        auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
-        tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
-                std::filesystem::current_path().string(), sandbox_policy));
-        runtime.SetToolProvider(tools);
+
+        // 用户级数据目录与权限存储。
+        aiagent::StorageConfig storage_config;
+        std::string storage_error;
+        if (const auto parsed =
+                    aiagent::LoadStorageConfigFile(options.config_path, &storage_error);
+            parsed.has_value()) {
+            storage_config = *parsed;
+        }
+        const aiagent::AppPaths app_paths =
+                aiagent::ResolveAppPaths(storage_config.data_dir);
+        std::string permissions_path = storage_config.permissions_file;
+        if (permissions_path.empty()) {
+            permissions_path = app_paths.permissions_file;
+        }
+        if (permissions_path.empty()) {
+            std::filesystem::path fallback = db_path;
+            fallback.replace_filename("permissions.json");
+            permissions_path = fallback.string();
+        }
+        auto permission_store =
+                std::make_shared<aiagent::permissions::PermissionStore>(permissions_path);
+
+        aiagent::PermissionsConfig permissions_config;
+        std::string permissions_error;
+        if (const auto parsed = aiagent::LoadPermissionsConfigFile(options.config_path,
+                                                                  &permissions_error);
+            parsed.has_value()) {
+            permissions_config = *parsed;
+        }
+        aiagent::agent::PermissionSettings permission_settings;
+        if (const auto mode = aiagent::permissions::ParseMode(permissions_config.default_mode);
+            mode.has_value()) {
+            permission_settings.default_mode = *mode;
+        }
+        if (const auto mode = aiagent::permissions::ParseMode(permissions_config.max_mode);
+            mode.has_value()) {
+            permission_settings.max_mode = *mode;
+        }
+        permission_settings.allow_full_access = permissions_config.allow_full_access;
+        if (!tools_config.sandbox_enabled) {
+            permission_settings.default_mode = aiagent::permissions::PermissionMode::kFull;
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "main",
+                    "[tools] sandbox_enabled=false is deprecated; default permission "
+                    "mode forced to full");
+        }
+        runtime.SetPermissionStore(permission_store);
+        runtime.SetPermissionSettings(permission_settings);
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "main",
-                std::string("file tool sandbox: ") +
-                        (sandbox_policy.enabled ? "enabled" : "disabled") +
-                        " extra_roots=" +
-                        std::to_string(sandbox_policy.roots.size()));
+                "permissions file=" + permissions_path + " default_mode=" +
+                        aiagent::permissions::ModeName(permission_settings.default_mode) +
+                        " allow_full_access=" +
+                        (permission_settings.allow_full_access ? "true" : "false"));
+
+        auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
+        tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
+                std::filesystem::current_path().string(), tools_config.sandbox_roots));
+        runtime.SetToolProvider(tools);
 
         // MCP：优先读 [mcp] 配置；没有时尝试根目录 vendor 的本地构建。
         aiagent::MCPConfig mcp_config;

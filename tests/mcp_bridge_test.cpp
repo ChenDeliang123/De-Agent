@@ -96,12 +96,14 @@ int main() {
         Expect(!tools_again.empty() && tools_again.front().name == tools.front().name,
                "cached tool list should match the first call");
 
-        const auto execution = bridge->Execute("calculate", {{"expr", "1+1"}});
+        const auto execution =
+                bridge->Execute("calculate", {{"expr", "1+1"}}, aiagent::tools::ToolContext{});
         Expect(execution.ok, "tools/call should succeed");
         Expect(execution.text == "4", "tools/call should return text 4");
 
         // 大响应跨多个 read 块，验证缓冲读拼接正确（200 KiB 单行）。
-        const auto big = bridge->Execute("bigtext", nlohmann::json::object());
+        const auto big =
+                bridge->Execute("bigtext", nlohmann::json::object(), aiagent::tools::ToolContext{});
         Expect(big.ok, "bigtext tools/call should succeed");
         Expect(big.text.size() == static_cast<std::size_t>(200 * 1024),
                "bigtext should return the full 200 KiB payload");

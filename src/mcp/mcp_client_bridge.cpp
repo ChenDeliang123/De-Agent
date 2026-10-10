@@ -243,7 +243,7 @@ public:
 
     tools::ToolExecutionResult Execute(const std::string& name,
                                        const nlohmann::json& arguments,
-                                       const std::string&) {
+                                       const tools::ToolContext&) {
         const auto started = std::chrono::steady_clock::now();
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kDebug, "mcp",
@@ -400,8 +400,8 @@ bool MCPClientBridge::IsRunning() const { return impl_->IsRunning(); }
 std::vector<llm::ToolSpec> MCPClientBridge::ListTools() { return impl_->ListTools(); }
 tools::ToolExecutionResult MCPClientBridge::Execute(const std::string& name,
                                                     const nlohmann::json& arguments,
-                                                    const std::string& working_directory) {
-    return impl_->Execute(name, arguments, working_directory);
+                                                    const tools::ToolContext& context) {
+    return impl_->Execute(name, arguments, context);
 }
 
 }  // namespace aiagent::mcp

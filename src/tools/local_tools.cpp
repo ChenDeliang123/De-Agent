@@ -121,11 +121,12 @@ fs::path CanonicalOrNormal(const fs::path& path) {
 }  // namespace
 
 LocalCodingTools::LocalCodingTools(std::string working_directory,
-                                   SandboxPolicy sandbox)
-    : cwd_(std::move(working_directory)), sandbox_(std::move(sandbox)) {}
+                                   std::vector<std::string> extra_roots)
+    : cwd_(std::move(working_directory)), extra_roots_(std::move(extra_roots)) {}
 
 bool LocalCodingTools::ResolvePath(const std::string& path,
                                    const std::string& working_directory,
+                                   const permissions::PermissionPolicy& policy,
                                    std::string* resolved,
                                    std::string* error) const {
     if (path.empty()) {
@@ -143,14 +144,14 @@ bool LocalCodingTools::ResolvePath(const std::string& path,
     }
     const fs::path effective = CanonicalOrNormal(target);
 
-    if (!sandbox_.enabled) {
+    if (policy.allow_outside) {
         *resolved = effective.string();
         return true;
     }
 
     std::vector<fs::path> roots;
     roots.push_back(CanonicalOrNormal(base));
-    for (const std::string& extra : sandbox_.roots) {
+    for (const std::string& extra : extra_roots_) {
         if (extra.empty()) {
             continue;
         }
@@ -237,14 +238,15 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
 
 ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
                                               const nlohmann::json& arguments,
-                                              const std::string& working_directory) {
+                                              const ToolContext& context) {
     ToolExecutionResult result;
+    const std::string& working_directory = context.working_directory;
 
     if (name == "read") {
         std::string path;
         std::string resolve_error;
         if (!ResolvePath(arguments.value("path", std::string()), working_directory,
-                         &path, &resolve_error)) {
+                         context.policy, &path, &resolve_error)) {
             result.error = resolve_error;
             return result;
         }
@@ -275,7 +277,7 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         std::string path;
         std::string resolve_error;
         if (!ResolvePath(arguments.value("path", std::string()), working_directory,
-                         &path, &resolve_error)) {
+                         context.policy, &path, &resolve_error)) {
             result.error = resolve_error;
             return result;
         }
@@ -308,7 +310,7 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         std::string path;
         std::string resolve_error;
         if (!ResolvePath(arguments.value("path", std::string()), working_directory,
-                         &path, &resolve_error)) {
+                         context.policy, &path, &resolve_error)) {
             result.error = resolve_error;
             return result;
         }

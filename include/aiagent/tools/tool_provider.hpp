@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "aiagent/llm/deepseek_types.hpp"
+#include "aiagent/tools/tool_context.hpp"
 
 namespace aiagent::tools {
 
@@ -23,7 +24,7 @@ public:
     virtual std::vector<llm::ToolSpec> ListTools() = 0;
     virtual ToolExecutionResult Execute(const std::string& name,
                                         const nlohmann::json& arguments,
-                                        const std::string& working_directory = {}) = 0;
+                                        const ToolContext& context) = 0;
 };
 
 }  // namespace aiagent::tools

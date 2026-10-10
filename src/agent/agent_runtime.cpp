@@ -31,6 +31,14 @@ std::string RoleToLlmRole(a2a::models::Role role) {
     }
 }
 
+void AppendPermissionMode(std::string& content, permissions::PermissionMode mode) {
+    content += "\n\nCurrent permission mode: ";
+    content += permissions::ModeName(mode);
+    content += " (";
+    content += permissions::DescribePolicy(mode);
+    content += ").";
+}
+
 void EmitCompactionEvent(const CompactionRecord& record,
                          const AgentEventCallback& on_event) {
     if (!on_event) {
@@ -59,6 +67,79 @@ void AgentRuntime::SetToolProvider(std::shared_ptr<tools::IToolProvider> tools) 
 
 void AgentRuntime::SetMaxToolRounds(int rounds) {
     max_tool_rounds_ = rounds > 0 ? rounds : 0;
+}
+
+void AgentRuntime::SetPermissionStore(
+        std::shared_ptr<permissions::PermissionStore> store) {
+    permission_store_ = std::move(store);
+}
+
+void AgentRuntime::SetPermissionSettings(const PermissionSettings& settings) {
+    permission_settings_ = settings;
+}
+
+permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
+        const std::string& working_directory) const {
+    permissions::PermissionMode mode = permission_settings_.default_mode;
+    const std::string directory =
+            working_directory.empty() ? fallback_working_directory_ : working_directory;
+    if (permission_store_ != nullptr && !directory.empty()) {
+        if (const auto entry = permission_store_->Resolve(directory);
+            entry.has_value()) {
+            mode = entry->mode;
+        }
+    }
+    // allow_full_access=false 时把 full 夹到 workspace。
+    if (mode == permissions::PermissionMode::kFull &&
+        !permission_settings_.allow_full_access) {
+        mode = permissions::PermissionMode::kWorkspace;
+    }
+    return mode;
+}
+
+tools::ToolContext AgentRuntime::BuildToolContext(
+        const std::string& working_directory) const {
+    tools::ToolContext context;
+    context.working_directory =
+            working_directory.empty() ? fallback_working_directory_ : working_directory;
+    context.policy =
+            permissions::PolicyForMode(ResolvePermissionMode(working_directory));
+    return context;
+}
+
+std::string AgentRuntime::CheckToolPermission(
+        const std::string& tool_name,
+        const permissions::PermissionPolicy& policy) const {
+    if (tool_name == "read") {
+        if (!policy.allow_read) {
+            return "permission denied: read is disabled by the current permission mode";
+        }
+        return {};
+    }
+    if (tool_name == "write" || tool_name == "edit") {
+        if (!policy.allow_write) {
+            return "permission denied: file writes are disabled by the current permission mode";
+        }
+        if (policy.require_confirm_write) {
+            return "permission denied: writes require approval, which is not available yet; "
+                   "use /permissions workspace or /permissions full to change the mode";
+        }
+        return {};
+    }
+    if (tool_name == "bash") {
+        if (!policy.allow_command) {
+            return "permission denied: command execution is disabled by the current permission mode";
+        }
+        if (policy.require_confirm_command) {
+            return "permission denied: command execution requires approval, which is not "
+                   "available yet; use /permissions full to allow commands (this disables "
+                   "the path sandbox)";
+        }
+        return {};
+    }
+    // 未分类工具（含 MCP）：M1 暂不拦截，保持既有行为；工具分类与
+    // “非 full 下需确认”将在 M4 引入。
+    return {};
 }
 
 void AgentRuntime::SetProjectInstructionsLoader(
@@ -91,6 +172,7 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
     if (!working_directory.empty()) {
         system.content += "\n\nCurrent working directory: " + working_directory;
     }
+    AppendPermissionMode(system.content, ResolvePermissionMode(working_directory));
     return system;
 }
 
@@ -256,11 +338,14 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
                     " event=request_start messages=" + std::to_string(history.size()));
 
+    const tools::ToolContext tool_context = BuildToolContext({});
+
     std::vector<llm::ChatMessage> chat_messages;
 
     llm::ChatMessage system;
     system.role = "system";
     system.content = system_prompt_;
+    AppendPermissionMode(system.content, ResolvePermissionMode({}));
     chat_messages.push_back(std::move(system));
 
     bool has_user_message = false;
@@ -362,15 +447,27 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
                     "run=" + run_id + " event=tool_start name=" + call.name +
                             " args_bytes=" + std::to_string(call.arguments.size()));
             tools::ToolExecutionResult execution_result;
-            try {
-                nlohmann::json arguments = nlohmann::json::object();
-                if (!call.arguments.empty()) {
-                    arguments = nlohmann::json::parse(call.arguments);
-                }
-                execution_result = tools_->Execute(call.name, arguments);
-            } catch (const std::exception& e) {
+            const std::string denial =
+                    CheckToolPermission(call.name, tool_context.policy);
+            if (!denial.empty()) {
                 execution_result.ok = false;
-                execution_result.error = e.what();
+                execution_result.error = denial;
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kWarning, "agent_runtime",
+                        "run=" + run_id + " event=permission_denied tool=" +
+                                call.name + " reason=" + denial);
+            } else {
+                try {
+                    nlohmann::json arguments = nlohmann::json::object();
+                    if (!call.arguments.empty()) {
+                        arguments = nlohmann::json::parse(call.arguments);
+                    }
+                    execution_result =
+                            tools_->Execute(call.name, arguments, tool_context);
+                } catch (const std::exception& e) {
+                    execution_result.ok = false;
+                    execution_result.error = e.what();
+                }
             }
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                              std::chrono::steady_clock::now() - tool_started)
@@ -443,6 +540,7 @@ std::string AgentRuntime::RunStreaming(
                     " event=request_start streaming=true messages=" +
                     std::to_string(history.size()));
 
+    const tools::ToolContext tool_context = BuildToolContext(working_directory);
     std::vector<llm::ChatMessage> chat_messages;
     chat_messages.push_back(BuildSystemMessage(working_directory));
 
@@ -592,16 +690,27 @@ std::string AgentRuntime::RunStreaming(
             }
 
             tools::ToolExecutionResult execution_result;
-            try {
-                nlohmann::json arguments = nlohmann::json::object();
-                if (!call.arguments.empty()) {
-                    arguments = nlohmann::json::parse(call.arguments);
-                }
-                execution_result =
-                        tools_->Execute(call.name, arguments, working_directory);
-            } catch (const std::exception& e) {
+            const std::string denial =
+                    CheckToolPermission(call.name, tool_context.policy);
+            if (!denial.empty()) {
                 execution_result.ok = false;
-                execution_result.error = e.what();
+                execution_result.error = denial;
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kWarning, "agent_runtime",
+                        "run=" + run_id + " event=permission_denied tool=" +
+                                call.name + " reason=" + denial);
+            } else {
+                try {
+                    nlohmann::json arguments = nlohmann::json::object();
+                    if (!call.arguments.empty()) {
+                        arguments = nlohmann::json::parse(call.arguments);
+                    }
+                    execution_result =
+                            tools_->Execute(call.name, arguments, tool_context);
+                } catch (const std::exception& e) {
+                    execution_result.ok = false;
+                    execution_result.error = e.what();
+                }
             }
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                              std::chrono::steady_clock::now() - tool_started)

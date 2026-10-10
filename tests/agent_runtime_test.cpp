@@ -168,7 +168,7 @@ public:
     aiagent::tools::ToolExecutionResult Execute(
             const std::string&,
             const nlohmann::json&,
-            const std::string&) override {
+            const aiagent::tools::ToolContext&) override {
         aiagent::tools::ToolExecutionResult result;
         result.ok = true;
         result.text = "ok";
@@ -187,13 +187,113 @@ public:
     aiagent::tools::ToolExecutionResult Execute(
             const std::string&,
             const nlohmann::json&,
-            const std::string&) override {
+            const aiagent::tools::ToolContext&) override {
         aiagent::tools::ToolExecutionResult result;
         result.ok = true;
         result.text = std::string(3000, 'x');
         return result;
     }
 };
+
+// 记录 read/write/bash 调用次数的 provider（工具名与内置工具一致）。
+class RecordingPermissionProvider final : public aiagent::tools::IToolProvider {
+public:
+    int read_calls = 0;
+    int write_calls = 0;
+    int bash_calls = 0;
+
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        std::vector<aiagent::llm::ToolSpec> tools;
+        for (const char* name : {"read", "write", "bash"}) {
+            aiagent::llm::ToolSpec spec;
+            spec.name = name;
+            spec.parameters = nlohmann::json::object();
+            tools.push_back(std::move(spec));
+        }
+        return tools;
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string& name,
+            const nlohmann::json&,
+            const aiagent::tools::ToolContext&) override {
+        if (name == "read") {
+            ++read_calls;
+        } else if (name == "write") {
+            ++write_calls;
+        } else if (name == "bash") {
+            ++bash_calls;
+        }
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = true;
+        result.text = "ok";
+        return result;
+    }
+};
+
+// 第一次调用请求指定工具，第二次返回最终回复。
+class OneShotToolModel final : public aiagent::llm::IModelClient {
+public:
+    explicit OneShotToolModel(std::string tool_name)
+        : tool_name_(std::move(tool_name)) {}
+
+    int calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        if (calls == 1) {
+            choice.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-1", tool_name_, "{}"});
+        } else {
+            choice.content = "done";
+        }
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++calls;
+        aiagent::llm::StreamEvent event;
+        if (calls == 1) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-1", tool_name_, "{}"});
+        } else {
+            event.content = "done";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+
+private:
+    std::string tool_name_;
+};
+
+void RunPermissionScenario(aiagent::permissions::PermissionMode mode,
+                           const std::string& tool_name,
+                           const std::shared_ptr<RecordingPermissionProvider>& provider) {
+    auto model = std::make_shared<OneShotToolModel>(tool_name);
+    aiagent::agent::AgentRuntime runtime(model);
+    runtime.SetToolProvider(provider);
+    aiagent::agent::PermissionSettings settings;
+    settings.default_mode = mode;
+    runtime.SetPermissionSettings(settings);
+    a2a::models::Message user = a2a::models::MakeTextMessage(
+            a2a::models::Role::kUser, "run tool", "text/plain");
+    runtime.HandleMessage(user, {user}, "ctx-permission");
+}
 
 // 第一次流式调用抛出“上下文超长”，压缩后重试成功。
 class OverflowOnceModel final : public aiagent::llm::IModelClient {
@@ -847,6 +947,51 @@ int main() {
                "compaction callback should fire once per compaction");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime compaction event test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        using aiagent::permissions::PermissionMode;
+        // confirm：write 与 bash 均需确认，M1 无审批通道 -> 拒绝；read 允许。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kConfirm, "write", provider);
+            Expect(provider->write_calls == 0, "confirm denies write without approval");
+        }
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kConfirm, "bash", provider);
+            Expect(provider->bash_calls == 0, "confirm denies bash without approval");
+        }
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kConfirm, "read", provider);
+            Expect(provider->read_calls == 1, "confirm allows read");
+        }
+        // workspace：write 允许，bash 仍拒绝。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kWorkspace, "write", provider);
+            Expect(provider->write_calls == 1, "workspace allows write");
+        }
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kWorkspace, "bash", provider);
+            Expect(provider->bash_calls == 0, "workspace denies bash without approval");
+        }
+        // full：write 与 bash 均允许。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kFull, "write", provider);
+            Expect(provider->write_calls == 1, "full allows write");
+        }
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kFull, "bash", provider);
+            Expect(provider->bash_calls == 1, "full allows bash");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime permission test failed: " << e.what() << '\n';
         return 1;
     }
 
