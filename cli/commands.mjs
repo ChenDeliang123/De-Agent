@@ -382,10 +382,13 @@ export const commands = [
         return;
       }
       try {
+        ctx.renderer?.wait("compacting");
         await compactSession(ctx.backend, ctx.state.sessionId, ctx.state.cwd);
+        ctx.renderer?.stopWaiting();
         ctx.print("context compacted");
         ctx.log("info", "cli", `event=compact session=${ctx.state.sessionId}`);
       } catch (error) {
+        ctx.renderer?.stopWaiting();
         ctx.print(`compact failed: ${error.message}`);
         ctx.log("error", "cli", `event=compact_failed message=${error.message}`);
       }

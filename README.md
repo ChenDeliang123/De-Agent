@@ -218,6 +218,10 @@ de logs      # 查看后端日志
 流式输出期间可按 `Esc` 中断当前任务；CLI 会调用后端的取消接口，Agent
 会在下一次模型轮次或工具执行前停止。
 
+等待输出时会显示一个转圈动画（如 `⠋ thinking...`、`⠙ bash running...`，
+超过 1 秒带计时），输出一到即自动清掉，便于区分“卡死”与“在等待”。
+该动画只在 TTY 上绘制，管道/重定向时自动关闭。
+
 输入行里按 `Ctrl+G` 会把当前内容写入临时 `prompt.md`，交给外部编辑器
 （`--editor` > `conf/cli.ini` 的 `editor.external` > `$AIAGENT_EDITOR` >
 `$VISUAL` > `$EDITOR`，默认 `nano`，Windows 为 `notepad`）编辑，保存退出后
