@@ -62,6 +62,7 @@ struct StorageConfig {
 struct PermissionsConfig {
     std::string default_mode = "confirm";
     std::string max_mode = "full";
+    std::string non_interactive_max_mode = "workspace";
     bool allow_full_access = true;
 };
 

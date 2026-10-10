@@ -79,7 +79,7 @@ void AgentRuntime::SetPermissionSettings(const PermissionSettings& settings) {
 }
 
 permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
-        const std::string& working_directory) const {
+        const std::string& working_directory, bool interactive) const {
     permissions::PermissionMode mode = permission_settings_.default_mode;
     const std::string directory =
             working_directory.empty() ? fallback_working_directory_ : working_directory;
@@ -89,18 +89,27 @@ permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
             mode = entry->mode;
         }
     }
-    // allow_full_access=false 时把 full 夹到 workspace。
-    return permissions::ClampMode(mode, permission_settings_.max_mode,
-                                  permission_settings_.allow_full_access);
+    // 非交互调用方：取 max_mode 与 non_interactive_max_mode 中更严的一档，
+    // 且不允许 full。
+    permissions::PermissionMode max_mode = permission_settings_.max_mode;
+    bool allow_full = permission_settings_.allow_full_access;
+    if (!interactive) {
+        if (permissions::ModeRank(permission_settings_.non_interactive_max_mode) <
+            permissions::ModeRank(max_mode)) {
+            max_mode = permission_settings_.non_interactive_max_mode;
+        }
+        allow_full = false;
+    }
+    return permissions::ClampMode(mode, max_mode, allow_full);
 }
 
 tools::ToolContext AgentRuntime::BuildToolContext(
-        const std::string& working_directory) const {
+        const std::string& working_directory, bool interactive) const {
     tools::ToolContext context;
     context.working_directory =
             working_directory.empty() ? fallback_working_directory_ : working_directory;
     context.policy =
-            permissions::PolicyForMode(ResolvePermissionMode(working_directory));
+            permissions::PolicyForMode(ResolvePermissionMode(working_directory, interactive));
     return context;
 }
 
@@ -335,14 +344,14 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
                     " event=request_start messages=" + std::to_string(history.size()));
 
-    const tools::ToolContext tool_context = BuildToolContext({});
+    const tools::ToolContext tool_context = BuildToolContext({}, /*interactive=*/false);
 
     std::vector<llm::ChatMessage> chat_messages;
 
     llm::ChatMessage system;
     system.role = "system";
     system.content = system_prompt_;
-    AppendPermissionMode(system.content, ResolvePermissionMode({}));
+    AppendPermissionMode(system.content, ResolvePermissionMode({}, /*interactive=*/false));
     chat_messages.push_back(std::move(system));
 
     bool has_user_message = false;

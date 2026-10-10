@@ -127,12 +127,32 @@ void TestCanonicalization() {
     std::filesystem::remove_all(dir);
 }
 
+void TestSymlinkCanonicalization() {
+    const auto dir = TempDir();
+    const auto real = dir / "real";
+    std::filesystem::create_directories(real);
+    const auto link = dir / "link";
+    std::error_code ec;
+    std::filesystem::create_directory_symlink(real, link, ec);
+    if (ec) {
+        std::filesystem::remove_all(dir);
+        return;  // 平台不支持符号链接则跳过
+    }
+    PermissionStore store;
+    store.Set(link.string(), PermissionMode::kWorkspace);
+    // 通过真实路径应能命中（canonical 后同一路径）。
+    Expect(store.Resolve(real.string()).has_value(),
+           "symlink canonicalizes to the real path");
+    std::filesystem::remove_all(dir);
+}
+
 }  // namespace
 
 int main() {
     TestMemoryStore();
     TestFilePersistence();
     TestCanonicalization();
+    TestSymlinkCanonicalization();
 
     if (g_failures != 0) {
         std::cerr << "permission store test failed with " << g_failures

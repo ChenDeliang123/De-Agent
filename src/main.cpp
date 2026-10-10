@@ -363,6 +363,12 @@ int main(int argc, char** argv) {
             mode.has_value()) {
             permission_settings.max_mode = *mode;
         }
+        if (const auto mode =
+                    aiagent::permissions::ParseMode(
+                            permissions_config.non_interactive_max_mode);
+            mode.has_value()) {
+            permission_settings.non_interactive_max_mode = *mode;
+        }
         permission_settings.allow_full_access = permissions_config.allow_full_access;
         if (!tools_config.sandbox_enabled) {
             permission_settings.default_mode = aiagent::permissions::PermissionMode::kFull;

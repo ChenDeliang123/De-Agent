@@ -683,6 +683,8 @@ std::optional<PermissionsConfig> ParsePermissionsConfig(const std::string& conte
             config.default_mode = value;
         } else if (key == "max_mode") {
             config.max_mode = value;
+        } else if (key == "non_interactive_max_mode") {
+            config.non_interactive_max_mode = value;
         } else if (key == "allow_full_access") {
             config.allow_full_access = Lower(value) == "true" || value == "1";
         }

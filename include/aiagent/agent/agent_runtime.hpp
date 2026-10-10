@@ -26,6 +26,9 @@ struct PermissionSettings {
     permissions::PermissionMode default_mode = permissions::PermissionMode::kConfirm;
     permissions::PermissionMode max_mode = permissions::PermissionMode::kFull;
     bool allow_full_access = true;
+    // 非交互调用方（A2A / 同步接口）允许的最高档位，且永远不会拿到 full。
+    permissions::PermissionMode non_interactive_max_mode =
+            permissions::PermissionMode::kWorkspace;
 };
 
 // 把 A2A Message 历史翻译成 LLM messages，并执行一次对话。
@@ -108,11 +111,13 @@ private:
             const std::string& working_directory) const;
 
     // 解析某工作目录当前生效的权限档位（含 max_mode/allow_full_access 夹取）。
+    // interactive=false（A2A / 同步接口）时还会按 non_interactive_max_mode 夹取。
     permissions::PermissionMode ResolvePermissionMode(
-            const std::string& working_directory) const;
+            const std::string& working_directory, bool interactive = true) const;
 
     // 构造本次请求的工具上下文（工作目录 + 展开后的权限策略）。
-    tools::ToolContext BuildToolContext(const std::string& working_directory) const;
+    tools::ToolContext BuildToolContext(const std::string& working_directory,
+                                        bool interactive = true) const;
 
     // 工具本身是否被权限策略允许；空字符串表示允许，否则为拒绝原因。
     std::string CheckToolPermission(

@@ -68,5 +68,7 @@ permissions_file =
 default_mode = confirm
 ; 允许设置的最高模式；full 之外的档位不会被它限制。
 max_mode = full
+; 非交互调用方（A2A / 同步接口）允许的最高档位，且永远不会拿到 full。
+non_interactive_max_mode = workspace
 ; 是否允许设置 full（false 时 full 会被夹到 workspace）。
 allow_full_access = true

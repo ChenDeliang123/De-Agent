@@ -281,18 +281,27 @@ private:
     std::string tool_name_;
 };
 
-void RunPermissionScenario(aiagent::permissions::PermissionMode mode,
-                           const std::string& tool_name,
-                           const std::shared_ptr<RecordingPermissionProvider>& provider) {
+void RunPermissionScenario(
+        aiagent::permissions::PermissionMode mode,
+        const std::string& tool_name,
+        const std::shared_ptr<RecordingPermissionProvider>& provider,
+        bool interactive = true,
+        aiagent::permissions::PermissionMode non_interactive_max =
+                aiagent::permissions::PermissionMode::kWorkspace) {
     auto model = std::make_shared<OneShotToolModel>(tool_name);
     aiagent::agent::AgentRuntime runtime(model);
     runtime.SetToolProvider(provider);
     aiagent::agent::PermissionSettings settings;
     settings.default_mode = mode;
+    settings.non_interactive_max_mode = non_interactive_max;
     runtime.SetPermissionSettings(settings);
     a2a::models::Message user = a2a::models::MakeTextMessage(
             a2a::models::Role::kUser, "run tool", "text/plain");
-    runtime.HandleMessage(user, {user}, "ctx-permission");
+    if (interactive) {
+        runtime.HandleMessageStreaming(user, {user}, "ctx-permission", nullptr);
+    } else {
+        runtime.HandleMessage(user, {user}, "ctx-permission");
+    }
 }
 
 // 第一次流式调用抛出“上下文超长”，压缩后重试成功。
@@ -979,7 +988,7 @@ int main() {
             RunPermissionScenario(PermissionMode::kWorkspace, "bash", provider);
             Expect(provider->bash_calls == 0, "workspace denies bash without approval");
         }
-        // full：write 与 bash 均允许。
+        // full：write 与 bash 均允许（交互路径）。
         {
             auto provider = std::make_shared<RecordingPermissionProvider>();
             RunPermissionScenario(PermissionMode::kFull, "write", provider);
@@ -989,6 +998,31 @@ int main() {
             auto provider = std::make_shared<RecordingPermissionProvider>();
             RunPermissionScenario(PermissionMode::kFull, "bash", provider);
             Expect(provider->bash_calls == 1, "full allows bash");
+        }
+        // 非交互调用方不会拿到 full：full 被夹到 workspace，bash 仍被拒。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kFull, "bash", provider,
+                                  /*interactive=*/false);
+            Expect(provider->bash_calls == 0,
+                   "non-interactive caller is capped below full");
+        }
+        // 非交互 workspace：写允许（不需要确认）。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kWorkspace, "write", provider,
+                                  /*interactive=*/false);
+            Expect(provider->write_calls == 1,
+                   "non-interactive workspace allows write");
+        }
+        // non_interactive_max_mode=confirm：非交互下 workspace 被夹到 confirm，
+        // 写需要审批 -> 拒绝。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            RunPermissionScenario(PermissionMode::kWorkspace, "write", provider,
+                                  /*interactive=*/false, PermissionMode::kConfirm);
+            Expect(provider->write_calls == 0,
+                   "non-interactive max confirm blocks writes");
         }
     } catch (const std::exception& e) {
         std::cerr << "agent runtime permission test failed: " << e.what() << '\n';
