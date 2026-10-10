@@ -54,3 +54,19 @@ agents_md_max_depth = 16
 ; 设为 false 可完全关闭沙箱（不推荐）。
 sandbox_enabled = true
 sandbox_roots =
+
+[storage]
+; 用户级数据目录（权限等与用户相关的状态）。
+; 留空时按 DE_HOME > XDG_DATA_HOME/de > ~/.de 解析；目录按需创建。
+data_dir =
+; 权限文件；留空时用 <data_dir>/permissions.json。
+permissions_file =
+
+[permissions]
+; 新路径（未单独配置）时的默认模式：confirm | workspace | full。
+; 注意：confirm 的“逐次确认”通道尚未实现（M3），当前会先拒绝写/命令并提示。
+default_mode = confirm
+; 允许设置的最高模式；full 之外的档位不会被它限制。
+max_mode = full
+; 是否允许设置 full（false 时 full 会被夹到 workspace）。
+allow_full_access = true

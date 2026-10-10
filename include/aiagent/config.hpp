@@ -51,6 +51,20 @@ struct ToolsConfig {
     std::vector<std::string> sandbox_roots;
 };
 
+// 用户级数据目录配置（[storage]）。
+struct StorageConfig {
+    std::string data_dir;          // 空则按 DE_HOME/XDG_DATA_HOME/HOME 解析
+    std::string permissions_file;  // 空则用 <data_dir>/permissions.json
+};
+
+// 权限模式配置（[permissions]）。
+// 模式以字符串保存，由上层用 permissions::ParseMode 解析。
+struct PermissionsConfig {
+    std::string default_mode = "confirm";
+    std::string max_mode = "full";
+    bool allow_full_access = true;
+};
+
 // 终端 Agent 的项目指令（AGENTS.md）配置。
 struct InstructionsConfig {
     bool agents_md = true;
@@ -99,6 +113,22 @@ std::optional<ToolsConfig> ParseToolsConfig(const std::string& content,
 
 std::optional<ToolsConfig> LoadToolsConfigFile(const std::string& path,
                                                std::string* error = nullptr);
+
+// 解析 INI 文本中的 [storage] 段；没有该段时返回默认值。
+std::optional<StorageConfig> ParseStorageConfig(const std::string& content,
+                                                std::string* error = nullptr);
+
+std::optional<StorageConfig> LoadStorageConfigFile(const std::string& path,
+                                                   std::string* error = nullptr);
+
+// 解析 INI 文本中的 [permissions] 段；没有该段时返回默认值。
+std::optional<PermissionsConfig> ParsePermissionsConfig(
+        const std::string& content,
+        std::string* error = nullptr);
+
+std::optional<PermissionsConfig> LoadPermissionsConfigFile(
+        const std::string& path,
+        std::string* error = nullptr);
 
 std::optional<InstructionsConfig> ParseInstructionsConfig(
         const std::string& content,

@@ -93,11 +93,14 @@ else()
 endif()
 
 add_library(aiagent_agent STATIC
+  src/app_paths.cpp
   src/agent/agent_runtime.cpp
   src/agent/compaction.cpp
   src/agent/history_cache.cpp
   src/agent/project_instructions.cpp
   src/agent/session_meta_store.cpp
+  src/permissions/permission_policy.cpp
+  src/permissions/permission_store.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
@@ -188,6 +191,18 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(session_meta_store_test tests/session_meta_store_test.cpp)
   target_link_libraries(session_meta_store_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_session_meta_store COMMAND session_meta_store_test)
+
+  add_executable(permission_policy_test tests/permission_policy_test.cpp)
+  target_link_libraries(permission_policy_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_permission_policy COMMAND permission_policy_test)
+
+  add_executable(permission_store_test tests/permission_store_test.cpp)
+  target_link_libraries(permission_store_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_permission_store COMMAND permission_store_test)
+
+  add_executable(app_paths_test tests/app_paths_test.cpp)
+  target_link_libraries(app_paths_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_app_paths COMMAND app_paths_test)
 
   add_executable(compaction_test tests/compaction_test.cpp)
   target_link_libraries(compaction_test PRIVATE aiagent_agent)

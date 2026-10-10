@@ -602,6 +602,108 @@ std::optional<ToolsConfig> LoadToolsConfigFile(const std::string& path,
     return ParseToolsConfig(content.str(), error);
 }
 
+std::optional<StorageConfig> ParseStorageConfig(const std::string& content,
+                                                std::string* error) {
+    (void)error;
+    StorageConfig config;
+    bool in_storage = false;
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_storage = (section == "storage");
+            continue;
+        }
+        if (!in_storage) {
+            continue;
+        }
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+        if (key == "data_dir") {
+            config.data_dir = value;
+        } else if (key == "permissions_file") {
+            config.permissions_file = value;
+        }
+    }
+    return config;
+}
+
+std::optional<StorageConfig> LoadStorageConfigFile(const std::string& path,
+                                                   std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseStorageConfig(content.str(), error);
+}
+
+std::optional<PermissionsConfig> ParsePermissionsConfig(const std::string& content,
+                                                        std::string* error) {
+    (void)error;
+    PermissionsConfig config;
+    bool in_permissions = false;
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_permissions = (section == "permissions");
+            continue;
+        }
+        if (!in_permissions) {
+            continue;
+        }
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+        if (key == "default_mode") {
+            config.default_mode = value;
+        } else if (key == "max_mode") {
+            config.max_mode = value;
+        } else if (key == "allow_full_access") {
+            config.allow_full_access = Lower(value) == "true" || value == "1";
+        }
+    }
+    return config;
+}
+
+std::optional<PermissionsConfig> LoadPermissionsConfigFile(const std::string& path,
+                                                           std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParsePermissionsConfig(content.str(), error);
+}
+
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config) {
     constexpr const char* kSuffix = "/chat/completions";
     if (config.base_url.size() >= 18 &&
