@@ -131,6 +131,9 @@ async function applyPermissionMode(ctx, cwd, modeText) {
     const warn = result.mode === "full" ? "  ⚠ FULL ACCESS" : "";
     ctx.print(`permission for ${cwd}: ${result.mode}${warn}`);
     ctx.log("info", "cli", `event=permission_set path=${cwd} mode=${result.mode}`);
+    if (typeof ctx.refreshPromptState === "function") {
+      await ctx.refreshPromptState();
+    }
   } catch (error) {
     ctx.print(`permission change failed: ${error.message}`);
   }
@@ -468,6 +471,9 @@ export const commands = [
       ctx.state.cwd = resolved;
       ctx.state.cwdExplicit = true;
       ctx.print(`cwd: ${resolved}`);
+      if (typeof ctx.refreshPromptState === "function") {
+        await ctx.refreshPromptState();
+      }
       if (typeof ctx.promptProjectTrust === "function") {
         await ctx.promptProjectTrust();
       }
@@ -509,6 +515,9 @@ export const commands = [
           ctx.print(
             `cleared explicit permission for ${cwd} (now ${info.source}: ${info.mode})`,
           );
+          if (typeof ctx.refreshPromptState === "function") {
+            await ctx.refreshPromptState();
+          }
         } catch (error) {
           ctx.print(`permission reset failed: ${error.message}`);
         }

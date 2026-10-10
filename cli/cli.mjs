@@ -8,6 +8,7 @@ import { log } from "./logger.mjs";
 import {
   approveChat,
   cancelChat,
+  effectivePermission,
   getProjectPermission,
   listSessions,
   loadHistory,
@@ -25,6 +26,7 @@ import {
   restoreSessionCwd,
   runCommand,
 } from "./commands.mjs";
+import { formatPromptLabel, gitBranch } from "./statusbar.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 const renderer = new TranscriptRenderer();
@@ -318,6 +320,8 @@ async function main() {
     cwdExplicit: options.cwd != null,
     shouldExit: false,
     pendingName: null,
+    mode: null,
+    branch: null,
   };
 
   const cliConfig = loadCliConfig({ explicit: options.cliConfig });
@@ -360,6 +364,18 @@ async function main() {
       : null,
   };
   ctx.promptProjectTrust = () => maybePromptProjectTrust(ctx);
+
+  // 输入提示符状态：cwd 分支 + 当前权限模式（best-effort）。
+  ctx.refreshPromptState = async () => {
+    state.branch = gitBranch(state.cwd);
+    try {
+      const info = await effectivePermission(backend, state.cwd);
+      state.mode = info.mode ?? null;
+    } catch {
+      state.mode = null;
+    }
+  };
+  await ctx.refreshPromptState();
 
   const sessions = await listSessions(backend).catch(() => []);
   if (sessions.length > 0) {
@@ -416,8 +432,14 @@ async function main() {
   try {
     if (editor) {
       while (!state.shouldExit) {
-        const label = state.sessionId ? state.sessionId.slice(0, 8) : "new";
-        const result = await editor.readLine(`[${label}] ❯ `);
+        const result = await editor.readLine(
+          formatPromptLabel({
+            cwd: state.cwd,
+            branch: state.branch,
+            mode: state.mode,
+            sessionId: state.sessionId,
+          }),
+        );
         if (result.exit) {
           break;
         }

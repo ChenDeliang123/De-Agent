@@ -12,6 +12,7 @@
 import readline from "node:readline";
 
 import { editInExternalEditor, resolveEditorCommand } from "./external-editor.mjs";
+import { detectColorMode, makeStyler } from "./theme.mjs";
 
 export const EDITOR_HOTKEYS = [
   ["Enter", "submit input / run command"],
@@ -99,12 +100,19 @@ export function candidateWindow(total, selected, max) {
   return Math.max(0, Math.min(start, maxStart));
 }
 
-export function formatCandidate(command, selected, columns = 80) {
+export function formatCandidate(command, selected, columns = 80, styler) {
   const marker = selected ? "❯" : " ";
   const arg = command.argHint ? ` ${command.argHint}` : "";
   const left = `${marker} /${command.name}${arg}`;
   const description = command.description ? `  ${command.description}` : "";
-  return clipToWidth(left + description, Math.max(10, columns - 1));
+  const plain = left + description;
+  if (styler && styler.mode !== "none" && displayWidth(plain) <= columns - 1) {
+    const coloredMarker = selected ? styler.fg("accent", marker) : marker;
+    const coloredName = styler.bold(`/${command.name}${arg}`);
+    const coloredDesc = command.description ? `  ${styler.dim(command.description)}` : "";
+    return coloredMarker + coloredName + coloredDesc;
+  }
+  return clipToWidth(plain, Math.max(10, columns - 1));
 }
 
 export function createEditorState(history = []) {
@@ -374,6 +382,7 @@ export class LineEditor {
   #externalEditorActive = false;
   #resolveLine = null;
   #previousRaw = false;
+  #styler;
 
   constructor({
     input,
@@ -390,6 +399,7 @@ export class LineEditor {
     this.#maxCandidates = maxCandidates;
     this.#externalEditor = externalEditor;
     this.#editorCommand = editorCommand ?? null;
+    this.#styler = makeStyler(detectColorMode(process.env, this.#output));
     this.#state = createEditorState(history);
     if (this.#input.isTTY && !this.#input.__aiagentKeypress) {
       readline.emitKeypressEvents(this.#input);
@@ -549,7 +559,17 @@ export class LineEditor {
       entries.forEach((entry, index) => {
         const marker = index === selected ? "❯" : " ";
         const description = entry.description ? `  ${entry.description}` : "";
-        frame += `\r\x1b[K${clipToWidth(`${marker} ${entry.label}${description}`, columns - 1)}`;
+        const plain = `${marker} ${entry.label}${description}`;
+        let line = clipToWidth(plain, columns - 1);
+        if (this.#styler.mode !== "none" && displayWidth(plain) <= columns - 1) {
+          const coloredMarker = index === selected ? this.#styler.fg("accent", marker) : marker;
+          const coloredLabel = index === selected ? this.#styler.bold(entry.label) : entry.label;
+          const coloredDesc = entry.description
+            ? `  ${this.#styler.dim(entry.description)}`
+            : "";
+          line = `${coloredMarker} ${coloredLabel}${coloredDesc}`;
+        }
+        frame += `\r\x1b[K${line}`;
         if (index < entries.length - 1) {
           frame += "\n";
         }
@@ -638,7 +658,7 @@ export class LineEditor {
     const candidates = state.candidates.slice(start, start + this.#maxCandidates);
     for (let i = 0; i < candidates.length; i += 1) {
       const selected = start + i === state.selected;
-      frame += `\n\r\x1b[K${formatCandidate(candidates[i], selected, columns)}`;
+      frame += `\n\r\x1b[K${formatCandidate(candidates[i], selected, columns, this.#styler)}`;
     }
     if (candidates.length > 0) {
       frame += `\x1b[${candidates.length}A`;

@@ -1,21 +1,11 @@
-const reset = "\x1b[0m";
-const bold = "\x1b[1m";
-const dim = "\x1b[2m";
-const gray = "\x1b[90m";
-const red = "\x1b[31m";
-const green = "\x1b[32m";
-const yellow = "\x1b[33m";
-const blue = "\x1b[34m";
-const magenta = "\x1b[35m";
-const cyan = "\x1b[36m";
+import { clipToWidth, displayWidth } from "./editor.mjs";
+import { detectColorMode, makeStyler, pickSymbols } from "./theme.mjs";
 
 const MaxDisplayText = 4000;
-
-// 等待动画：只在 TTY 上绘制，用 \r + 清行避免污染流式输出。
+const IDLE_DELAY_MS = 500;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_INTERVAL_MS = 100;
-// 流式输出之间的静默阈值：超过它才显示 spinner，避免逐 token 闪烁。
-const IDLE_DELAY_MS = 500;
+const TOOL_PREVIEW_LINES = 8;
 
 function truncate(text) {
   if (text.length <= MaxDisplayText) {
@@ -43,30 +33,35 @@ function prettyArguments(rawArguments) {
 
 class Spinner {
   #out;
+  #styler;
   #timer = null;
   #idleTimer = null;
   #frame = 0;
   #label = "";
   #started = 0;
   #active = false;
+  #colorName = "accent";
 
-  constructor(out) {
+  constructor(out, styler) {
     this.#out = out;
+    this.#styler = styler;
   }
 
   get active() {
     return this.#active;
   }
 
-  start(label) {
+  start(label, colorName = "accent") {
     if (!this.#out.isTTY) {
       return;
     }
     if (this.#active && this.#label === label) {
+      this.#colorName = colorName;
       this.#render();
       return;
     }
     this.#label = label;
+    this.#colorName = colorName;
     this.#started = Date.now();
     this.#frame = 0;
     if (!this.#active) {
@@ -80,15 +75,14 @@ class Spinner {
     this.#render();
   }
 
-  // 延迟显示：静默 IDLE_DELAY_MS 后再出现。
-  schedule(label) {
+  schedule(label, colorName = "accent") {
     if (!this.#out.isTTY) {
       return;
     }
     this.cancelScheduled();
     this.#idleTimer = setTimeout(() => {
       this.#idleTimer = null;
-      this.start(label);
+      this.start(label, colorName);
     }, IDLE_DELAY_MS);
     this.#idleTimer.unref?.();
   }
@@ -110,7 +104,6 @@ class Spinner {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    // 清掉当前行，避免残留。
     this.#out.write("\r\x1b[K");
   }
 
@@ -120,31 +113,37 @@ class Spinner {
     }
     const seconds = Math.floor((Date.now() - this.#started) / 1000);
     const elapsed = seconds > 0 ? ` ${seconds}s` : "";
-    this.#out.write(
-      `\r\x1b[K${dim}${SPINNER_FRAMES[this.#frame]} ${this.#label}${elapsed}${reset}`,
-    );
+    const t = this.#styler;
+    const frame = t.fg(this.#colorName, SPINNER_FRAMES[this.#frame]);
+    const label = t.dim(`${this.#label}${elapsed}`);
+    this.#out.write(`\r\x1b[K${frame} ${label}`);
   }
 }
 
 export class TranscriptRenderer {
-  #out = process.stdout;
+  #out;
+  #t;
+  #sym;
+  #spinner;
   #assistantActive = false;
   #assistantWroteText = false;
   #resumeAssistant = false;
-  #spinner;
   #currentTool = "";
+  #atLineStart = true;
+  #turnLabelPrinted = false;
 
-  constructor(out = process.stdout) {
+  constructor(out = process.stdout, options = {}) {
     this.#out = out;
-    this.#spinner = new Spinner(out);
+    const mode = options.mode ?? detectColorMode(process.env, out);
+    this.#t = options.styler ?? makeStyler(mode);
+    this.#sym = options.symbols ?? pickSymbols(process.env);
+    this.#spinner = new Spinner(out, this.#t);
   }
 
-  // 是否正在显示等待动画（测试用）。
   get waiting() {
     return this.#spinner.active;
   }
 
-  // 供非流式长耗时操作（如 /compact）使用的外部等待接口。
   wait(label = "working") {
     this.#beginOutput();
     this.#spinner.start(label);
@@ -154,80 +153,92 @@ export class TranscriptRenderer {
     this.#beginOutput();
   }
 
+  #width() {
+    const columns = this.#out.columns;
+    return Math.max(20, Number.isFinite(columns) && columns > 0 ? columns : 80);
+  }
+
   user(text) {
     this.#beginOutput();
-    this.#write(`\n${bold}${blue}user${reset} ${text}\n`);
+    const t = this.#t;
+    this.#write(`\n${t.dim("─".repeat(this.#width()))}\n`);
+    this.#write(`${t.fg("accent", this.#sym.gutter)} ${text}\n`);
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
+    this.#atLineStart = true;
+    this.#turnLabelPrinted = false;
   }
 
   startReply() {
     this.#beginOutput();
-    this.#write(`\n${bold}${magenta}assistant${reset} `);
+    this.#write("\n");
+    this.#ensureAssistantLabel();
     this.#assistantActive = true;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
-    this.#spinner.start("thinking");
+    this.#atLineStart = true;
+    this.#spinner.start("thinking", "accent");
   }
 
   content(token) {
     this.#beginOutput();
     if (!this.#assistantActive) {
-      this.#write(`\n${bold}${magenta}assistant${reset} `);
+      this.#write("\n");
+      this.#ensureAssistantLabel();
       this.#assistantActive = true;
+      this.#atLineStart = true;
     }
     this.#assistantWroteText = true;
     this.#resumeAssistant = false;
-    this.#write(token);
-    // token 之间若长时间无输出，再显示等待动画。
-    this.#spinner.schedule("thinking");
+    this.#writeIndented(token);
+    this.#spinner.schedule("thinking", "accent");
   }
 
   toolStart(id, name, rawArguments) {
     this.#beginOutput();
-    this.#write(`\n\n${bold}${cyan}▸ ${name}${reset}`);
+    const t = this.#t;
+    this.#write("\n");
+    const label = `${t.bold(name)}${id ? ` ${t.dim(`(${id.slice(0, 8)})`)}` : ""}`;
+    this.#write(`  ${t.fg("borderMuted", this.#sym.top)} ${label}\n`);
     const args = prettyArguments(rawArguments);
     if (args) {
-      this.#write(` ${dim}${args}${reset}`);
+      const clipped = clipToWidth(args, this.#width() - 6);
+      this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${t.dim(clipped)}\n`);
     }
-    if (id) {
-      this.#write(` ${gray}(${id.slice(0, 12)})${reset}`);
-    }
-    this.#write("\n");
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
     this.#currentTool = name;
-    this.#spinner.start(`${name} running`);
+    this.#spinner.start(`${name} running`, "cyan");
   }
 
   toolOutput(text) {
     this.#beginOutput();
-    const indented = truncate(text).replace(/\n/g, "\n  ");
-    this.#write(`${dim}  ${indented}${reset}\n`);
+    for (const line of this.#previewLines(text)) {
+      this.#write(`  ${this.#t.fg("borderMuted", this.#sym.bar)} ${this.#t.dim(line)}\n`);
+    }
     if (this.#currentTool) {
-      this.#spinner.start(`${this.#currentTool} running`);
+      this.#spinner.start(`${this.#currentTool} running`, "cyan");
     }
   }
 
   toolEnd(ok, text) {
     this.#beginOutput();
-    if (ok) {
-      this.#write(`${green}✔ ok${reset}`);
-    } else {
-      this.#write(`${red}✘ failed${reset}`);
+    const t = this.#t;
+    const colorName = ok ? "success" : "error";
+    const body = String(text ?? "");
+    if (body) {
+      for (const line of this.#previewLines(body)) {
+        this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${t.dim(line)}\n`);
+      }
     }
-    if (text && !ok) {
-      this.#write(` ${red}${truncate(text).slice(0, 500)}${reset}`);
-    } else if (text && ok) {
-      this.#write(`\n${dim}${truncate(text)}${reset}`);
-    }
-    this.#write("\n");
+    const status = ok ? `${t.fg(colorName, this.#sym.ok)} ok` : `${t.fg(colorName, this.#sym.fail)} failed`;
+    this.#write(`  ${t.fg(colorName, this.#sym.bottom)} ${status}\n`);
     this.#resumeAssistant = true;
     this.#currentTool = "";
-    // 工具结束后等模型继续生成。
-    this.#spinner.start("thinking");
+    this.#atLineStart = true;
+    this.#spinner.start("thinking", "accent");
   }
 
   endReply() {
@@ -236,65 +247,111 @@ export class TranscriptRenderer {
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
+    this.#atLineStart = true;
+    this.#turnLabelPrinted = false;
   }
 
   error(message) {
     this.#beginOutput();
-    this.#write(`\n${red}error: ${message}${reset}\n`);
+    const t = this.#t;
+    this.#write(`\n${t.fg("error", `error: ${message}`)}\n`);
     this.endReply();
   }
 
   interrupted() {
     this.#beginOutput();
-    this.#write(`\n${yellow}⏹ interrupted${reset}\n`);
+    const t = this.#t;
+    this.#write(`\n${t.fg("warning", `${this.#sym.interrupted} interrupted`)}\n`);
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
+    this.#atLineStart = true;
   }
 
   approvalRequest(data) {
     this.#beginOutput();
+    const t = this.#t;
     const name = data?.name ?? "tool";
     const reason = data?.reason ?? "requires approval";
     const args = prettyArguments(data?.arguments);
-    this.#write(`\n${bold}${yellow}⚠ approval needed${reset} ${bold}${name}${reset}`);
+    this.#write(`\n${t.fg("warning", `${this.#sym.warn} approval needed`)} ${t.bold(name)}`);
     if (args) {
-      this.#write(` ${dim}${args}${reset}`);
+      this.#write(` ${t.dim(clipToWidth(args, Math.max(10, this.#width() - 40)))}`);
     }
-    this.#write(`\n${dim}  ${reason}${reset}\n`);
+    this.#write(`\n${t.dim(`  ${reason}`)}\n`);
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
+    this.#atLineStart = true;
   }
 
   approvalResolved(decision) {
     this.#beginOutput();
+    const t = this.#t;
     const label =
       decision === "allow_once"
-        ? `${green}approved (once)${reset}`
+        ? t.fg("success", "approved (once)")
         : decision === "allow_session"
-          ? `${green}approved (this session)${reset}`
-          : `${red}denied${reset}`;
-    this.#write(`${dim}  → ${label}\n`);
+          ? t.fg("success", "approved (this session)")
+          : t.fg("error", "denied");
+    this.#write(`${t.dim("  →")} ${label}\n`);
     this.#resumeAssistant = true;
-    this.#spinner.start("thinking");
+    this.#atLineStart = true;
+    this.#spinner.start("thinking", "accent");
   }
 
   compaction(data) {
     this.#beginOutput();
+    const t = this.#t;
     const before = data?.tokens_before ?? "?";
     const after = data?.tokens_after ?? "?";
     const reason = data?.forced ? " (overflow)" : "";
     this.#write(
-      `\n${dim}⤵ context compacted${reason}: ${before} → ${after} tokens${reset}\n`,
+      `\n${t.dim(`${this.#sym.compact} context compacted${reason}: ${before} → ${after} tokens`)}\n`,
     );
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
-    this.#spinner.start("thinking");
+    this.#atLineStart = true;
+    this.#spinner.start("thinking", "accent");
   }
 
-  // 任何可见输出前调用：取消待显示的 spinner 并清掉当前等待行。
+  #ensureAssistantLabel() {
+    if (this.#turnLabelPrinted) {
+      return;
+    }
+    this.#write(`${this.#t.dim("de agent")}\n`);
+    this.#turnLabelPrinted = true;
+  }
+
+  #previewLines(text) {
+    const maxWidth = Math.max(10, this.#width() - 6);
+    const lines = truncate(String(text ?? "")).split("\n");
+    const shown = lines.slice(0, TOOL_PREVIEW_LINES).map((line) => clipToWidth(line, maxWidth));
+    if (lines.length > TOOL_PREVIEW_LINES) {
+      shown.push(`… (+${lines.length - TOOL_PREVIEW_LINES} lines)`);
+    }
+    return shown;
+  }
+
+  #writeIndented(text) {
+    const pieces = String(text).split("\n");
+    for (let i = 0; i < pieces.length; i += 1) {
+      if (i > 0) {
+        this.#write("\n");
+        this.#atLineStart = true;
+      }
+      if (pieces[i].length === 0) {
+        continue;
+      }
+      if (this.#atLineStart) {
+        this.#write("  ");
+        this.#atLineStart = false;
+      }
+      this.#write(pieces[i]);
+    }
+  }
+
   #beginOutput() {
     this.#spinner.stop();
   }
@@ -303,3 +360,6 @@ export class TranscriptRenderer {
     this.#out.write(text);
   }
 }
+
+// 供测试/状态栏复用。
+export { displayWidth };
