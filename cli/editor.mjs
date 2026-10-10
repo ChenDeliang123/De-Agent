@@ -16,6 +16,8 @@ import { detectColorMode, makeStyler } from "./theme.mjs";
 
 export const EDITOR_HOTKEYS = [
   ["Enter", "submit input / run command"],
+  ["Alt / Shift+Enter", "insert a newline (multi-line input)"],
+  ["\\ + Enter", "continue on the next line"],
   ["Tab", "complete command"],
   ["Up / Down", "move candidate selection, or browse input history"],
   ["Esc", "close command candidates"],
@@ -269,6 +271,20 @@ export function applyKey(state, str, key, options = {}) {
   switch (k.name) {
     case "return":
     case "enter": {
+      // 多行输入：Alt/Shift+Enter 或行尾反斜杠续行（不提交）。
+      if (k.meta || k.shift) {
+        insert(state, "\n");
+        state.candidates = [];
+        state.candidatesSuppressed = true;
+        return { type: "redraw" };
+      }
+      if (state.cursor === state.buffer.length && state.buffer.endsWith("\\")) {
+        state.buffer = `${state.buffer.slice(0, -1)}\n`;
+        state.cursor = state.buffer.length;
+        state.candidates = [];
+        state.candidatesSuppressed = true;
+        return { type: "redraw" };
+      }
       if (state.candidates.length > 0) {
         const token = state.buffer.startsWith("/")
           ? state.buffer.slice(1).split(/\s+/)[0]
@@ -383,6 +399,7 @@ export class LineEditor {
   #resolveLine = null;
   #previousRaw = false;
   #styler;
+  #cursorRow = 0;
 
   constructor({
     input,
@@ -624,6 +641,10 @@ export class LineEditor {
       return "";
     }
     let frame = "";
+    // 光标可能在区域内的某一行，先回到区域顶部。
+    if (this.#cursorRow > 0) {
+      frame += `\x1b[${this.#cursorRow}A`;
+    }
     for (let i = 0; i < this.#drawn; i += 1) {
       frame += "\r\x1b[K";
       if (i < this.#drawn - 1) {
@@ -633,6 +654,7 @@ export class LineEditor {
     if (this.#drawn > 1) {
       frame += `\x1b[${this.#drawn - 1}A`;
     }
+    this.#cursorRow = 0;
     return frame;
   }
 
@@ -646,8 +668,13 @@ export class LineEditor {
 
   #redraw() {
     const state = this.#state;
+    const text = this.#prompt + state.buffer;
+    const rows = text.split("\n");
     let frame = this.#eraseFrame();
-    frame += `\r${this.#prompt}${state.buffer}`;
+    frame += `\r${rows[0]}`;
+    for (let i = 1; i < rows.length; i += 1) {
+      frame += `\n\r\x1b[K${rows[i]}`;
+    }
 
     const columns = this.#columns();
     const start = candidateWindow(
@@ -660,15 +687,24 @@ export class LineEditor {
       const selected = start + i === state.selected;
       frame += `\n\r\x1b[K${formatCandidate(candidates[i], selected, columns, this.#styler)}`;
     }
-    if (candidates.length > 0) {
-      frame += `\x1b[${candidates.length}A`;
-    }
-    const column = displayWidth(this.#prompt) + displayWidth(state.buffer.slice(0, state.cursor));
+
+    // 光标所在的 buffer 行 / 列（提示符只在首行）。
+    const cursorPrefix = this.#prompt + state.buffer.slice(0, state.cursor);
+    const cursorRows = cursorPrefix.split("\n");
+    const cursorRow = cursorRows.length - 1;
+    const cursorColumn = displayWidth(cursorRows[cursorRow]);
+    const lastRow = rows.length - 1 + candidates.length;
+    const up = lastRow - cursorRow;
+
     frame += "\r";
-    if (column > 0) {
-      frame += `\x1b[${column}C`;
+    if (up > 0) {
+      frame += `\x1b[${up}A`;
     }
-    this.#drawn = 1 + candidates.length;
+    if (cursorColumn > 0) {
+      frame += `\x1b[${cursorColumn}C`;
+    }
+    this.#drawn = rows.length + candidates.length;
+    this.#cursorRow = cursorRow;
     this.#output.write(frame);
   }
 }

@@ -1,4 +1,5 @@
 import { clipToWidth, displayWidth } from "./editor.mjs";
+import { createMarkdownRenderer } from "./markdown.mjs";
 import { detectColorMode, makeStyler, pickSymbols } from "./theme.mjs";
 
 const MaxDisplayText = 4000;
@@ -6,6 +7,8 @@ const IDLE_DELAY_MS = 500;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_INTERVAL_MS = 100;
 const TOOL_PREVIEW_LINES = 8;
+// 单行超过该长度就先按普通段落刷出，避免长行长时间不显示。
+const MAX_PARTIAL_LINE = 200;
 
 function truncate(text) {
   if (text.length <= MaxDisplayText) {
@@ -14,21 +17,30 @@ function truncate(text) {
   return `${text.slice(0, MaxDisplayText)}\n… (truncated ${text.length - MaxDisplayText} chars)`;
 }
 
-function prettyArguments(rawArguments) {
-  if (rawArguments === undefined || rawArguments === null || rawArguments === "") {
-    return "";
-  }
+function normalizeArguments(rawArguments) {
   if (typeof rawArguments === "string") {
     try {
-      return JSON.stringify(JSON.parse(rawArguments));
+      return JSON.parse(rawArguments);
     } catch {
       return rawArguments;
     }
   }
-  if (typeof rawArguments === "object") {
-    return JSON.stringify(rawArguments);
+  return rawArguments;
+}
+
+function prettyArguments(rawArguments) {
+  const args = normalizeArguments(rawArguments);
+  if (args === undefined || args === null || args === "") {
+    return "";
   }
-  return String(rawArguments);
+  if (typeof args === "string") {
+    return args;
+  }
+  try {
+    return JSON.stringify(args);
+  } catch {
+    return String(args);
+  }
 }
 
 class Spinner {
@@ -124,19 +136,21 @@ export class TranscriptRenderer {
   #out;
   #t;
   #sym;
+  #md;
   #spinner;
   #assistantActive = false;
   #assistantWroteText = false;
   #resumeAssistant = false;
   #currentTool = "";
-  #atLineStart = true;
   #turnLabelPrinted = false;
+  #mdBuffer = "";
 
   constructor(out = process.stdout, options = {}) {
     this.#out = out;
     const mode = options.mode ?? detectColorMode(process.env, out);
     this.#t = options.styler ?? makeStyler(mode);
     this.#sym = options.symbols ?? pickSymbols(process.env);
+    this.#md = createMarkdownRenderer(this.#t);
     this.#spinner = new Spinner(out, this.#t);
   }
 
@@ -160,51 +174,57 @@ export class TranscriptRenderer {
 
   user(text) {
     this.#beginOutput();
+    this.#flushMdBuffer();
     const t = this.#t;
     this.#write(`\n${t.dim("─".repeat(this.#width()))}\n`);
     this.#write(`${t.fg("accent", this.#sym.gutter)} ${text}\n`);
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
-    this.#atLineStart = true;
     this.#turnLabelPrinted = false;
+    this.#md.reset();
   }
 
   startReply() {
     this.#beginOutput();
+    this.#flushMdBuffer();
+    this.#md.reset();
     this.#write("\n");
     this.#ensureAssistantLabel();
     this.#assistantActive = true;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
-    this.#atLineStart = true;
     this.#spinner.start("thinking", "accent");
   }
 
   content(token) {
-    this.#beginOutput();
     if (!this.#assistantActive) {
+      this.#beginOutput();
       this.#write("\n");
       this.#ensureAssistantLabel();
       this.#assistantActive = true;
-      this.#atLineStart = true;
     }
     this.#assistantWroteText = true;
     this.#resumeAssistant = false;
-    this.#writeIndented(token);
-    this.#spinner.schedule("thinking", "accent");
+    this.#mdBuffer += String(token);
+    this.#flushMdLines();
+    // 还有未显示的缓存内容时用 spinner 提示正在生成。
+    if (this.#mdBuffer !== "") {
+      this.#spinner.start("thinking", "accent");
+    } else {
+      this.#spinner.stop();
+    }
   }
 
   toolStart(id, name, rawArguments) {
     this.#beginOutput();
+    this.#flushMdBuffer();
     const t = this.#t;
     this.#write("\n");
     const label = `${t.bold(name)}${id ? ` ${t.dim(`(${id.slice(0, 8)})`)}` : ""}`;
     this.#write(`  ${t.fg("borderMuted", this.#sym.top)} ${label}\n`);
-    const args = prettyArguments(rawArguments);
-    if (args) {
-      const clipped = clipToWidth(args, this.#width() - 6);
-      this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${t.dim(clipped)}\n`);
+    for (const line of this.#toolCallLines(name, normalizeArguments(rawArguments))) {
+      this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${line}\n`);
     }
     this.#assistantActive = false;
     this.#assistantWroteText = false;
@@ -233,26 +253,28 @@ export class TranscriptRenderer {
         this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${t.dim(line)}\n`);
       }
     }
-    const status = ok ? `${t.fg(colorName, this.#sym.ok)} ok` : `${t.fg(colorName, this.#sym.fail)} failed`;
+    const status = ok
+      ? `${t.fg(colorName, this.#sym.ok)} ok`
+      : `${t.fg(colorName, this.#sym.fail)} failed`;
     this.#write(`  ${t.fg(colorName, this.#sym.bottom)} ${status}\n`);
     this.#resumeAssistant = true;
     this.#currentTool = "";
-    this.#atLineStart = true;
     this.#spinner.start("thinking", "accent");
   }
 
   endReply() {
     this.#beginOutput();
+    this.#flushMdBuffer();
     this.#write("\n");
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
-    this.#atLineStart = true;
     this.#turnLabelPrinted = false;
   }
 
   error(message) {
     this.#beginOutput();
+    this.#flushMdBuffer();
     const t = this.#t;
     this.#write(`\n${t.fg("error", `error: ${message}`)}\n`);
     this.endReply();
@@ -260,16 +282,17 @@ export class TranscriptRenderer {
 
   interrupted() {
     this.#beginOutput();
+    this.#flushMdBuffer();
     const t = this.#t;
     this.#write(`\n${t.fg("warning", `${this.#sym.interrupted} interrupted`)}\n`);
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;
-    this.#atLineStart = true;
   }
 
   approvalRequest(data) {
     this.#beginOutput();
+    this.#flushMdBuffer();
     const t = this.#t;
     const name = data?.name ?? "tool";
     const reason = data?.reason ?? "requires approval";
@@ -282,7 +305,6 @@ export class TranscriptRenderer {
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
-    this.#atLineStart = true;
   }
 
   approvalResolved(decision) {
@@ -296,12 +318,12 @@ export class TranscriptRenderer {
           : t.fg("error", "denied");
     this.#write(`${t.dim("  →")} ${label}\n`);
     this.#resumeAssistant = true;
-    this.#atLineStart = true;
     this.#spinner.start("thinking", "accent");
   }
 
   compaction(data) {
     this.#beginOutput();
+    this.#flushMdBuffer();
     const t = this.#t;
     const before = data?.tokens_before ?? "?";
     const after = data?.tokens_after ?? "?";
@@ -312,7 +334,6 @@ export class TranscriptRenderer {
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
-    this.#atLineStart = true;
     this.#spinner.start("thinking", "accent");
   }
 
@@ -324,6 +345,67 @@ export class TranscriptRenderer {
     this.#turnLabelPrinted = true;
   }
 
+  // 把已收到的完整行交给 markdown 渲染；过长的不满行也先刷出。
+  #flushMdLines() {
+    let index;
+    while ((index = this.#mdBuffer.indexOf("\n")) !== -1) {
+      const line = this.#mdBuffer.slice(0, index);
+      this.#mdBuffer = this.#mdBuffer.slice(index + 1);
+      this.#beginOutput();
+      this.#writeMdLine(line);
+    }
+    if (displayWidth(this.#mdBuffer) > MAX_PARTIAL_LINE) {
+      this.#beginOutput();
+      this.#writeMdLine(this.#mdBuffer);
+      this.#mdBuffer = "";
+    }
+  }
+
+  #flushMdBuffer() {
+    if (this.#mdBuffer !== "") {
+      this.#writeMdLine(this.#mdBuffer);
+      this.#mdBuffer = "";
+    }
+  }
+
+  #writeMdLine(line) {
+    for (const rendered of this.#md.renderLine(line)) {
+      this.#write(rendered.length ? `  ${rendered}\n` : "\n");
+    }
+  }
+
+  #toolCallLines(name, args) {
+    const t = this.#t;
+    if (
+      name === "edit" &&
+      args &&
+      typeof args === "object" &&
+      (args.oldText !== undefined || args.newText !== undefined)
+    ) {
+      const lines = [];
+      if (args.path) {
+        lines.push(t.dim(String(args.path)));
+      }
+      for (const line of String(args.oldText ?? "").split("\n")) {
+        if (line !== "") {
+          lines.push(t.fg("diffRemoved", `- ${line}`));
+        }
+      }
+      for (const line of String(args.newText ?? "").split("\n")) {
+        if (line !== "") {
+          lines.push(t.fg("diffAdded", `+ ${line}`));
+        }
+      }
+      const max = 24;
+      if (lines.length > max) {
+        return lines.slice(0, max).concat([t.dim(`… (+${lines.length - max} lines)`)]);
+      }
+      return lines;
+    }
+    const text = prettyArguments(args);
+    return text ? [t.dim(clipToWidth(text, this.#width() - 6))] : [];
+  }
+
   #previewLines(text) {
     const maxWidth = Math.max(10, this.#width() - 6);
     const lines = truncate(String(text ?? "")).split("\n");
@@ -332,24 +414,6 @@ export class TranscriptRenderer {
       shown.push(`… (+${lines.length - TOOL_PREVIEW_LINES} lines)`);
     }
     return shown;
-  }
-
-  #writeIndented(text) {
-    const pieces = String(text).split("\n");
-    for (let i = 0; i < pieces.length; i += 1) {
-      if (i > 0) {
-        this.#write("\n");
-        this.#atLineStart = true;
-      }
-      if (pieces[i].length === 0) {
-        continue;
-      }
-      if (this.#atLineStart) {
-        this.#write("  ");
-        this.#atLineStart = false;
-      }
-      this.#write(pieces[i]);
-    }
   }
 
   #beginOutput() {

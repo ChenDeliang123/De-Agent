@@ -27,8 +27,8 @@ test("renderer shows a spinner while waiting, clears it on output", () => {
   assert.ok(out.text().includes("de agent"), "assistant label should be printed");
   assert.ok(SPINNER_RE.test(out.text()), "spinner frame should be written");
 
-  renderer.content("Hello");
-  assert.equal(renderer.waiting, false, "spinner should clear when content arrives");
+  renderer.content("Hello\n");
+  assert.equal(renderer.waiting, false, "spinner should clear when a line is flushed");
   assert.ok(out.text().includes("Hello"));
   assert.ok(out.text().includes("\r\x1b[K"), "waiting line should be cleared");
 
@@ -45,7 +45,8 @@ test("renderer indents assistant content and draws a user divider", () => {
   renderer.endReply();
   const text = out.text();
   assert.ok(text.includes("do it"));
-  assert.ok(text.includes("line1\n  line2"), "continuation lines should be indented");
+  assert.ok(text.includes("  line1"), "first line should be indented");
+  assert.ok(text.includes("  line2"), "continuation line should be indented");
 });
 
 test("renderer draws a tool block and a running spinner", () => {
@@ -76,6 +77,23 @@ test("renderer does not draw a spinner on non-TTY output", () => {
 
   assert.ok(!out.text().includes("\r"), "no carriage returns on non-TTY");
   assert.ok(!SPINNER_RE.test(out.text()), "no spinner frames on non-TTY");
+});
+
+test("renderer renders an edit diff from tool arguments", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+  renderer.startReply();
+  renderer.toolStart("c1", "edit", {
+    path: "a.mjs",
+    oldText: "old line",
+    newText: "new line",
+  });
+  const text = out.text();
+  assert.ok(text.includes("a.mjs"));
+  assert.ok(text.includes("- old line"));
+  assert.ok(text.includes("+ new line"));
+  renderer.toolEnd(true, "edited a.mjs");
+  renderer.endReply();
 });
 
 test("wait/stopWaiting drive the spinner for long commands", () => {

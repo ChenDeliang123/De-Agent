@@ -437,3 +437,34 @@ test("LineEditor selectList returns the chosen index and cancels on Esc", async 
   input.emit("keypress", "", key("escape"));
   assert.equal(await cancel, null);
 });
+
+test("applyKey supports Alt+Enter and backslash line continuation", () => {
+  const state = createEditorState();
+  state.buffer = "hello";
+  state.cursor = state.buffer.length;
+  const action = applyKey(state, "\r", { name: "return", meta: true });
+  assert.equal(action.type, "redraw");
+  assert.equal(state.buffer, "hello\n");
+
+  const state2 = createEditorState();
+  state2.buffer = "echo hi \\";
+  state2.cursor = state2.buffer.length;
+  const action2 = applyKey(state2, "\\", key("return"));
+  assert.equal(action2.type, "redraw");
+  assert.equal(state2.buffer, "echo hi \n");
+});
+
+test("LineEditor submits multi-line input", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const editor = new LineEditor({ input, output, complete });
+
+  const pending = editor.readLine("❯ ");
+  input.emit("keypress", "a", undefined);
+  input.emit("keypress", "\r", { name: "return", meta: true });
+  input.emit("keypress", "b", undefined);
+  input.emit("keypress", "\r", key("return"));
+
+  const result = await pending;
+  assert.equal(result.text, "a\nb");
+});
