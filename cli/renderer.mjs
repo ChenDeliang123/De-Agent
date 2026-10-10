@@ -1,4 +1,4 @@
-import { clipToWidth, displayWidth } from "./text.mjs";
+import { clipToWidth, displayWidth, visibleWidth, wrapVisible } from "./text.mjs";
 import { createMarkdownRenderer } from "./markdown.mjs";
 import { detectColorMode, hyperlink, makeStyler, pickSymbols } from "./theme.mjs";
 
@@ -208,8 +208,30 @@ export class TranscriptRenderer {
     this.#beginOutput();
     this.#flushMdBuffer();
     const t = this.#t;
-    this.#write(`\n${t.dim("─".repeat(this.#width()))}\n`);
-    this.#write(`${t.fg("accent", this.#sym.gutter)} ${text}\n`);
+    const width = this.#width();
+    const rows = [];
+    for (const line of String(text ?? "").split("\n")) {
+      for (const wrapped of wrapVisible(line, Math.max(8, width - 4))) {
+        rows.push(wrapped);
+      }
+    }
+    this.#write("\n");
+    if (t.mode === "none") {
+      // 无色终端（NO_COLOR / 管道）：退化为装订线纯文本，不留空白底色行。
+      this.#write(`${t.dim("─".repeat(width))}\n`);
+      for (const row of rows) {
+        this.#write(`${t.fg("accent", this.#sym.gutter)} ${row}\n`);
+      }
+    } else {
+      // 整块底色「长方体」：上下各留一行空白底色，左右各留 1 列内边距（对齐 pi）。
+      const paint = (line) => t.bg("userBg", line);
+      this.#write(`${paint(" ".repeat(width))}\n`);
+      for (const row of rows) {
+        const pad = Math.max(0, width - 2 - visibleWidth(row));
+        this.#write(`${paint(`  ${row}${" ".repeat(pad)}`)}\n`);
+      }
+      this.#write(`${paint(" ".repeat(width))}\n`);
+    }
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = false;

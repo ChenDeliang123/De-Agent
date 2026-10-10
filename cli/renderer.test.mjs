@@ -142,6 +142,24 @@ test("renderer shows the spinner inside the status row", () => {
   assert.equal(renderer.waiting, false);
 });
 
+test("region renderer paints the submitted input as a filled block", () => {
+  const { terminal, out, text } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setFooter("footer");
+  const renderer = new TranscriptRenderer(out, { mode: "truecolor", region });
+
+  renderer.user("do it");
+
+  // userBg = #343541（dark 主题）：整行底色 + 左右各 1 列内边距。
+  assert.ok(text().includes("\x1b[48;2;52;53;65m"), "user message should be painted with userBg");
+  const rows = terminal.lines();
+  assert.ok(
+    rows.some((row) => row.startsWith("  do it")),
+    `user text keeps a 2-space gutter: ${JSON.stringify(rows)}`,
+  );
+  assert.ok(rows.some((row) => row.includes("footer")), "footer stays below the block");
+});
+
 test("renderer without a region keeps writing directly (non-TTY / pipe)", () => {
   const out = fakeOut(false);
   const region = new BottomRegion(out);

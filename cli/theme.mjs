@@ -26,6 +26,8 @@ const DARK = {
   mdCode: [138, 190, 183],
   diffAdded: [181, 189, 104],
   diffRemoved: [204, 102, 102],
+  // 用户消息底色（对齐 pi 的 userMsgBg #343541）：发送后的输入用整块底色区分。
+  userBg: [52, 53, 65],
 };
 
 // light 主题：适配浅色背景，整体更深更饱和。
@@ -46,6 +48,7 @@ const LIGHT = {
   mdCode: [43, 108, 106],
   diffAdded: [70, 120, 50],
   diffRemoved: [180, 55, 55],
+  userBg: [232, 232, 232],
 };
 
 export const PALETTES = { dark: DARK, light: LIGHT };
