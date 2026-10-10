@@ -209,6 +209,7 @@ de logs      # 查看后端日志
 /clear            清屏
 /help             显示全部指令
 /hotkeys          显示键盘快捷键
+/theme [dark|light]  切换配色主题（写入 conf/cli.ini 的 [ui] theme）
 /quit             退出（/exit 同义）
 ```
 

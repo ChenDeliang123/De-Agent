@@ -17,7 +17,8 @@ import {
   streamChat,
 } from "./session.mjs";
 import { LineEditor, renderHotkeys } from "./editor.mjs";
-import { loadCliConfig } from "./config.mjs";
+import { loadCliConfig, updateCliUiConfig } from "./config.mjs";
+import { PALETTES, detectColorMode, makeStyler, pickSymbols } from "./theme.mjs";
 import { resolveEditorCommand } from "./external-editor.mjs";
 import {
   commands,
@@ -29,7 +30,9 @@ import {
 import { formatPromptLabel, gitBranch } from "./statusbar.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
-const renderer = new TranscriptRenderer();
+// 与 renderer / editor 共享的 styler，支持运行时换主题。
+const uiStyler = makeStyler(detectColorMode(process.env, output));
+const renderer = new TranscriptRenderer(output, { styler: uiStyler });
 let activeAbortController = null;
 // 审批提示期间暂停全局 Esc/Ctrl+C 中断，避免与审批输入争抢按键。
 let approvalPending = false;
@@ -325,6 +328,18 @@ async function main() {
   };
 
   const cliConfig = loadCliConfig({ explicit: options.cliConfig });
+  const initialTheme =
+    typeof cliConfig.theme === "string" && PALETTES[cliConfig.theme]
+      ? cliConfig.theme
+      : "dark";
+  uiStyler.setPalette(PALETTES[initialTheme]);
+  const symbolEnv = { ...process.env };
+  if (cliConfig.nerdFont) {
+    symbolEnv.DE_NERD_FONT = "1";
+  }
+  renderer.setSymbols(pickSymbols(symbolEnv));
+  state.theme = initialTheme;
+  state.cliConfigPath = cliConfig.path;
   const editorCommand = resolveEditorCommand({
     flag: options.editor,
     configured: cliConfig.externalEditor,
@@ -336,6 +351,7 @@ async function main() {
         output,
         complete: (prefix) => completeCommands(prefix, commands),
         editorCommand,
+        styler: uiStyler,
       })
     : null;
 
@@ -365,9 +381,27 @@ async function main() {
   };
   ctx.promptProjectTrust = () => maybePromptProjectTrust(ctx);
 
+  // 运行时换主题并持久化到 [ui] theme。
+  ctx.setTheme = (name) => {
+    if (!PALETTES[name]) {
+      return false;
+    }
+    uiStyler.setPalette(PALETTES[name]);
+    state.theme = name;
+    if (state.cliConfigPath) {
+      try {
+        updateCliUiConfig(state.cliConfigPath, { theme: name });
+      } catch (error) {
+        log("warning", "cli", `event=theme_persist_failed message=${error.message}`);
+      }
+    }
+    return true;
+  };
+
   // 输入提示符状态：cwd 分支 + 当前权限模式（best-effort）。
   ctx.refreshPromptState = async () => {
     state.branch = gitBranch(state.cwd);
+    renderer.setCwd(state.cwd);
     try {
       const info = await effectivePermission(backend, state.cwd);
       state.mode = info.mode ?? null;

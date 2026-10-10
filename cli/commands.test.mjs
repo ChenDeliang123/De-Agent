@@ -136,3 +136,23 @@ test("clear and quit commands drive the injected context", async () => {
   await runCommand(ctx, "/quit");
   assert.equal(state.shouldExit, true);
 });
+
+test("theme command switches and reports the theme", async () => {
+  const applied = [];
+  const { ctx, printed } = makeContext({
+    state: { theme: "dark" },
+    setTheme: (name) => {
+      applied.push(name);
+      return true;
+    },
+  });
+  await runCommand(ctx, "/theme light");
+  assert.deepEqual(applied, ["light"]);
+  assert.ok(printed.some((line) => line.includes("theme: light")));
+
+  await runCommand(ctx, "/theme");
+  assert.ok(printed.some((line) => line.includes("available: dark, light")));
+
+  await runCommand(ctx, "/theme nope");
+  assert.ok(printed.some((line) => line.includes("unknown theme")));
+});

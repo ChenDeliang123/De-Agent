@@ -409,6 +409,7 @@ export class LineEditor {
     maxCandidates = MAX_CANDIDATES,
     externalEditor = editInExternalEditor,
     editorCommand,
+    styler,
   } = {}) {
     this.#input = input ?? process.stdin;
     this.#output = output ?? process.stdout;
@@ -416,7 +417,7 @@ export class LineEditor {
     this.#maxCandidates = maxCandidates;
     this.#externalEditor = externalEditor;
     this.#editorCommand = editorCommand ?? null;
-    this.#styler = makeStyler(detectColorMode(process.env, this.#output));
+    this.#styler = styler ?? makeStyler(detectColorMode(process.env, this.#output));
     this.#state = createEditorState(history);
     if (this.#input.isTTY && !this.#input.__aiagentKeypress) {
       readline.emitKeypressEvents(this.#input);

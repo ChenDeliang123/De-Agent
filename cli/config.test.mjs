@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadCliConfig, parseIni, resolveCliConfigPath } from "./config.mjs";
+import { loadCliConfig, parseIni, resolveCliConfigPath, updateCliUiConfig } from "./config.mjs";
 
 test("parseIni reads sections, keys and values", () => {
   const ini = parseIni(`
@@ -64,6 +64,8 @@ test("loadCliConfig reads [editor] external from an explicit file", () => {
     assert.deepEqual(loadCliConfig({ explicit: configPath }), {
       path: configPath,
       externalEditor: "code --wait",
+      theme: null,
+      nerdFont: false,
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -79,7 +81,40 @@ test("loadCliConfig accepts the external_editor alias and missing file", () => {
     assert.deepEqual(loadCliConfig({ explicit: join(directory, "does-not-exist.ini") }), {
       path: null,
       externalEditor: null,
+      theme: null,
+      nerdFont: false,
     });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("loadCliConfig reads [ui] theme and nerd_font", () => {
+  const directory = mkdtempSync(join(tmpdir(), "aiagent-cli-config-"));
+  const configPath = join(directory, "cli.ini");
+  try {
+    writeFileSync(configPath, "[ui]\ntheme = light\nnerd_font = true\n");
+    const config = loadCliConfig({ explicit: configPath });
+    assert.equal(config.theme, "light");
+    assert.equal(config.nerdFont, true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("updateCliUiConfig creates and updates the [ui] section", () => {
+  const directory = mkdtempSync(join(tmpdir(), "aiagent-cli-config-"));
+  const configPath = join(directory, "cli.ini");
+  try {
+    writeFileSync(configPath, "[editor]\nexternal = nvim\n");
+    updateCliUiConfig(configPath, { theme: "light" });
+    let config = loadCliConfig({ explicit: configPath });
+    assert.equal(config.externalEditor, "nvim");
+    assert.equal(config.theme, "light");
+
+    updateCliUiConfig(configPath, { theme: "dark" });
+    config = loadCliConfig({ explicit: configPath });
+    assert.equal(config.theme, "dark");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

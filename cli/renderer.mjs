@@ -1,6 +1,6 @@
 import { clipToWidth, displayWidth } from "./editor.mjs";
 import { createMarkdownRenderer } from "./markdown.mjs";
-import { detectColorMode, makeStyler, pickSymbols } from "./theme.mjs";
+import { detectColorMode, hyperlink, makeStyler, pickSymbols } from "./theme.mjs";
 
 const MaxDisplayText = 4000;
 const IDLE_DELAY_MS = 500;
@@ -144,6 +144,7 @@ export class TranscriptRenderer {
   #currentTool = "";
   #turnLabelPrinted = false;
   #mdBuffer = "";
+  #cwd = "";
 
   constructor(out = process.stdout, options = {}) {
     this.#out = out;
@@ -156,6 +157,17 @@ export class TranscriptRenderer {
 
   get waiting() {
     return this.#spinner.active;
+  }
+
+  setSymbols(symbols) {
+    if (symbols) {
+      this.#sym = symbols;
+    }
+  }
+
+  // 当前工作目录，用于把工具里的相对路径解析成可点击的绝对路径。
+  setCwd(cwd) {
+    this.#cwd = cwd ?? "";
   }
 
   wait(label = "working") {
@@ -376,16 +388,18 @@ export class TranscriptRenderer {
 
   #toolCallLines(name, args) {
     const t = this.#t;
+    const lines = [];
+    const hasPath =
+      args && typeof args === "object" && typeof args.path === "string" && args.path;
+    if (hasPath) {
+      lines.push(t.dim(this.#pathLink(args.path)));
+    }
     if (
       name === "edit" &&
       args &&
       typeof args === "object" &&
       (args.oldText !== undefined || args.newText !== undefined)
     ) {
-      const lines = [];
-      if (args.path) {
-        lines.push(t.dim(String(args.path)));
-      }
       for (const line of String(args.oldText ?? "").split("\n")) {
         if (line !== "") {
           lines.push(t.fg("diffRemoved", `- ${line}`));
@@ -402,8 +416,34 @@ export class TranscriptRenderer {
       }
       return lines;
     }
-    const text = prettyArguments(args);
-    return text ? [t.dim(clipToWidth(text, this.#width() - 6))] : [];
+    // 其余工具：去掉已单独展示的 path，剩下的参数紧凑打印。
+    let rest = args;
+    if (hasPath) {
+      rest = { ...args };
+      delete rest.path;
+    }
+    const text = prettyArguments(rest);
+    if (text && text !== "{}") {
+      lines.push(t.dim(clipToWidth(text, this.#width() - 6)));
+    }
+    return lines;
+  }
+
+  // 把工具参数里的路径变成 OSC 8 可点击链接（仅 TTY）。
+  #pathLink(path) {
+    const text = String(path);
+    if (!this.#out.isTTY) {
+      return text;
+    }
+    const absolute = text.startsWith("/")
+      ? text
+      : this.#cwd
+        ? `${this.#cwd}/${text}`
+        : "";
+    if (!absolute) {
+      return text;
+    }
+    return hyperlink(`file://${absolute}`, text);
   }
 
   #previewLines(text) {

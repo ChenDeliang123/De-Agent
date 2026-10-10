@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ASCII_SYMBOLS,
+  PALETTES,
   SYMBOLS,
   detectColorMode,
   makeStyler,
@@ -43,4 +44,13 @@ test("makeStyler emits the right SGR for each mode", () => {
 test("pickSymbols switches to ASCII via DE_ASCII", () => {
   assert.equal(pickSymbols({}), SYMBOLS);
   assert.equal(pickSymbols({ DE_ASCII: "1" }), ASCII_SYMBOLS);
+});
+
+test("makeStyler palette can be switched at runtime", () => {
+  const styler = makeStyler("truecolor", PALETTES.dark);
+  const dark = styler.fg("accent", "x");
+  styler.setPalette(PALETTES.light);
+  const light = styler.fg("accent", "x");
+  assert.notEqual(dark, light);
+  assert.ok(styler.mode === "truecolor");
 });

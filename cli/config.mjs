@@ -9,7 +9,7 @@
 //   --cli-config <file> > $AIAGENT_CLI_CONFIG > ./conf/cli.ini > <cli>/../conf/cli.ini
 // 找不到文件不报错，返回空配置。
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -66,15 +66,89 @@ export function resolveCliConfigPath({
 export function loadCliConfig(options = {}) {
   const path = resolveCliConfigPath(options);
   if (!path || !existsSync(path)) {
-    return { path: null, externalEditor: null };
+    return { path: null, externalEditor: null, theme: null, nerdFont: false };
   }
   let content;
   try {
     content = readFileSync(path, "utf-8");
   } catch (error) {
-    return { path, externalEditor: null, error: error.message };
+    return { path, externalEditor: null, theme: null, nerdFont: false, error: error.message };
   }
-  const editor = parseIni(content).editor ?? {};
+  const ini = parseIni(content);
+  const editor = ini.editor ?? {};
+  const ui = ini.ui ?? {};
   const externalEditor = editor.external || editor.external_editor || null;
-  return { path, externalEditor };
+  const theme = ui.theme || null;
+  const nerdFont =
+    ui.nerd_font === "1" || String(ui.nerd_font || "").toLowerCase() === "true";
+  return { path, externalEditor, theme, nerdFont };
+}
+
+// 在 INI 文件中新增/更新 [ui] 段下的若干键（用于 /theme 持久化）。
+// 保留文件其余内容；找不到 [ui] 段时追加。
+export function updateCliUiConfig(path, updates) {
+  if (!path) {
+    return false;
+  }
+  let lines = [];
+  try {
+    lines = readFileSync(path, "utf-8").split(/\r?\n/);
+  } catch {
+    lines = [];
+  }
+  // 去掉末尾空行，便于追加。
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+  }
+
+  let sectionStart = -1;
+  let sectionEnd = lines.length;
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      const name = trimmed.slice(1, -1).trim().toLowerCase();
+      if (sectionStart === -1 && name === "ui") {
+        sectionStart = i;
+      } else if (sectionStart !== -1) {
+        sectionEnd = i;
+        break;
+      }
+    }
+  }
+
+  if (sectionStart === -1) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push("[ui]");
+    for (const [key, value] of Object.entries(updates)) {
+      lines.push(`${key} = ${value}`);
+    }
+  } else {
+    for (const [key, value] of Object.entries(updates)) {
+      let found = false;
+      for (let i = sectionStart + 1; i < sectionEnd; i += 1) {
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+          continue;
+        }
+        const equals = trimmed.indexOf("=");
+        if (equals === -1) {
+          continue;
+        }
+        if (trimmed.slice(0, equals).trim().toLowerCase() === key.toLowerCase()) {
+          lines[i] = `${key} = ${value}`;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        lines.splice(sectionEnd, 0, `${key} = ${value}`);
+        sectionEnd += 1;
+      }
+    }
+  }
+
+  writeFileSync(path, `${lines.join("\n")}\n`, "utf-8");
+  return true;
 }

@@ -6,3 +6,10 @@
 
 [editor]
 external = nano
+
+; UI 外观（可用 CLI 内 /theme 切换并写回本文件）
+[ui]
+; dark | light
+theme = dark
+; 需要安装 Nerd Font；也可用环境变量 DE_NERD_FONT=1
+nerd_font = false
