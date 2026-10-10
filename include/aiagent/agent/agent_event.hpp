@@ -7,11 +7,12 @@ namespace aiagent::agent {
 
 // Agent 流式执行过程中的结构化事件，供上层（Web Gateway / 终端客户端）渲染。
 enum class AgentEventKind {
-    kToken,      // assistant 文本增量（content）
-    kToolStart,  // 工具调用开始（tool_call_id / tool_name / arguments）
-    kToolOutput, // 工具执行中的增量输出（tool_call_id / content），当前预留
-    kToolEnd,    // 工具执行结束（tool_call_id / ok / text）
-    kCompaction, // 上下文压缩完成（compaction_tokens_before/after）
+    kToken,            // assistant 文本增量（content）
+    kToolStart,        // 工具调用开始（tool_call_id / tool_name / arguments）
+    kToolOutput,       // 工具执行中的增量输出（tool_call_id / content），当前预留
+    kToolEnd,          // 工具执行结束（tool_call_id / ok / text）
+    kCompaction,       // 上下文压缩完成（compaction_tokens_before/after）
+    kApprovalRequest,  // 工具需要人工确认（tool_call_id / tool_name / arguments / approval_reason）
 };
 
 struct AgentEvent {
@@ -35,6 +36,9 @@ struct AgentEvent {
     int compaction_tokens_before = 0;
     int compaction_tokens_after = 0;
     bool compaction_forced = false;  // overflow/length 触发的强制压缩
+
+    // kApprovalRequest
+    std::string approval_reason;
 };
 
 using AgentEventCallback = std::function<void(const AgentEvent&)>;

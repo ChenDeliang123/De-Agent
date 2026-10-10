@@ -111,6 +111,16 @@ public:
     using PermissionRemoveHandler =
             std::function<bool(const std::string& path, std::string* error)>;
 
+    // 工具审批（POST /api/v1/chat/approve）。
+    // decision 取 allow_once / allow_session / deny；命中等待中的请求返回 true。
+    using ApproveHandler = std::function<bool(const std::string& session_id,
+                                              const std::string& tool_call_id,
+                                              const std::string& decision,
+                                              std::string* error)>;
+
+    // 会话取消时的额外通知（用于唤醒阻塞中的审批等待）。
+    using CancelObserver = std::function<void(const std::string& session_id)>;
+
     // 会话详情补充（GET /api/v1/sessions/:id/stats）：最近 cwd 与项目指令来源。
     // 返回 false 时 stats 不附带 cwd/instructions。
     using SessionDetailsHandler =
@@ -159,6 +169,13 @@ public:
     void SetPermissionResolveHandler(PermissionResolveHandler handler);
     void SetPermissionSetHandler(PermissionSetHandler handler);
     void SetPermissionRemoveHandler(PermissionRemoveHandler handler);
+
+    // 注入工具审批处理逻辑。未设置时 /chat/approve 返回 501。
+    void SetApproveHandler(ApproveHandler handler);
+
+    // 注入取消观察者（可选）。每次 /chat/cancel 命中时调用，可用于唤醒
+    // 阻塞中的审批等待。
+    void SetCancelObserver(CancelObserver observer);
 
     // 注入会话历史内存缓存（可选）。命中后，读取会话历史/标题的 REST 接口
     // 不再每次全表扫描 task store；未注入时行为与旧实现一致。

@@ -95,6 +95,7 @@ endif()
 add_library(aiagent_agent STATIC
   src/app_paths.cpp
   src/agent/agent_runtime.cpp
+  src/agent/approval_broker.cpp
   src/agent/compaction.cpp
   src/agent/history_cache.cpp
   src/agent/project_instructions.cpp
@@ -199,6 +200,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(permission_store_test tests/permission_store_test.cpp)
   target_link_libraries(permission_store_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_permission_store COMMAND permission_store_test)
+
+  add_executable(approval_broker_test tests/approval_broker_test.cpp)
+  target_link_libraries(approval_broker_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_approval_broker COMMAND approval_broker_test)
 
   add_executable(app_paths_test tests/app_paths_test.cpp)
   target_link_libraries(app_paths_test PRIVATE aiagent_agent)

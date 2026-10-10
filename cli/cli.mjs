@@ -6,6 +6,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { TranscriptRenderer } from "./renderer.mjs";
 import { log } from "./logger.mjs";
 import {
+  approveChat,
   cancelChat,
   listSessions,
   loadHistory,
@@ -26,10 +27,12 @@ import {
 const defaultBackend = "http://127.0.0.1:18081";
 const renderer = new TranscriptRenderer();
 let activeAbortController = null;
+// 审批提示期间暂停全局 Esc/Ctrl+C 中断，避免与审批输入争抢按键。
+let approvalPending = false;
 
 if (input.isTTY) {
   input.on("keypress", (_text, key) => {
-    if (!activeAbortController) {
+    if (!activeAbortController || approvalPending) {
       return;
     }
     if (key?.name === "escape" || (key?.ctrl && key?.name === "c")) {
@@ -166,7 +169,7 @@ async function sendMessage(ctx, text) {
       backend,
       requestSessionId,
       text,
-      ({ event, data }) => {
+      async ({ event, data }) => {
         if (!data) {
           return;
         }
@@ -180,6 +183,8 @@ async function sendMessage(ctx, text) {
           renderer.toolEnd(Boolean(data.ok), data.text ?? "");
         } else if (event === "compaction") {
           renderer.compaction(data);
+        } else if (event === "approval_request") {
+          await handleApproval(ctx, requestSessionId, data);
         } else if (event === "error") {
           throw new Error(data.error ?? "unknown error");
         }
@@ -231,6 +236,43 @@ function makeSelect(editor) {
   return (items, prompt) => editor.selectList(items, prompt);
 }
 
+// 处理 approval_request：弹交互提示并把决定回传后端。
+async function handleApproval(ctx, sessionId, data) {
+  const toolCallId = data.id ?? "";
+  renderer.approvalRequest(data);
+  let decision = "deny";
+  approvalPending = true;
+  try {
+    const editor = ctx.editor ?? null;
+    if (editor && typeof editor.readLine === "function") {
+      const answer = await editor.readLine("[y]es once / [a]lways this session / [N]o: ");
+      const text = String(answer?.text ?? "").trim().toLowerCase();
+      if (text === "y" || text === "yes") {
+        decision = "allow_once";
+      } else if (text === "a" || text === "always") {
+        decision = "allow_session";
+      }
+    }
+  } finally {
+    approvalPending = false;
+  }
+  try {
+    await approveChat(ctx.backend, sessionId, toolCallId, decision);
+    log(
+      "info",
+      "cli",
+      `event=approval_decision session=${sessionId} tool_call=${toolCallId} decision=${decision}`,
+    );
+  } catch (error) {
+    log(
+      "error",
+      "cli",
+      `event=approval_error session=${sessionId} message=${error.message}`,
+    );
+  }
+  renderer.approvalResolved(decision);
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -269,6 +311,7 @@ async function main() {
     backend,
     state,
     renderer,
+    editor,
     commands,
     print: (line) => console.log(line),
     log,

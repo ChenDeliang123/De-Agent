@@ -176,7 +176,7 @@ export async function streamChat(
       if (eventName === "done") {
         donePayload = data;
       }
-      onEvent?.({ event: eventName, data });
+      await onEvent?.({ event: eventName, data });
     }
   }
   return donePayload;
@@ -222,6 +222,25 @@ export async function listPermissions(backendUrl) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(body.error ?? `list permissions failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function approveChat(backendUrl, sessionId, toolCallId, decision) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/chat/approve`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(
+      JSON.stringify({
+        session_id: sessionId,
+        tool_call_id: toolCallId,
+        decision,
+      }),
+    ),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `approve request failed: HTTP ${response.status}`);
   }
   return body;
 }

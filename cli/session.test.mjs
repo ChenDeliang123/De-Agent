@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { cancelChat, compactSession, listSessions, loadHistory, streamChat } from "./session.mjs";
+import { cancelChat, compactSession, listSessions, loadHistory, streamChat, approveChat } from "./session.mjs";
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -155,6 +155,75 @@ test("cli stream can be aborted by signal", async () => {
     if (openResponse) {
       openResponse.destroy();
     }
+    await close(backend);
+  }
+});
+
+test("cli session stream awaits async event handlers", async () => {
+  const backend = http.createServer((request, response) => {
+    if (request.url === "/api/v1/chat/stream") {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      request.on("data", () => {});
+      request.on("end", () => {
+        response.write('event: content\ndata: {"content":"x"}\n\n');
+        response.end('event: done\ndata: {"session_id":"s1"}\n\n');
+      });
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+
+  const port = await listen(backend);
+  try {
+    const order = [];
+    await streamChat(`http://127.0.0.1:${port}`, "s1", "hi", async ({ event }) => {
+      if (event === "content") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        order.push("handler-done");
+      }
+      if (event === "done") {
+        order.push("done-event");
+      }
+    });
+    assert.deepEqual(order, ["handler-done", "done-event"]);
+  } finally {
+    await close(backend);
+  }
+});
+
+test("cli session client sends approval decisions", async () => {
+  let body = null;
+  const backend = http.createServer((request, response) => {
+    if (request.url === "/api/v1/chat/approve" && request.method === "POST") {
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"resolved":true}');
+      });
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+
+  const port = await listen(backend);
+  try {
+    const result = await approveChat(
+      `http://127.0.0.1:${port}`,
+      "s1",
+      "call-1",
+      "allow_once",
+    );
+    assert.deepEqual(result, { resolved: true });
+    assert.deepEqual(body, {
+      session_id: "s1",
+      tool_call_id: "call-1",
+      decision: "allow_once",
+    });
+  } finally {
     await close(backend);
   }
 });

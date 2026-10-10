@@ -151,6 +151,38 @@ int main() {
         Expect(stream_body.find(R"({"content":"好"})") != std::string::npos,
                "stream body should contain the second token");
 
+        // 结构化事件：approval_request 帧应带工具名与原因。
+        gateway.SetStreamEventHandler(
+                [](const std::string&, const std::string&, const std::string&,
+                   const aiagent::agent::AgentEventCallback& on_event,
+                   const aiagent::web::WebGateway::CancelCallback&) {
+                    aiagent::agent::AgentEvent approval;
+                    approval.kind = aiagent::agent::AgentEventKind::kApprovalRequest;
+                    approval.tool_call_id = "call-1";
+                    approval.tool_name = "bash";
+                    approval.arguments = R"({"command":"ls"})";
+                    approval.approval_reason = "command execution needs approval";
+                    on_event(approval);
+                    aiagent::agent::AgentEvent token;
+                    token.kind = aiagent::agent::AgentEventKind::kToken;
+                    token.content = "after-approval";
+                    on_event(token);
+                });
+        std::string approval_body;
+        const auto approval_stream = http.PostStream(
+                base + "/api/v1/chat/stream",
+                R"({"session_id":null,"message":"need-approval"})",
+                "application/json",
+                [&approval_body](std::string_view chunk) {
+                    approval_body.append(chunk.data(), chunk.size());
+                });
+        Expect(approval_stream.IsSuccess(), "approval stream should succeed");
+        Expect(approval_body.find("event: approval_request") != std::string::npos,
+               "stream should emit approval_request event");
+        Expect(approval_body.find("command execution needs approval") !=
+                       std::string::npos,
+               "approval request should carry the reason");
+
         std::string compact_cwd;
         gateway.SetCompactHandler(
                 [&](const std::string& id, const std::string& cwd, std::string* error) {
@@ -371,6 +403,28 @@ int main() {
         Expect(nlohmann::json::parse(perm_after->body).value("source", std::string()) ==
                        "default",
                "after delete, path falls back to default");
+
+        // ---- 工具审批接口 ----
+        bool approve_called = false;
+        gateway.SetApproveHandler([&](const std::string& session_id,
+                                      const std::string& tool_call_id,
+                                      const std::string& decision, std::string*) {
+            approve_called = session_id == "s" && tool_call_id == "c" &&
+                             decision == "allow_once";
+            return true;
+        });
+        const auto approve = perm.Post(
+                "/api/v1/chat/approve",
+                R"({"session_id":"s","tool_call_id":"c","decision":"allow_once"})",
+                "application/json");
+        Expect(approve && approve->status == 200 && approve_called,
+               "approve endpoint should resolve the pending request");
+        const auto approve_bad = perm.Post(
+                "/api/v1/chat/approve",
+                R"({"session_id":"","tool_call_id":"","decision":""})",
+                "application/json");
+        Expect(approve_bad && approve_bad->status == 400,
+               "approve endpoint should require all fields");
 
         const auto sessions_p1 = http.Get(base + "/api/v1/sessions");
         const auto session_list_p1 = nlohmann::json::parse(sessions_p1.body);

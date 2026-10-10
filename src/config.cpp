@@ -687,6 +687,18 @@ std::optional<PermissionsConfig> ParsePermissionsConfig(const std::string& conte
             config.non_interactive_max_mode = value;
         } else if (key == "allow_full_access") {
             config.allow_full_access = Lower(value) == "true" || value == "1";
+        } else if (key == "approval_timeout_seconds") {
+            try {
+                const int parsed = std::stoi(value);
+                if (parsed > 0) {
+                    config.approval_timeout_seconds = parsed;
+                }
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid approval_timeout_seconds: " + value;
+                }
+                return std::nullopt;
+            }
         }
     }
     return config;

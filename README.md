@@ -254,6 +254,7 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | `POST` | `/api/v1/chat` | 同步对话 |
 | `POST` | `/api/v1/chat/stream` | SSE 逐 token 流式对话 |
 | `POST` | `/api/v1/chat/cancel` | 取消指定 session 的当前流式任务 |
+| `POST` | `/api/v1/chat/approve` | 回传工具审批决定 `{session_id, tool_call_id, decision}` |
 | `POST` | `/api/v1/sessions/:id/compact` | 手动压缩指定会话历史 |
 | `GET` | `/api/v1/sessions/:id/compaction` | 查询最近一次压缩记录 |
 | `PATCH` | `/api/v1/sessions/:id` | 设置会话显式标题（`/name`） |
@@ -405,8 +406,9 @@ Agent 在某个工作路径下的行为由「权限模式」决定。终端用 `
 | `workspace` | ✅ | ✅ | ❌ | 需确认 |
 | `full` | ✅ | ✅ | ✅ | ✅ |
 
-> 当前阶段（M1）**逐次人工确认尚未实现**：`confirm` 的写/命令、`workspace`
-> 的命令会先表现为**拒绝并提示**，接入审批后再弹确认。
+> `confirm` 的写/命令、`workspace` 的命令会发起**逐次人工确认**：终端弹出
+> `[y]es once / [a]lways this session / [N]o`；超时（默认 120s）或非交互调用方
+> （A2A / 同步接口）按拒绝处理。
 
 - 权限按 **canonical 工作路径**存储，支持父目录就近继承；`full` 不参与继承。
 - 数据存在**用户级目录**（默认 `~/.de/permissions.json`，目录按需创建），

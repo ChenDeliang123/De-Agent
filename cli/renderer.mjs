@@ -123,6 +123,31 @@ export class TranscriptRenderer {
     this.#resumeAssistant = false;
   }
 
+  approvalRequest(data) {
+    const name = data?.name ?? "tool";
+    const reason = data?.reason ?? "requires approval";
+    const args = prettyArguments(data?.arguments);
+    this.#write(`\n${bold}${yellow}⚠ approval needed${reset} ${bold}${name}${reset}`);
+    if (args) {
+      this.#write(` ${dim}${args}${reset}`);
+    }
+    this.#write(`\n${dim}  ${reason}${reset}\n`);
+    this.#assistantActive = false;
+    this.#assistantWroteText = false;
+    this.#resumeAssistant = true;
+  }
+
+  approvalResolved(decision) {
+    const label =
+      decision === "allow_once"
+        ? `${green}approved (once)${reset}`
+        : decision === "allow_session"
+          ? `${green}approved (this session)${reset}`
+          : `${red}denied${reset}`;
+    this.#write(`${dim}  → ${label}\n`);
+    this.#resumeAssistant = true;
+  }
+
   compaction(data) {
     const before = data?.tokens_before ?? "?";
     const after = data?.tokens_after ?? "?";

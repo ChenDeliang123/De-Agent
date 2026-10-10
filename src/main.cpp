@@ -25,6 +25,7 @@
 
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/agent/approval_broker.hpp"
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
@@ -379,6 +380,14 @@ int main(int argc, char** argv) {
         }
         runtime.SetPermissionStore(permission_store);
         runtime.SetPermissionSettings(permission_settings);
+        // 逐次人工确认：Agent 阻塞等待，CLI 通过 /api/v1/chat/approve 唤醒。
+        auto approval_broker = std::make_shared<aiagent::agent::ApprovalBroker>();
+        runtime.SetApprovalHandler(
+                [approval_broker, timeout = permissions_config.approval_timeout_seconds](
+                        const aiagent::agent::ApprovalRequest& request) {
+                    return approval_broker->Wait(request.context_id, request.tool_call_id,
+                                                 std::chrono::seconds(timeout));
+                });
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "main",
                 "permissions file=" + permissions_path + " default_mode=" +
@@ -664,6 +673,30 @@ int main(int argc, char** argv) {
                             "event=permission_reset path=" + path);
                     return true;
                 });
+        // 工具审批：CLI 收到 approval_request 后回传决定，唤醒阻塞中的 Agent。
+        web_gateway.SetApproveHandler(
+                [approval_broker](const std::string& session_id,
+                                  const std::string& tool_call_id,
+                                  const std::string& decision, std::string* error) {
+                    using aiagent::agent::ApprovalDecision;
+                    ApprovalDecision parsed;
+                    if (decision == "allow_once") {
+                        parsed = ApprovalDecision::kAllowOnce;
+                    } else if (decision == "allow_session") {
+                        parsed = ApprovalDecision::kAllowSession;
+                    } else if (decision == "deny") {
+                        parsed = ApprovalDecision::kDeny;
+                    } else {
+                        if (error != nullptr) {
+                            *error = "invalid decision: " + decision;
+                        }
+                        return false;
+                    }
+                    return approval_broker->Resolve(session_id, tool_call_id, parsed);
+                });
+        web_gateway.SetCancelObserver([approval_broker](const std::string& session_id) {
+            approval_broker->CancelSession(session_id);
+        });
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,

@@ -162,6 +162,21 @@ void WriteAgentEventFrame(
                                  {"tokens_after", event.compaction_tokens_after},
                                  {"forced", event.compaction_forced}});
             break;
+        case AgentEventKind::kApprovalRequest: {
+            nlohmann::json arguments = nlohmann::json::object();
+            if (!event.arguments.empty()) {
+                try {
+                    arguments = nlohmann::json::parse(event.arguments);
+                } catch (const nlohmann::json::exception&) {
+                    arguments = event.arguments;
+                }
+            }
+            write("approval_request", {{"id", event.tool_call_id},
+                                      {"name", event.tool_name},
+                                      {"arguments", arguments},
+                                      {"reason", event.approval_reason}});
+            break;
+        }
     }
 }
 
@@ -261,6 +276,14 @@ public:
         permission_remove_handler_ = std::move(handler);
     }
 
+    void SetApproveHandler(WebGateway::ApproveHandler handler) {
+        approve_handler_ = std::move(handler);
+    }
+
+    void SetCancelObserver(WebGateway::CancelObserver observer) {
+        cancel_observer_ = std::move(observer);
+    }
+
     void SetSessionMetaStore(aiagent::agent::SessionMetaStore* session_meta_store) {
         session_meta_store_ = session_meta_store;
     }
@@ -270,6 +293,9 @@ public:
         const auto it = active_cancels_.find(session_id);
         if (it != active_cancels_.end() && it->second) {
             it->second->store(true);
+        }
+        if (cancel_observer_) {
+            cancel_observer_(session_id);
         }
     }
 
@@ -765,6 +791,56 @@ private:
                                    "application/json");
                        });
 
+        server_.Post("/api/v1/chat/approve",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!approve_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"approval not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             const std::string session_id = StringValue(body, "session_id");
+                             const std::string tool_call_id =
+                                     StringValue(body, "tool_call_id");
+                             const std::string decision = StringValue(body, "decision");
+                             if (session_id.empty() || tool_call_id.empty() ||
+                                 decision.empty()) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         R"({"error":"session_id, tool_call_id and decision are required"})",
+                                         "application/json");
+                                 return;
+                             }
+                             std::string error;
+                             if (!approve_handler_(session_id, tool_call_id, decision,
+                                                   &error)) {
+                                 response.status = 404;
+                                 response.set_content(
+                                         nlohmann::json{{"error",
+                                                         error.empty()
+                                                                 ? std::string(
+                                                                           "no pending approval")
+                                                                 : error}}
+                                                 .dump(),
+                                         "application/json");
+                                 return;
+                             }
+                             response.set_content(
+                                     nlohmann::json{{"resolved", true}}.dump(),
+                                     "application/json");
+                         } catch (const nlohmann::json::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                      e.what()}}
+                                             .dump(),
+                                     "application/json");
+                         }
+                     });
+
         server_.Post("/api/v1/chat",
                      [this](const httplib::Request& request, httplib::Response& response) {
                          try {
@@ -985,6 +1061,8 @@ private:
     WebGateway::PermissionResolveHandler permission_resolve_handler_;
     WebGateway::PermissionSetHandler permission_set_handler_;
     WebGateway::PermissionRemoveHandler permission_remove_handler_;
+    WebGateway::ApproveHandler approve_handler_;
+    WebGateway::CancelObserver cancel_observer_;
     aiagent::agent::SessionMetaStore* session_meta_store_ = nullptr;
     std::mutex cancels_mutex_;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_cancels_;
@@ -1049,6 +1127,14 @@ void WebGateway::SetPermissionSetHandler(WebGateway::PermissionSetHandler handle
 void WebGateway::SetPermissionRemoveHandler(
         WebGateway::PermissionRemoveHandler handler) {
     impl_->SetPermissionRemoveHandler(std::move(handler));
+}
+
+void WebGateway::SetApproveHandler(WebGateway::ApproveHandler handler) {
+    impl_->SetApproveHandler(std::move(handler));
+}
+
+void WebGateway::SetCancelObserver(WebGateway::CancelObserver observer) {
+    impl_->SetCancelObserver(std::move(observer));
 }
 
 void WebGateway::SetSessionMetaStore(

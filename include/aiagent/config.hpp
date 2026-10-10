@@ -64,6 +64,7 @@ struct PermissionsConfig {
     std::string max_mode = "full";
     std::string non_interactive_max_mode = "workspace";
     bool allow_full_access = true;
+    int approval_timeout_seconds = 120;
 };
 
 // 终端 Agent 的项目指令（AGENTS.md）配置。

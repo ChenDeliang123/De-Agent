@@ -281,6 +281,56 @@ private:
     std::string tool_name_;
 };
 
+// 奇数调用请求工具，偶数调用返回最终回复（用于测试会话内“总是允许”缓存）。
+class AlternatingToolModel final : public aiagent::llm::IModelClient {
+public:
+    explicit AlternatingToolModel(std::string tool_name)
+        : tool_name_(std::move(tool_name)) {}
+
+    int calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        if (calls % 2 == 1) {
+            choice.tool_calls.push_back(aiagent::llm::ToolCall{
+                    "call-" + std::to_string(calls), tool_name_, "{}"});
+        } else {
+            choice.content = "done";
+        }
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++calls;
+        aiagent::llm::StreamEvent event;
+        if (calls % 2 == 1) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(aiagent::llm::ToolCall{
+                    "call-" + std::to_string(calls), tool_name_, "{}"});
+        } else {
+            event.content = "done";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+
+private:
+    std::string tool_name_;
+};
+
 void RunPermissionScenario(
         aiagent::permissions::PermissionMode mode,
         const std::string& tool_name,
@@ -1015,7 +1065,7 @@ int main() {
             Expect(provider->write_calls == 1,
                    "non-interactive workspace allows write");
         }
-        // non_interactive_max_mode=confirm：非交互下 workspace 被夹到 confirm，
+        // 非交互 max confirm：非交互下 workspace 被夹到 confirm，
         // 写需要审批 -> 拒绝。
         {
             auto provider = std::make_shared<RecordingPermissionProvider>();
@@ -1023,6 +1073,74 @@ int main() {
                                   /*interactive=*/false, PermissionMode::kConfirm);
             Expect(provider->write_calls == 0,
                    "non-interactive max confirm blocks writes");
+        }
+        // 审批 allow_once：发出 approval_request 事件并执行工具。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            auto model = std::make_shared<OneShotToolModel>("write");
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(provider);
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = PermissionMode::kConfirm;
+            runtime.SetPermissionSettings(settings);
+            int approvals = 0;
+            runtime.SetApprovalHandler([&](const aiagent::agent::ApprovalRequest& request) {
+                ++approvals;
+                Expect(request.tool_name == "write", "approval carries tool name");
+                return aiagent::agent::ApprovalDecision::kAllowOnce;
+            });
+            std::vector<aiagent::agent::AgentEvent> events;
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "run tool", "text/plain");
+            runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-approve-once",
+                    [&](const aiagent::agent::AgentEvent& event) {
+                        if (event.kind == aiagent::agent::AgentEventKind::kApprovalRequest) {
+                            events.push_back(event);
+                        }
+                    });
+            Expect(approvals == 1, "approval handler called once");
+            Expect(!events.empty(), "approval_request event emitted");
+            Expect(provider->write_calls == 1, "approved write executes");
+        }
+        // 审批 allow_session：同会话第二次不再询问。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            auto model = std::make_shared<AlternatingToolModel>("write");
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(provider);
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = PermissionMode::kConfirm;
+            runtime.SetPermissionSettings(settings);
+            int approvals = 0;
+            runtime.SetApprovalHandler([&](const aiagent::agent::ApprovalRequest&) {
+                ++approvals;
+                return aiagent::agent::ApprovalDecision::kAllowSession;
+            });
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "run tool", "text/plain");
+            runtime.HandleMessageStreamingEvents(user, {user}, "ctx-allow-session", nullptr);
+            runtime.HandleMessageStreamingEvents(user, {user}, "ctx-allow-session", nullptr);
+            Expect(approvals == 1, "allow_session is cached for the session");
+            Expect(provider->write_calls == 2,
+                   "both writes execute after session-wide allow");
+        }
+        // 审批 deny：工具不执行。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            auto model = std::make_shared<OneShotToolModel>("write");
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(provider);
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = PermissionMode::kConfirm;
+            runtime.SetPermissionSettings(settings);
+            runtime.SetApprovalHandler([&](const aiagent::agent::ApprovalRequest&) {
+                return aiagent::agent::ApprovalDecision::kDeny;
+            });
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "run tool", "text/plain");
+            runtime.HandleMessageStreamingEvents(user, {user}, "ctx-deny", nullptr);
+            Expect(provider->write_calls == 0, "denied write does not execute");
         }
     } catch (const std::exception& e) {
         std::cerr << "agent runtime permission test failed: " << e.what() << '\n';

@@ -113,39 +113,103 @@ tools::ToolContext AgentRuntime::BuildToolContext(
     return context;
 }
 
-std::string AgentRuntime::CheckToolPermission(
+void AgentRuntime::SetApprovalHandler(ApprovalHandler handler) {
+    approval_handler_ = std::move(handler);
+}
+
+bool AgentRuntime::SessionAllows(const std::string& context_id,
+                                 const std::string& tool_name) const {
+    std::lock_guard<std::mutex> lock(session_allow_mutex_);
+    const auto it = session_allow_.find(context_id);
+    return it != session_allow_.end() && it->second.count(tool_name) > 0;
+}
+
+void AgentRuntime::GrantSessionAllow(const std::string& context_id,
+                                     const std::string& tool_name) {
+    std::lock_guard<std::mutex> lock(session_allow_mutex_);
+    session_allow_[context_id].insert(tool_name);
+}
+
+AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         const std::string& tool_name,
-        const permissions::PermissionPolicy& policy) const {
+        const permissions::PermissionPolicy& policy,
+        const std::string& context_id) const {
     if (tool_name == "read") {
         if (!policy.allow_read) {
-            return "permission denied: read is disabled by the current permission mode";
+            return {ToolGate::kDeny,
+                    "permission denied: read is disabled by the current permission mode"};
         }
-        return {};
+        return {ToolGate::kAllow, {}};
     }
     if (tool_name == "write" || tool_name == "edit") {
         if (!policy.allow_write) {
-            return "permission denied: file writes are disabled by the current permission mode";
+            return {ToolGate::kDeny,
+                    "permission denied: file writes are disabled by the current "
+                    "permission mode"};
         }
-        if (policy.require_confirm_write) {
-            return "permission denied: writes require approval, which is not available yet; "
-                   "use /permissions workspace or /permissions full to change the mode";
+        if (policy.require_confirm_write && !SessionAllows(context_id, tool_name)) {
+            return {ToolGate::kNeedsApproval, "file write needs approval"};
         }
-        return {};
+        return {ToolGate::kAllow, {}};
     }
     if (tool_name == "bash") {
         if (!policy.allow_command) {
-            return "permission denied: command execution is disabled by the current permission mode";
+            return {ToolGate::kDeny,
+                    "permission denied: command execution is disabled by the current "
+                    "permission mode"};
         }
-        if (policy.require_confirm_command) {
-            return "permission denied: command execution requires approval, which is not "
-                   "available yet; use /permissions full to allow commands (this disables "
-                   "the path sandbox)";
+        if (policy.require_confirm_command && !SessionAllows(context_id, tool_name)) {
+            return {ToolGate::kNeedsApproval, "command execution needs approval"};
         }
-        return {};
+        return {ToolGate::kAllow, {}};
     }
     // 未分类工具（含 MCP）：M1 暂不拦截，保持既有行为；工具分类与
     // “非 full 下需确认”将在 M4 引入。
-    return {};
+    return {ToolGate::kAllow, {}};
+}
+
+AgentRuntime::ToolDecision AgentRuntime::DecideTool(
+        const llm::ToolCall& call,
+        const tools::ToolContext& context,
+        const std::string& context_id,
+        const AgentEventCallback& on_event,
+        bool interactive) {
+    const ToolGateResult gate = CheckToolGate(call.name, context.policy, context_id);
+    if (gate.gate == ToolGate::kAllow) {
+        return {true, {}};
+    }
+    if (gate.gate == ToolGate::kDeny) {
+        return {false, gate.reason};
+    }
+    // kNeedsApproval：无审批通道（非交互或未注入 handler）则直接拒绝。
+    if (!interactive || !approval_handler_) {
+        return {false, "permission denied: " + gate.reason +
+                               " (no approver available); use /permissions to adjust"};
+    }
+    if (on_event) {
+        AgentEvent event;
+        event.kind = AgentEventKind::kApprovalRequest;
+        event.tool_call_id = call.id;
+        event.tool_name = call.name;
+        event.arguments = call.arguments;
+        event.approval_reason = gate.reason;
+        on_event(event);
+    }
+    ApprovalRequest request;
+    request.context_id = context_id;
+    request.tool_call_id = call.id;
+    request.tool_name = call.name;
+    request.arguments = call.arguments;
+    request.reason = gate.reason;
+    const ApprovalDecision decision = approval_handler_(request);
+    if (decision == ApprovalDecision::kAllowSession) {
+        GrantSessionAllow(context_id, call.name);
+        return {true, {}};
+    }
+    if (decision == ApprovalDecision::kAllowOnce) {
+        return {true, {}};
+    }
+    return {false, "permission denied: user rejected the request"};
 }
 
 void AgentRuntime::SetProjectInstructionsLoader(
@@ -452,16 +516,16 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
                     aiagent::LogLevel::kInfo, "agent_runtime",
                     "run=" + run_id + " event=tool_start name=" + call.name +
                             " args_bytes=" + std::to_string(call.arguments.size()));
+            const ToolDecision decision = DecideTool(call, tool_context, context_id,
+                                                     nullptr, /*interactive=*/false);
             tools::ToolExecutionResult execution_result;
-            const std::string denial =
-                    CheckToolPermission(call.name, tool_context.policy);
-            if (!denial.empty()) {
+            if (!decision.allowed) {
                 execution_result.ok = false;
-                execution_result.error = denial;
+                execution_result.error = decision.reason;
                 aiagent::DefaultLogger().Log(
                         aiagent::LogLevel::kWarning, "agent_runtime",
                         "run=" + run_id + " event=permission_denied tool=" +
-                                call.name + " reason=" + denial);
+                                call.name + " reason=" + decision.reason);
             } else {
                 try {
                     nlohmann::json arguments = nlohmann::json::object();
@@ -695,16 +759,16 @@ std::string AgentRuntime::RunStreaming(
                 on_event(agent_event);
             }
 
+            const ToolDecision decision = DecideTool(call, tool_context, context_id,
+                                                     on_event, /*interactive=*/true);
             tools::ToolExecutionResult execution_result;
-            const std::string denial =
-                    CheckToolPermission(call.name, tool_context.policy);
-            if (!denial.empty()) {
+            if (!decision.allowed) {
                 execution_result.ok = false;
-                execution_result.error = denial;
+                execution_result.error = decision.reason;
                 aiagent::DefaultLogger().Log(
                         aiagent::LogLevel::kWarning, "agent_runtime",
                         "run=" + run_id + " event=permission_denied tool=" +
-                                call.name + " reason=" + denial);
+                                call.name + " reason=" + decision.reason);
             } else {
                 try {
                     nlohmann::json arguments = nlohmann::json::object();

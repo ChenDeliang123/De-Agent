@@ -2,7 +2,10 @@
 
 #include <memory>
 #include <functional>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -11,6 +14,7 @@
 #include "a2a/models/requests.hpp"
 
 #include "aiagent/agent/agent_event.hpp"
+#include "aiagent/agent/approval_broker.hpp"
 #include "aiagent/agent/compaction.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
@@ -31,6 +35,15 @@ struct PermissionSettings {
             permissions::PermissionMode::kWorkspace;
 };
 
+// 一次工具审批请求（发送给上层/CLI）。
+struct ApprovalRequest {
+    std::string context_id;
+    std::string tool_call_id;
+    std::string tool_name;
+    std::string arguments;  // 原始 JSON 字符串
+    std::string reason;     // 为什么需要确认
+};
+
 // 把 A2A Message 历史翻译成 LLM messages，并执行一次对话。
 // 不负责 HTTP/任务存储，由 A2A 层把 TaskManager 与它接起来。
 class AgentRuntime {
@@ -39,6 +52,9 @@ public:
     // 每次成功压缩后的回调（可用于日志/审计/前端展示）。
     using CompactionCallback = std::function<void(const std::string& context_id,
                                                   const CompactionRecord&)>;
+
+    // 工具需要逐次确认时的回调；应阻塞直到有决定（由 ApprovalBroker 提供）。
+    using ApprovalHandler = std::function<ApprovalDecision(const ApprovalRequest&)>;
 
     explicit AgentRuntime(std::shared_ptr<llm::IModelClient> model,
                           std::string system_prompt =
@@ -51,6 +67,9 @@ public:
     // 可选：注入按路径权限存储与默认设置。未注入时使用 default_mode。
     void SetPermissionStore(std::shared_ptr<permissions::PermissionStore> store);
     void SetPermissionSettings(const PermissionSettings& settings);
+
+    // 可选：注入审批回调。未注入时“需要确认”的工具直接拒绝。
+    void SetApprovalHandler(ApprovalHandler handler);
 
     // 可选：注入项目指令加载器（AGENTS.md）与无 cwd 请求的默认工作目录。
     void SetProjectInstructionsLoader(
@@ -119,10 +138,30 @@ private:
     tools::ToolContext BuildToolContext(const std::string& working_directory,
                                         bool interactive = true) const;
 
-    // 工具本身是否被权限策略允许；空字符串表示允许，否则为拒绝原因。
-    std::string CheckToolPermission(
-            const std::string& tool_name,
-            const permissions::PermissionPolicy& policy) const;
+    // 结合权限策略与会话级「总是允许」判断某工具是直接放行、需要审批还是拒绝。
+    enum class ToolGate { kAllow, kNeedsApproval, kDeny };
+    struct ToolGateResult {
+        ToolGate gate = ToolGate::kAllow;
+        std::string reason;
+    };
+    ToolGateResult CheckToolGate(const std::string& tool_name,
+                                 const permissions::PermissionPolicy& policy,
+                                 const std::string& context_id) const;
+
+    // 结合审批通道得出工具是否可执行；needs-approval 时会发 kApprovalRequest
+    // 事件并调用 approval_handler_ 阻塞等待。
+    struct ToolDecision {
+        bool allowed = false;
+        std::string reason;
+    };
+    ToolDecision DecideTool(const llm::ToolCall& call,
+                            const tools::ToolContext& context,
+                            const std::string& context_id,
+                            const AgentEventCallback& on_event,
+                            bool interactive);
+
+    bool SessionAllows(const std::string& context_id, const std::string& tool_name) const;
+    void GrantSessionAllow(const std::string& context_id, const std::string& tool_name);
 
     // 模型调用前的阈值压缩。命中阈值时把较早的消息摘要成一条 user 消息，
     // 并重置 usage 跟踪；同一批消息（size 未变）不重复压缩。
@@ -142,6 +181,10 @@ private:
     std::shared_ptr<ProjectInstructionsLoader> instructions_loader_;
     std::shared_ptr<permissions::PermissionStore> permission_store_;
     PermissionSettings permission_settings_;
+    ApprovalHandler approval_handler_;
+    mutable std::mutex session_allow_mutex_;
+    // context_id -> 本会话「总是允许」的工具名集合（仅内存，不持久化）。
+    std::map<std::string, std::set<std::string>> session_allow_;
     std::string fallback_working_directory_;
     std::string system_prompt_;
     // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。
