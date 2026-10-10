@@ -5,14 +5,22 @@
 //
 // 拆分：
 //   - applyKey(state, str, key, options) 纯函数，便于单测；
-//   - LineEditor 负责 TTY 交互与渲染。
+//   - layoutInput(text, cursorIndex, width) 纯函数：把输入折成物理行并给出光标位置；
+//   - LineEditor 负责按键交互，渲染交给 BottomRegion（输入框 + 底部状态行）。
+//     输入框样式对齐 pi：上下两条 `─` 边框，没有多余提示符文字，
+//     候选列表排在下边框之下。
 //
 // 非 TTY（管道）场景不要使用 LineEditor，调用方应退回逐行读取。
 
 import readline from "node:readline";
 
+import { BottomRegion } from "./bottom.mjs";
 import { editInExternalEditor, resolveEditorCommand } from "./external-editor.mjs";
+import { clipToWidth, displayWidth } from "./text.mjs";
 import { detectColorMode, makeStyler } from "./theme.mjs";
+
+// 宽度工具已迁到 text.mjs（ANSI 感知）；这里再导出一次，兼容既有调用点与测试。
+export { clipToWidth, displayWidth };
 
 export const EDITOR_HOTKEYS = [
   ["Enter", "submit input / run command"],
@@ -34,61 +42,64 @@ export const EDITOR_HOTKEYS = [
 
 const MAX_CANDIDATES = 8;
 
-// 粗略的东亚宽字符判定，用于光标横向定位。指令名本身是 ASCII，
-// 这里主要保证用户输入中文时输入行不错位。
-function charWidth(codePoint) {
-  if (codePoint === 0) {
-    return 0;
-  }
-  if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) {
-    return 0;
-  }
-  if (
-    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
-    codePoint === 0x2329 ||
-    codePoint === 0x232a ||
-    (codePoint >= 0x2e80 && codePoint <= 0x303e) ||
-    (codePoint >= 0x3041 && codePoint <= 0x33ff) ||
-    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
-    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
-    (codePoint >= 0xa000 && codePoint <= 0xa4cf) ||
-    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
-    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
-    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
-    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
-    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
-    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
-    (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
-    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
-  ) {
-    return 2;
-  }
-  return 1;
-}
+// 输入区最多显示多少物理行（超出的部分滚动，配合边框上的 ↑/↓ 提示）。
+const MAX_INPUT_ROWS = 8;
 
-export function displayWidth(text) {
-  let width = 0;
-  for (const char of String(text)) {
-    width += charWidth(char.codePointAt(0));
-  }
-  return width;
-}
-
-export function clipToWidth(text, maxWidth) {
-  if (maxWidth <= 0) {
-    return "";
-  }
-  let width = 0;
-  let out = "";
-  for (const char of String(text)) {
-    const w = charWidth(char.codePointAt(0));
-    if (width + w > maxWidth) {
-      return `${out}…`;
+// 把「提示符 + buffer」按可见宽度折成物理行，并给出光标所在的行/列。
+// cursorIndex 是 text 的 code unit 下标（调用方负责把提示符长度加上）。
+export function layoutInput(text, cursorIndex, width) {
+  const limit = Math.max(1, Math.floor(width));
+  const rows = [];
+  let current = "";
+  let currentWidth = 0;
+  let cursor = { row: 0, col: 0 };
+  let index = 0;
+  while (index <= text.length) {
+    if (index === cursorIndex) {
+      cursor = { row: rows.length, col: currentWidth };
     }
-    out += char;
-    width += w;
+    if (index === text.length) {
+      break;
+    }
+    const char = text[index];
+    if (char === "\n") {
+      rows.push(current);
+      current = "";
+      currentWidth = 0;
+      index += 1;
+      continue;
+    }
+    const codePoint = text.codePointAt(index);
+    const ch = String.fromCodePoint(codePoint);
+    const w = displayWidth(ch);
+    if (currentWidth + w > limit) {
+      rows.push(current);
+      current = "";
+      currentWidth = 0;
+    }
+    current += ch;
+    currentWidth += w;
+    index += ch.length;
   }
-  return out;
+  rows.push(current);
+  // 光标可能落在最后一行末尾（比如 cursorIndex 在 text 末尾之后）。
+  if (cursorIndex >= text.length) {
+    cursor = { row: rows.length - 1, col: currentWidth };
+  }
+  return { rows, cursor };
+}
+
+// 输入框上下边框：可带滚动提示（`── ↑ 3 more ─────`）。
+export function borderLine(width, hint = "", horizontal = "─") {
+  if (!hint) {
+    return horizontal.repeat(Math.max(0, width));
+  }
+  const label = `── ${hint} `;
+  const labelWidth = displayWidth(label);
+  if (labelWidth >= width) {
+    return horizontal.repeat(Math.max(0, width));
+  }
+  return label + horizontal.repeat(width - labelWidth);
 }
 
 // 计算候选列表的滚动窗口起点，保证 selected 始终落在可见窗口内。
@@ -391,7 +402,6 @@ export class LineEditor {
   #complete;
   #maxCandidates;
   #state;
-  #drawn = 0;
   #prompt = "";
   #externalEditor;
   #editorCommand;
@@ -399,7 +409,8 @@ export class LineEditor {
   #resolveLine = null;
   #previousRaw = false;
   #styler;
-  #cursorRow = 0;
+  #region;
+  #horizontal;
 
   constructor({
     input,
@@ -410,6 +421,8 @@ export class LineEditor {
     externalEditor = editInExternalEditor,
     editorCommand,
     styler,
+    region,
+    symbols,
   } = {}) {
     this.#input = input ?? process.stdin;
     this.#output = output ?? process.stdout;
@@ -418,11 +431,20 @@ export class LineEditor {
     this.#externalEditor = externalEditor;
     this.#editorCommand = editorCommand ?? null;
     this.#styler = styler ?? makeStyler(detectColorMode(process.env, this.#output));
+    this.#horizontal = symbols?.boxHorizontal ?? "─";
+    // 共享同一个 BottomRegion（与 renderer 共用，保证底部状态行常驻）；
+    // 单测直接构造编辑器时自建一个。
+    this.#region =
+      region ?? new BottomRegion(this.#output, { enabled: this.#output?.isTTY !== false });
     this.#state = createEditorState(history);
     if (this.#input.isTTY && !this.#input.__aiagentKeypress) {
       readline.emitKeypressEvents(this.#input);
       this.#input.__aiagentKeypress = true;
     }
+  }
+
+  get region() {
+    return this.#region;
   }
 
   get state() {
@@ -450,16 +472,14 @@ export class LineEditor {
 
     resetBuffer(this.#state);
     this.#prompt = prompt;
-    this.#drawn = 0;
-    this.#redraw();
-
     this.#previousRaw = previousRaw;
 
     return new Promise((resolve) => {
       this.#resolveLine = (result) => {
         this.#resolveLine = null;
         input.removeListener("keypress", this.#handleKeypress);
-        this.#clearDrawn();
+        // 收起输入框（底部状态行保留）。
+        this.#region.setEditor(null);
         if (typeof input.setRawMode === "function") {
           input.setRawMode(this.#previousRaw);
         }
@@ -468,6 +488,7 @@ export class LineEditor {
       // 幂等挂载：先移除再添加，避免重复 readLine 导致一个按键被处理多次。
       input.removeListener("keypress", this.#handleKeypress);
       input.on("keypress", this.#handleKeypress);
+      this.#redraw();
     });
   }
 
@@ -516,7 +537,8 @@ export class LineEditor {
 
     // 挂起：不再抢按键，退出 raw 模式并暂停 stdin，把 TTY 让给编辑器。
     input.removeListener("keypress", this.#handleKeypress);
-    this.#clearDrawn();
+    // 挂起底部区域：擦除输入框，把终端让给外部编辑器。
+    this.#region.suspend();
     if (typeof input.setRawMode === "function") {
       input.setRawMode(false);
     }
@@ -546,7 +568,9 @@ export class LineEditor {
       if (this.#resolveLine) {
         input.removeListener("keypress", this.#handleKeypress);
         input.on("keypress", this.#handleKeypress);
-        this.#drawn = 0;
+      }
+      this.#region.resume();
+      if (this.#resolveLine) {
         this.#redraw();
       }
       this.#externalEditorActive = false;
@@ -571,34 +595,26 @@ export class LineEditor {
     const entries = items.map((item) =>
       typeof item === "string" ? { label: item, description: "" } : item,
     );
-    this.#drawn = 0;
+    const width = this.#region.contentWidth;
     let selected = 0;
     const draw = () => {
-      const columns = this.#columns();
-      let frame = this.#eraseFrame();
-      frame += `\r${clipToWidth(title, columns - 1)}\n`;
+      const lines = [clipToWidth(String(title), width)];
       entries.forEach((entry, index) => {
         const marker = index === selected ? "❯" : " ";
         const description = entry.description ? `  ${entry.description}` : "";
         const plain = `${marker} ${entry.label}${description}`;
-        let line = clipToWidth(plain, columns - 1);
-        if (this.#styler.mode !== "none" && displayWidth(plain) <= columns - 1) {
+        if (this.#styler.mode !== "none" && displayWidth(plain) <= width) {
           const coloredMarker = index === selected ? this.#styler.fg("accent", marker) : marker;
           const coloredLabel = index === selected ? this.#styler.bold(entry.label) : entry.label;
           const coloredDesc = entry.description
             ? `  ${this.#styler.dim(entry.description)}`
             : "";
-          line = `${coloredMarker} ${coloredLabel}${coloredDesc}`;
+          lines.push(`${coloredMarker} ${coloredLabel}${coloredDesc}`);
+          return;
         }
-        frame += `\r\x1b[K${line}`;
-        if (index < entries.length - 1) {
-          frame += "\n";
-        }
+        lines.push(clipToWidth(plain, width));
       });
-      // 光标回到区域首行（标题行），与 #eraseFrame 的“光标在区域顶部”约定一致。
-      frame += `\r\x1b[${entries.length}A`;
-      this.#drawn = 1 + entries.length;
-      this.#output.write(frame);
+      this.#region.setEditor({ lines, cursorRow: 0, cursorCol: 0 });
     };
     draw();
 
@@ -624,7 +640,7 @@ export class LineEditor {
       };
       const finish = (result) => {
         input.removeListener("keypress", listener);
-        this.#clearDrawn();
+        this.#region.setEditor(null);
         if (typeof input.setRawMode === "function") {
           input.setRawMode(previousRaw);
         }
@@ -634,81 +650,72 @@ export class LineEditor {
     });
   }
 
-  #columns() {
-    return this.#output.columns || 80;
+  // 挂起/恢复底部区域：审批提示、外部编辑器等需要独占终端时使用。
+  suspend() {
+    this.#region.suspend();
   }
 
-  // 清除已绘制的输入/候选区域。约定：调用时光标位于区域首行（顶部），
-  // 因此从当前行向下逐行清除，最后把光标还原到首行（不换行）。
-  #eraseFrame() {
-    if (this.#drawn <= 0) {
-      return "";
-    }
-    let frame = "";
-    // 光标可能在区域内的某一行，先回到区域顶部。
-    if (this.#cursorRow > 0) {
-      frame += `\x1b[${this.#cursorRow}A`;
-    }
-    for (let i = 0; i < this.#drawn; i += 1) {
-      frame += "\r\x1b[K";
-      if (i < this.#drawn - 1) {
-        frame += "\x1b[1B";
-      }
-    }
-    if (this.#drawn > 1) {
-      frame += `\x1b[${this.#drawn - 1}A`;
-    }
-    this.#cursorRow = 0;
-    return frame;
+  resume() {
+    this.#region.resume();
   }
 
-  #clearDrawn() {
-    if (this.#drawn <= 0) {
-      return;
-    }
-    this.#output.write(`${this.#eraseFrame()}\r`);
-    this.#drawn = 0;
+  // 输入框最多显示多少物理行：终端高度的 30%，夹在 [5, MAX_INPUT_ROWS]。
+  #maxInputRows() {
+    const rows = Number(this.#output?.rows);
+    const height = Number.isFinite(rows) && rows > 0 ? rows : 24;
+    return Math.max(5, Math.min(MAX_INPUT_ROWS, Math.floor(height * 0.3)));
   }
 
-  #redraw() {
+  // 组装输入框块：上边框 + 可见输入行 + 下边框 + 候选列表（在下边框之下，对齐 pi）。
+  #layout() {
     const state = this.#state;
+    const width = this.#region.contentWidth;
     const text = this.#prompt + state.buffer;
-    const rows = text.split("\n");
-    let frame = this.#eraseFrame();
-    frame += `\r${rows[0]}`;
-    for (let i = 1; i < rows.length; i += 1) {
-      frame += `\n\r\x1b[K${rows[i]}`;
-    }
+    const { rows, cursor } = layoutInput(text, this.#prompt.length + state.cursor, width);
+    const maxRows = this.#maxInputRows();
+    const start =
+      rows.length > maxRows
+        ? Math.min(Math.max(0, cursor.row - maxRows + 1), rows.length - maxRows)
+        : 0;
+    const visible = rows.slice(start, start + maxRows);
+    const hiddenAbove = start;
+    const hiddenBelow = rows.length - (start + visible.length);
 
-    const columns = this.#columns();
-    const start = candidateWindow(
+    const lines = [
+      borderLine(width, hiddenAbove > 0 ? `↑ ${hiddenAbove} more` : "", this.#horizontal),
+    ];
+    for (const row of visible) {
+      lines.push(row);
+    }
+    lines.push(
+      borderLine(width, hiddenBelow > 0 ? `↓ ${hiddenBelow} more` : "", this.#horizontal),
+    );
+
+    const windowStart = candidateWindow(
       state.candidates.length,
       state.selected,
       this.#maxCandidates,
     );
-    const candidates = state.candidates.slice(start, start + this.#maxCandidates);
+    const candidates = state.candidates.slice(
+      windowStart,
+      windowStart + this.#maxCandidates,
+    );
     for (let i = 0; i < candidates.length; i += 1) {
-      const selected = start + i === state.selected;
-      frame += `\n\r\x1b[K${formatCandidate(candidates[i], selected, columns, this.#styler)}`;
+      const selected = windowStart + i === state.selected;
+      lines.push(formatCandidate(candidates[i], selected, width + 1, this.#styler));
     }
 
-    // 光标所在的 buffer 行 / 列（提示符只在首行）。
-    const cursorPrefix = this.#prompt + state.buffer.slice(0, state.cursor);
-    const cursorRows = cursorPrefix.split("\n");
-    const cursorRow = cursorRows.length - 1;
-    const cursorColumn = displayWidth(cursorRows[cursorRow]);
-    const lastRow = rows.length - 1 + candidates.length;
-    const up = lastRow - cursorRow;
+    return {
+      lines,
+      cursorRow: 1 + Math.max(0, cursor.row - start),
+      cursorCol: cursor.col,
+    };
+  }
 
-    frame += "\r";
-    if (up > 0) {
-      frame += `\x1b[${up}A`;
+  #redraw() {
+    if (!this.#resolveLine) {
+      return;
     }
-    if (cursorColumn > 0) {
-      frame += `\x1b[${cursorColumn}C`;
-    }
-    this.#drawn = rows.length + candidates.length;
-    this.#cursorRow = cursorRow;
-    this.#output.write(frame);
+    this.#region.setEditor(this.#layout());
   }
 }

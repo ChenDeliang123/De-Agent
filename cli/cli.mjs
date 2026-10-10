@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { stdin as input, stdout as output } from "node:process";
 
 import { TranscriptRenderer } from "./renderer.mjs";
+import { BottomRegion } from "./bottom.mjs";
 import { log } from "./logger.mjs";
 import {
   approveChat,
@@ -27,13 +28,16 @@ import {
   restoreSessionCwd,
   runCommand,
 } from "./commands.mjs";
-import { formatPromptLabel, gitBranch } from "./statusbar.mjs";
+import { PROMPT_LABEL, formatStatusLine, gitBranch } from "./statusbar.mjs";
 import { askUser, askYesNo } from "./prompt.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 // 与 renderer / editor 共享的 styler，支持运行时换主题。
 const uiStyler = makeStyler(detectColorMode(process.env, output));
-const renderer = new TranscriptRenderer(output, { styler: uiStyler });
+// 底部区域：输入框（上下两条横线）+ 最底部的信息状态行，由 renderer 与 editor 共享。
+// 非 TTY（管道）时禁用，退化为直接写 stdout。
+const region = new BottomRegion(output, { enabled: output.isTTY === true });
+const renderer = new TranscriptRenderer(output, { styler: uiStyler, region });
 let activeAbortController = null;
 // 审批提示期间暂停全局 Esc/Ctrl+C 中断，避免与审批输入争抢按键。
 let approvalPending = false;
@@ -105,10 +109,6 @@ options:
   console.log(`\n${renderHotkeys()}\n`);
 }
 
-function clearInputLine() {
-  process.stdout.write("\r\x1b[K");
-}
-
 async function renderHistory(backend, sessionId) {
   const history = await loadHistory(backend, sessionId);
   log("info", "cli", `event=history_load session=${sessionId} messages=${history.length}`);
@@ -156,7 +156,6 @@ async function sendMessage(ctx, text) {
   const backend = ctx.backend;
   const sessionId = ctx.state.sessionId;
   const cwd = ctx.state.cwd || process.cwd();
-  clearInputLine();
   const requestSessionId = sessionId ?? randomUUID();
   log(
     "info",
@@ -278,7 +277,14 @@ async function handleApproval(ctx, sessionId, data) {
   approvalPending = true;
   try {
     if (input.isTTY) {
-      const answer = await askUser("[y]es once / [a]lways this session / [N]o: ");
+      // 审批提示走 canonical 模式，需要先把底部区域让出来（擦除输入框/状态行）。
+      region.suspend();
+      let answer;
+      try {
+        answer = await askUser("[y]es once / [a]lways this session / [N]o: ");
+      } finally {
+        region.resume();
+      }
       const text = String(answer ?? "").trim().toLowerCase();
       if (text === "y" || text === "yes") {
         decision = "allow_once";
@@ -337,7 +343,8 @@ async function main() {
   if (cliConfig.nerdFont) {
     symbolEnv.DE_NERD_FONT = "1";
   }
-  renderer.setSymbols(pickSymbols(symbolEnv));
+  const symbols = pickSymbols(symbolEnv);
+  renderer.setSymbols(symbols);
   state.theme = initialTheme;
   state.cliConfigPath = cliConfig.path;
   const editorCommand = resolveEditorCommand({
@@ -345,15 +352,39 @@ async function main() {
     configured: cliConfig.externalEditor,
   });
 
-  const editor = input.isTTY
+  // 输入框渲染依赖底部区域（需要 stdout 是 TTY）；否则退回逐行读取，避免
+  // 往重定向的文件里写转义序列。
+  const editor = input.isTTY && output.isTTY
     ? new LineEditor({
         input,
         output,
         complete: (prefix) => completeCommands(prefix, commands),
         editorCommand,
         styler: uiStyler,
+        region,
+        symbols,
       })
     : null;
+
+  // 最底部状态行：`~/proj (main) · confirm · f920924d`。
+  // 字段缺失自动省略；超宽时从右往左丢字段，保证关键信息不被截半。
+  const updateFooter = () => {
+    region.setFooter(
+      formatStatusLine(
+        {
+          cwd: state.cwd,
+          branch: state.branch,
+          mode: state.mode,
+          sessionId: state.sessionId,
+        },
+        output.columns,
+        uiStyler,
+      ),
+    );
+  };
+
+  // 启动期提示同样走底部区域：状态行已绘制，直接 console.log 会写进状态行那一行。
+  const emit = (line) => region.appendOutput(`${line}\n`);
 
   const ctx = {
     backend,
@@ -361,19 +392,29 @@ async function main() {
     renderer,
     editor,
     commands,
-    print: (line) => console.log(line),
+    // 命令输出同样经过底部区域，保证最底部的状态行始终可见。
+    print: (line) => region.appendOutput(`${line}\n`),
     log,
-    clearInputLine,
     clearScreen: () => {
       if (output.isTTY) {
+        region.reset();
         output.write("\x1b[2J\x1b[3J\x1b[H");
+        region.render();
       }
     },
+    updateFooter,
     renderHistory: (backendUrl, sessionId) => renderHistory(backendUrl, sessionId),
     selectSession: editor ? makeSelector(editor) : null,
     select: editor ? makeSelect(editor) : null,
     confirm: input.isTTY
-      ? async (message) => askYesNo(`${message} (y/N) `, { input, output })
+      ? async (message) => {
+          region.suspend();
+          try {
+            return await askYesNo(`${message} (y/N) `, { input, output });
+          } finally {
+            region.resume();
+          }
+        }
       : null,
   };
   ctx.promptProjectTrust = () => maybePromptProjectTrust(ctx);
@@ -405,18 +446,20 @@ async function main() {
     } catch {
       state.mode = null;
     }
+    // 权限模式/分支变化后立即刷新最底部状态行。
+    updateFooter();
   };
   await ctx.refreshPromptState();
 
   const sessions = await listSessions(backend).catch(() => []);
   if (sessions.length > 0) {
-    console.log(`found ${sessions.length} session(s); use /resume to pick one`);
+    emit(`found ${sessions.length} session(s); use /resume to pick one`);
   }
 
   // 启动会话解析顺序：--session > --continue > --resume。
   if (!state.sessionId && options.continueSession && sessions.length > 0) {
     state.sessionId = sessionEntryId(sessions[0]);
-    console.log(`continuing session ${state.sessionId}`);
+    emit(`continuing session ${state.sessionId}`);
   } else if (!state.sessionId && options.resume && sessions.length > 0) {
     if (editor) {
       const index = await ctx.selectSession(sessions);
@@ -425,9 +468,9 @@ async function main() {
       }
     } else {
       sessions.forEach((entry, index) => {
-        console.log(`  ${index + 1}. ${sessionEntryLabel(entry)}  (${sessionEntryId(entry)})`);
+        emit(`  ${index + 1}. ${sessionEntryLabel(entry)}  (${sessionEntryId(entry)})`);
       });
-      console.log("use /resume <index|id> to resume one");
+      emit("use /resume <index|id> to resume one");
     }
   }
 
@@ -435,9 +478,9 @@ async function main() {
     if (state.sessionId) {
       try {
         await renameSession(backend, state.sessionId, options.name);
-        console.log(`renamed session to ${options.name}`);
+        emit(`renamed session to ${options.name}`);
       } catch (error) {
-        console.error(`rename failed: ${error.message}`);
+        emit(`rename failed: ${error.message}`);
       }
     } else {
       state.pendingName = options.name;
@@ -446,7 +489,7 @@ async function main() {
 
   const restoredCwd = await restoreSessionCwd(ctx);
   if (restoredCwd) {
-    console.log(`restored cwd ${restoredCwd}`);
+    emit(`restored cwd ${restoredCwd}`);
   }
 
   await ctx.promptProjectTrust();
@@ -455,7 +498,7 @@ async function main() {
     try {
       await renderHistory(backend, state.sessionId);
     } catch (error) {
-      console.error(`cannot load session ${state.sessionId}: ${error.message}`);
+      emit(`cannot load session ${state.sessionId}: ${error.message}`);
       state.sessionId = null;
     }
   }
@@ -463,14 +506,9 @@ async function main() {
   try {
     if (editor) {
       while (!state.shouldExit) {
-        const result = await editor.readLine(
-          formatPromptLabel({
-            cwd: state.cwd,
-            branch: state.branch,
-            mode: state.mode,
-            sessionId: state.sessionId,
-          }),
-        );
+        // 每轮输入前刷新状态行：会话 id / 权限模式 / cwd 可能已被上一条命令改掉。
+        updateFooter();
+        const result = await editor.readLine(PROMPT_LABEL);
         if (result.exit) {
           break;
         }
@@ -487,7 +525,7 @@ async function main() {
       lines.close();
     }
   } finally {
-    clearInputLine();
+    region.erase();
     // readLine/selectList 会 resume stdin 以接收按键；退出主循环后若不暂停，
     // 处于 flowing 状态的 stdin 会让 Node 进程一直存活，表现为 /quit 卡住。
     input.pause?.();
@@ -495,7 +533,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  clearInputLine();
+  region.erase();
   console.error(error);
   log("error", "cli", `event=cli_fatal message=${error.message}`);
   process.exitCode = 1;

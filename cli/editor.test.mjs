@@ -11,7 +11,10 @@ import {
   formatCandidate,
   slashCandidates,
 } from "./editor.mjs";
+import { BottomRegion } from "./bottom.mjs";
+import { PROMPT_LABEL } from "./statusbar.mjs";
 import { commands, completeCommands } from "./commands.mjs";
+import { captureOutput, VirtualTerminal } from "./tests/virtual-terminal.mjs";
 
 const complete = (prefix) => completeCommands(prefix, commands);
 
@@ -48,71 +51,6 @@ class FakeOutput {
 
   get text() {
     return this.chunks.join("");
-  }
-}
-
-// 极简 ANSI 终端模拟器：把 LineEditor 写出的转义序列还原成一份屏幕快照，
-// 用于断言重绘后不残留旧行（纯字符串断言看不出这类问题）。
-class VirtualTerminal {
-  constructor() {
-    this.rows = [];
-    this.row = 0;
-    this.col = 0;
-  }
-
-  #ensureRow(index) {
-    while (this.rows.length <= index) {
-      this.rows.push([]);
-    }
-  }
-
-  #writeChar(ch) {
-    this.#ensureRow(this.row);
-    const row = this.rows[this.row];
-    while (row.length < this.col) {
-      row.push(" ");
-    }
-    row[this.col] = ch;
-    this.col += 1;
-  }
-
-  write(text) {
-    for (let i = 0; i < text.length; i += 1) {
-      const ch = text[i];
-      if (ch === "\x1b") {
-        const match = /^\x1b\[([0-9;]*)([A-Za-z])/.exec(text.slice(i));
-        if (match) {
-          const count = match[1] === "" ? 1 : Number(match[1]);
-          const code = match[2];
-          if (code === "A") {
-            this.row = Math.max(0, this.row - count);
-          } else if (code === "B") {
-            this.row += count;
-          } else if (code === "C") {
-            this.col += count;
-          } else if (code === "D") {
-            this.col = Math.max(0, this.col - count);
-          } else if (code === "K") {
-            this.#ensureRow(this.row);
-            this.rows[this.row] = this.rows[this.row].slice(0, this.col);
-          }
-          i += match[0].length - 1;
-          continue;
-        }
-      }
-      if (ch === "\r") {
-        this.col = 0;
-      } else if (ch === "\n") {
-        this.row += 1;
-        this.col = 0;
-      } else {
-        this.#writeChar(ch);
-      }
-    }
-  }
-
-  lines() {
-    return this.rows.map((row) => row.join("").replace(/\s+$/, ""));
   }
 }
 
@@ -467,4 +405,81 @@ test("LineEditor submits multi-line input", async () => {
 
   const result = await pending;
   assert.equal(result.text, "a\nb");
+});
+
+test("LineEditor draws the input box between two borders above the status row", async () => {
+  const input = new FakeInput();
+  const { terminal, out } = captureOutput(30);
+  const region = new BottomRegion(out);
+  region.setFooter("~/proj (main) · confirm");
+  const editor = new LineEditor({ input, output: out, complete, region });
+
+  const pending = editor.readLine(PROMPT_LABEL);
+  input.emit("keypress", "h", key("h"));
+  input.emit("keypress", "i", key("i"));
+
+  const border = "─".repeat(29);
+  assert.deepEqual(terminal.screen().slice(-4), [
+    border,
+    "❯ hi",
+    border,
+    "~/proj (main) · confirm",
+  ]);
+
+  input.emit("keypress", "\r", key("return"));
+  assert.equal((await pending).text, "hi");
+  // 提交后收起输入框，最底部只留状态行。
+  assert.deepEqual(terminal.screen().slice(-1), ["~/proj (main) · confirm"]);
+  assert.ok(!terminal.screen().some((line) => line.includes("❯ hi")));
+});
+
+test("LineEditor wraps long input instead of letting the terminal wrap", async () => {
+  const input = new FakeInput();
+  const { terminal, out } = captureOutput(20);
+  const editor = new LineEditor({ input, output: out, complete });
+
+  const pending = editor.readLine(PROMPT_LABEL);
+  for (const ch of "0123456789012345678901234567890123456789") {
+    input.emit("keypress", ch, key(ch));
+  }
+
+  const lines = terminal.screen();
+  assert.ok(
+    lines.every((line) => displayWidth(line) <= 19),
+    `no row may exceed the content width: ${JSON.stringify(lines)}`,
+  );
+  assert.ok(lines.includes("❯ 01234567890123456"), "first row holds the prompt + 17 chars");
+  assert.ok(lines.includes("6789"), "last row holds the remaining chars");
+  assert.equal(
+    lines.filter((line) => line === "─".repeat(19)).length,
+    2,
+    "box has exactly two horizontal borders",
+  );
+
+  input.emit("keypress", "\r", key("return"));
+  await pending;
+});
+
+test("LineEditor reports hidden rows in the border when input scrolls", async () => {
+  const input = new FakeInput();
+  const { terminal, out } = captureOutput(20);
+  const editor = new LineEditor({ input, output: out, complete });
+
+  const pending = editor.readLine(PROMPT_LABEL);
+  for (const ch of "x".repeat(160)) {
+    input.emit("keypress", ch, key(ch));
+  }
+
+  const lines = terminal.screen();
+  assert.ok(
+    lines.some((line) => line.startsWith("── ↑ ") && line.includes("more")),
+    `expected an "↑ n more" hint: ${JSON.stringify(lines)}`,
+  );
+  assert.ok(
+    !lines.some((line) => line.startsWith("── ↓ ")),
+    "cursor is at the end, so nothing is hidden below",
+  );
+
+  input.emit("keypress", "\r", key("return"));
+  await pending;
 });

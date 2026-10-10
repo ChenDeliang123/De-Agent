@@ -12,7 +12,7 @@
 //   }
 //
 // handler 的 ctx 由 cli.mjs 注入，约定字段：
-//   { backend, state, print, log, clearInputLine, clearScreen, renderHistory,
+//   { backend, state, print, log, clearScreen, updateFooter?, renderHistory,
 //     commands, selectSession?, confirm? }
 // 其中 state 至少包含 { sessionId, cwd, shouldExit, pendingName? }。
 
@@ -175,7 +175,6 @@ async function openSession(ctx, all, target) {
   if (restoredCwd) {
     ctx.print(`cwd: ${restoredCwd}`);
   }
-  ctx.clearInputLine();
   await ctx.renderHistory(ctx.backend, ctx.state.sessionId);
   ctx.log("info", "cli", `event=open_session session=${ctx.state.sessionId}`);
   return true;
@@ -190,7 +189,6 @@ async function cloneCurrentSession(ctx) {
     const result = await cloneSession(ctx.backend, ctx.state.sessionId);
     ctx.state.sessionId = result.session_id;
     ctx.print(`cloned to session ${result.session_id}`);
-    ctx.clearInputLine();
     await ctx.renderHistory(ctx.backend, ctx.state.sessionId);
     ctx.log("info", "cli", `event=clone_session session=${ctx.state.sessionId}`);
   } catch (error) {
@@ -732,5 +730,7 @@ export async function runCommand(ctx, text) {
     return false;
   }
   await command.handler(ctx, rest.join(" "));
+  // 命令可能改了 cwd / 会话 / 权限模式：统一刷新最底部状态行。
+  ctx.updateFooter?.();
   return true;
 }

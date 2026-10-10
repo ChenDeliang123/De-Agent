@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { BottomRegion } from "./bottom.mjs";
 import { TranscriptRenderer } from "./renderer.mjs";
+import { captureOutput } from "./tests/virtual-terminal.mjs";
 
 const SPINNER_RE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 
@@ -106,4 +108,47 @@ test("wait/stopWaiting drive the spinner for long commands", () => {
 
   renderer.stopWaiting();
   assert.equal(renderer.waiting, false);
+});
+
+test("renderer keeps the status row at the bottom while streaming", () => {
+  const { terminal, out } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setFooter("~/proj (main) · confirm");
+  const renderer = new TranscriptRenderer(out, { mode: "truecolor", region });
+
+  renderer.user("do it");
+  renderer.startReply();
+  renderer.content("line1\nline2\n");
+  renderer.endReply();
+
+  const lines = terminal.screen();
+  assert.equal(lines.at(-1), "~/proj (main) · confirm", "footer stays at the very bottom");
+  assert.ok(lines.some((line) => line.includes("line2")), "assistant text is above the footer");
+});
+
+test("renderer shows the spinner inside the status row", () => {
+  const { terminal, out } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setFooter("~/proj · confirm");
+  const renderer = new TranscriptRenderer(out, { mode: "truecolor", region });
+
+  renderer.startReply();
+  assert.equal(renderer.waiting, true);
+  const waitingRow = terminal.screen().at(-1);
+  assert.ok(SPINNER_RE.test(waitingRow), `spinner should live in the status row: ${waitingRow}`);
+  assert.ok(waitingRow.includes("~/proj · confirm"), "footer shares the status row");
+
+  renderer.content("done\n");
+  assert.equal(renderer.waiting, false);
+});
+
+test("renderer without a region keeps writing directly (non-TTY / pipe)", () => {
+  const out = fakeOut(false);
+  const region = new BottomRegion(out);
+  const renderer = new TranscriptRenderer(out, { mode: "none", region });
+  renderer.user("hello");
+  renderer.endReply();
+  const text = out.text();
+  assert.ok(text.includes("hello"));
+  assert.ok(!text.includes("\x1b[48;"), "no background block without colour support");
 });

@@ -1,4 +1,4 @@
-import { clipToWidth, displayWidth } from "./editor.mjs";
+import { clipToWidth, displayWidth } from "./text.mjs";
 import { createMarkdownRenderer } from "./markdown.mjs";
 import { detectColorMode, hyperlink, makeStyler, pickSymbols } from "./theme.mjs";
 
@@ -46,6 +46,7 @@ function prettyArguments(rawArguments) {
 class Spinner {
   #out;
   #styler;
+  #region;
   #timer = null;
   #idleTimer = null;
   #frame = 0;
@@ -54,9 +55,15 @@ class Spinner {
   #active = false;
   #colorName = "accent";
 
-  constructor(out, styler) {
+  constructor(out, styler, region = null) {
     this.#out = out;
     this.#styler = styler;
+    this.#region = region;
+  }
+
+  // 有底部区域时，spinner 渲染成状态行最左侧的一段（不再自己写 \r\x1b[K）。
+  #usesRegion() {
+    return Boolean(this.#region?.enabled);
   }
 
   get active() {
@@ -109,12 +116,19 @@ class Spinner {
   stop() {
     this.cancelScheduled();
     if (!this.#active) {
+      if (this.#usesRegion()) {
+        this.#region.setWorking("");
+      }
       return;
     }
     this.#active = false;
     if (this.#timer) {
       clearInterval(this.#timer);
       this.#timer = null;
+    }
+    if (this.#usesRegion()) {
+      this.#region.setWorking("");
+      return;
     }
     this.#out.write("\r\x1b[K");
   }
@@ -128,6 +142,10 @@ class Spinner {
     const t = this.#styler;
     const frame = t.fg(this.#colorName, SPINNER_FRAMES[this.#frame]);
     const label = t.dim(`${this.#label}${elapsed}`);
+    if (this.#usesRegion()) {
+      this.#region.setWorking(`${frame} ${label}`);
+      return;
+    }
     this.#out.write(`\r\x1b[K${frame} ${label}`);
   }
 }
@@ -138,6 +156,7 @@ export class TranscriptRenderer {
   #sym;
   #md;
   #spinner;
+  #region;
   #assistantActive = false;
   #assistantWroteText = false;
   #resumeAssistant = false;
@@ -152,7 +171,8 @@ export class TranscriptRenderer {
     this.#t = options.styler ?? makeStyler(mode);
     this.#sym = options.symbols ?? pickSymbols(process.env);
     this.#md = createMarkdownRenderer(this.#t);
-    this.#spinner = new Spinner(out, this.#t);
+    this.#region = options.region ?? null;
+    this.#spinner = new Spinner(out, this.#t, this.#region);
   }
 
   get waiting() {
@@ -461,6 +481,10 @@ export class TranscriptRenderer {
   }
 
   #write(text) {
+    if (this.#region?.enabled) {
+      this.#region.appendOutput(text);
+      return;
+    }
     this.#out.write(text);
   }
 }
