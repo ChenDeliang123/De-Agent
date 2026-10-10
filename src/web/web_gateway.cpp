@@ -245,6 +245,22 @@ public:
         tools_handler_ = std::move(handler);
     }
 
+    void SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {
+        permissions_list_handler_ = std::move(handler);
+    }
+
+    void SetPermissionResolveHandler(WebGateway::PermissionResolveHandler handler) {
+        permission_resolve_handler_ = std::move(handler);
+    }
+
+    void SetPermissionSetHandler(WebGateway::PermissionSetHandler handler) {
+        permission_set_handler_ = std::move(handler);
+    }
+
+    void SetPermissionRemoveHandler(WebGateway::PermissionRemoveHandler handler) {
+        permission_remove_handler_ = std::move(handler);
+    }
+
     void SetSessionMetaStore(aiagent::agent::SessionMetaStore* session_meta_store) {
         session_meta_store_ = session_meta_store;
     }
@@ -626,6 +642,129 @@ private:
                         response.set_content(payload.dump(), "application/json");
                     });
 
+        // 权限模式：查询/设置/删除（工作路径级）。
+        server_.Get("/api/v1/permissions",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        if (!permissions_list_handler_) {
+                            response.status = 501;
+                            response.set_content(R"({"error":"permissions not available"})",
+                                                 "application/json");
+                            return;
+                        }
+                        const auto snapshot = permissions_list_handler_();
+                        nlohmann::json payload;
+                        payload["default_mode"] = snapshot.default_mode;
+                        payload["paths"] = nlohmann::json::array();
+                        for (const auto& entry : snapshot.entries) {
+                            payload["paths"].push_back(
+                                    {{"path", entry.path}, {"mode", entry.mode}});
+                        }
+                        response.set_content(payload.dump(), "application/json");
+                    });
+
+        server_.Get("/api/v1/permissions/effective",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        if (!permission_resolve_handler_) {
+                            response.status = 501;
+                            response.set_content(R"({"error":"permissions not available"})",
+                                                 "application/json");
+                            return;
+                        }
+                        const std::string path = request.has_param("path")
+                                                         ? request.get_param_value("path")
+                                                         : std::string();
+                        if (path.empty()) {
+                            response.status = 400;
+                            response.set_content(R"({"error":"path is required"})",
+                                                 "application/json");
+                            return;
+                        }
+                        std::string mode;
+                        std::string source;
+                        permission_resolve_handler_(path, &mode, &source);
+                        response.set_content(
+                                nlohmann::json{{"path", path},
+                                               {"mode", mode},
+                                               {"source", source}}
+                                        .dump(),
+                                "application/json");
+                    });
+
+        server_.Put("/api/v1/permissions",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        if (!permission_set_handler_) {
+                            response.status = 501;
+                            response.set_content(R"({"error":"permissions not available"})",
+                                                 "application/json");
+                            return;
+                        }
+                        try {
+                            const auto body = nlohmann::json::parse(request.body);
+                            const std::string path = StringValue(body, "path");
+                            const std::string mode = StringValue(body, "mode");
+                            if (path.empty() || mode.empty()) {
+                                response.status = 400;
+                                response.set_content(
+                                        R"({"error":"path and mode are required"})",
+                                        "application/json");
+                                return;
+                            }
+                            std::string effective;
+                            std::string error;
+                            if (!permission_set_handler_(path, mode, &effective, &error)) {
+                                response.status = 400;
+                                response.set_content(
+                                        nlohmann::json{{"error", error}}.dump(),
+                                        "application/json");
+                                return;
+                            }
+                            response.set_content(
+                                    nlohmann::json{{"path", path},
+                                                   {"mode", effective},
+                                                   {"source", "exact"}}
+                                            .dump(),
+                                    "application/json");
+                        } catch (const nlohmann::json::exception& e) {
+                            response.status = 400;
+                            response.set_content(
+                                    nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                     e.what()}}
+                                            .dump(),
+                                    "application/json");
+                        }
+                    });
+
+        server_.Delete("/api/v1/permissions",
+                       [this](const httplib::Request& request, httplib::Response& response) {
+                           if (!permission_remove_handler_) {
+                               response.status = 501;
+                               response.set_content(
+                                       R"({"error":"permissions not available"})",
+                                       "application/json");
+                               return;
+                           }
+                           const std::string path = request.has_param("path")
+                                                            ? request.get_param_value("path")
+                                                            : std::string();
+                           if (path.empty()) {
+                               response.status = 400;
+                               response.set_content(R"({"error":"path is required"})",
+                                                    "application/json");
+                               return;
+                           }
+                           std::string error;
+                           if (!permission_remove_handler_(path, &error)) {
+                               response.status = 404;
+                               response.set_content(
+                                       nlohmann::json{{"error", error}}.dump(),
+                                       "application/json");
+                               return;
+                           }
+                           response.set_content(
+                                   nlohmann::json{{"path", path}, {"removed", true}}.dump(),
+                                   "application/json");
+                       });
+
         server_.Post("/api/v1/chat",
                      [this](const httplib::Request& request, httplib::Response& response) {
                          try {
@@ -842,6 +981,10 @@ private:
     WebGateway::DeleteHandler delete_handler_;
     WebGateway::CloneHandler clone_handler_;
     WebGateway::ToolsHandler tools_handler_;
+    WebGateway::PermissionsListHandler permissions_list_handler_;
+    WebGateway::PermissionResolveHandler permission_resolve_handler_;
+    WebGateway::PermissionSetHandler permission_set_handler_;
+    WebGateway::PermissionRemoveHandler permission_remove_handler_;
     aiagent::agent::SessionMetaStore* session_meta_store_ = nullptr;
     std::mutex cancels_mutex_;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_cancels_;
@@ -888,6 +1031,24 @@ void WebGateway::SetCloneHandler(WebGateway::CloneHandler handler) {
 
 void WebGateway::SetToolsHandler(WebGateway::ToolsHandler handler) {
     impl_->SetToolsHandler(std::move(handler));
+}
+
+void WebGateway::SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {
+    impl_->SetPermissionsListHandler(std::move(handler));
+}
+
+void WebGateway::SetPermissionResolveHandler(
+        WebGateway::PermissionResolveHandler handler) {
+    impl_->SetPermissionResolveHandler(std::move(handler));
+}
+
+void WebGateway::SetPermissionSetHandler(WebGateway::PermissionSetHandler handler) {
+    impl_->SetPermissionSetHandler(std::move(handler));
+}
+
+void WebGateway::SetPermissionRemoveHandler(
+        WebGateway::PermissionRemoveHandler handler) {
+    impl_->SetPermissionRemoveHandler(std::move(handler));
 }
 
 void WebGateway::SetSessionMetaStore(

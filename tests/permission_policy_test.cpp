@@ -68,12 +68,29 @@ void TestNamesAndInheritance() {
     Expect(!ModeInherits(PermissionMode::kFull), "full does not inherit");
 }
 
+void TestClampMode() {
+    using aiagent::permissions::ClampMode;
+    Expect(ClampMode(PermissionMode::kFull, PermissionMode::kWorkspace, true) ==
+                   PermissionMode::kWorkspace,
+           "full is clamped to max workspace");
+    Expect(ClampMode(PermissionMode::kWorkspace, PermissionMode::kFull, true) ==
+                   PermissionMode::kWorkspace,
+           "workspace under max full is unchanged");
+    Expect(ClampMode(PermissionMode::kFull, PermissionMode::kFull, false) ==
+                   PermissionMode::kWorkspace,
+           "full is downgraded when full access is disallowed");
+    Expect(ClampMode(PermissionMode::kConfirm, PermissionMode::kFull, false) ==
+                   PermissionMode::kConfirm,
+           "confirm is unaffected by full-access flag");
+}
+
 }  // namespace
 
 int main() {
     TestPolicyMatrix();
     TestParseMode();
     TestNamesAndInheritance();
+    TestClampMode();
 
     if (g_failures != 0) {
         std::cerr << "permission policy test failed with " << g_failures

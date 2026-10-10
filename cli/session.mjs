@@ -181,3 +181,47 @@ export async function streamChat(
   }
   return donePayload;
 }
+
+export async function effectivePermission(backendUrl, path) {
+  const url = `${normalizeBackendUrl(backendUrl)}/api/v1/permissions/effective?path=${encodeURIComponent(path)}`;
+  const response = await fetch(url);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `permission request failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function setPermission(backendUrl, path, mode) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/permissions`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(JSON.stringify({ path, mode })),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `set permission failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function resetPermission(backendUrl, path) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/permissions?path=${encodeURIComponent(path)}`,
+    { method: "DELETE" },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `reset permission failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function listPermissions(backendUrl) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/permissions`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `list permissions failed: HTTP ${response.status}`);
+  }
+  return body;
+}

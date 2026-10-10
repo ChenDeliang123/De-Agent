@@ -27,6 +27,18 @@ struct ToolInfo {
     std::string description;
 };
 
+// 权限条目（GET /api/v1/permissions）。
+struct PermissionInfo {
+    std::string path;
+    std::string mode;
+};
+
+// 权限快照：默认模式 + 全部显式配置。
+struct PermissionsSnapshot {
+    std::string default_mode;
+    std::vector<PermissionInfo> entries;
+};
+
 // 会话最近一次加载的项目指令来源（只含路径/大小，不含指令正文）。
 struct InstructionSourceInfo {
     std::string path;
@@ -78,6 +90,27 @@ public:
     // 工具清单（GET /api/v1/tools）。
     using ToolsHandler = std::function<std::vector<ToolInfo>()>;
 
+    // 权限清单（GET /api/v1/permissions）。
+    using PermissionsListHandler = std::function<PermissionsSnapshot()>;
+
+    // 解析某路径的有效权限（GET /api/v1/permissions/effective?path=）。
+    // source 取 exact / inherited / default。
+    using PermissionResolveHandler =
+            std::function<bool(const std::string& path,
+                               std::string* mode,
+                               std::string* source)>;
+
+    // 设置权限（PUT /api/v1/permissions）。成功时写回实际生效模式（可能被夹取）。
+    using PermissionSetHandler =
+            std::function<bool(const std::string& path,
+                               const std::string& mode,
+                               std::string* effective_mode,
+                               std::string* error)>;
+
+    // 删除权限（DELETE /api/v1/permissions?path=）。
+    using PermissionRemoveHandler =
+            std::function<bool(const std::string& path, std::string* error)>;
+
     // 会话详情补充（GET /api/v1/sessions/:id/stats）：最近 cwd 与项目指令来源。
     // 返回 false 时 stats 不附带 cwd/instructions。
     using SessionDetailsHandler =
@@ -120,6 +153,12 @@ public:
 
     // 注入工具清单处理逻辑。未设置时 /tools 接口返回 501。
     void SetToolsHandler(ToolsHandler handler);
+
+    // 注入权限相关处理逻辑。未设置时对应接口返回 501。
+    void SetPermissionsListHandler(PermissionsListHandler handler);
+    void SetPermissionResolveHandler(PermissionResolveHandler handler);
+    void SetPermissionSetHandler(PermissionSetHandler handler);
+    void SetPermissionRemoveHandler(PermissionRemoveHandler handler);
 
     // 注入会话历史内存缓存（可选）。命中后，读取会话历史/标题的 REST 接口
     // 不再每次全表扫描 task store；未注入时行为与旧实现一致。

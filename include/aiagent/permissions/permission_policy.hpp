@@ -39,6 +39,13 @@ const char* ModeName(PermissionMode mode);
 // 该档位是否可被父目录继承（full 不继承，避免误设后扩散）。
 bool ModeInherits(PermissionMode mode);
 
+// 档位优先级（confirm=0 < workspace=1 < full=2）。
+int ModeRank(PermissionMode mode);
+
+// 把请求模式夹到 max_mode 允许的档位；不允许 full 时降到 workspace。
+PermissionMode ClampMode(PermissionMode requested, PermissionMode max_mode,
+                         bool allow_full_access);
+
 // 生成给系统提示词用的一句话描述。
 std::string DescribePolicy(PermissionMode mode);
 

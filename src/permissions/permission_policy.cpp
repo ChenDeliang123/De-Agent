@@ -84,6 +84,30 @@ bool ModeInherits(PermissionMode mode) {
     return mode != PermissionMode::kFull;
 }
 
+int ModeRank(PermissionMode mode) {
+    switch (mode) {
+        case PermissionMode::kConfirm:
+            return 0;
+        case PermissionMode::kWorkspace:
+            return 1;
+        case PermissionMode::kFull:
+            return 2;
+    }
+    return 0;
+}
+
+PermissionMode ClampMode(PermissionMode requested, PermissionMode max_mode,
+                         bool allow_full_access) {
+    PermissionMode mode = requested;
+    if (ModeRank(mode) > ModeRank(max_mode)) {
+        mode = max_mode;
+    }
+    if (mode == PermissionMode::kFull && !allow_full_access) {
+        mode = PermissionMode::kWorkspace;
+    }
+    return mode;
+}
+
 std::string DescribePolicy(PermissionMode mode) {
     switch (mode) {
         case PermissionMode::kConfirm:

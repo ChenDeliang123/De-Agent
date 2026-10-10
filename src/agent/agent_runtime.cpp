@@ -90,11 +90,8 @@ permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
         }
     }
     // allow_full_access=false 时把 full 夹到 workspace。
-    if (mode == permissions::PermissionMode::kFull &&
-        !permission_settings_.allow_full_access) {
-        mode = permissions::PermissionMode::kWorkspace;
-    }
-    return mode;
+    return permissions::ClampMode(mode, permission_settings_.max_mode,
+                                  permission_settings_.allow_full_access);
 }
 
 tools::ToolContext AgentRuntime::BuildToolContext(

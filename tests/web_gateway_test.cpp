@@ -20,6 +20,7 @@
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/web/web_gateway.hpp"
 
 namespace {
@@ -269,6 +270,107 @@ int main() {
             return std::vector<aiagent::web::ToolInfo>{{"read", "Read a file"},
                                                       {"bash", "Run a command"}};
         });
+
+        // ---- 权限模式 REST ----
+        aiagent::permissions::PermissionStore permission_store;
+        aiagent::agent::PermissionSettings permission_settings;
+        gateway.SetPermissionsListHandler([&]() {
+            aiagent::web::PermissionsSnapshot snapshot;
+            snapshot.default_mode =
+                    aiagent::permissions::ModeName(permission_settings.default_mode);
+            for (const auto& [path, mode] : permission_store.List()) {
+                snapshot.entries.push_back(
+                        {path, aiagent::permissions::ModeName(mode)});
+            }
+            return snapshot;
+        });
+        gateway.SetPermissionResolveHandler(
+                [&](const std::string& path, std::string* mode, std::string* source) {
+                    if (const auto entry = permission_store.Resolve(path);
+                        entry.has_value()) {
+                        *mode = aiagent::permissions::ModeName(entry->mode);
+                        *source = entry->inherited ? "inherited" : "exact";
+                    } else {
+                        *mode = aiagent::permissions::ModeName(
+                                permission_settings.default_mode);
+                        *source = "default";
+                    }
+                    return true;
+                });
+        gateway.SetPermissionSetHandler(
+                [&](const std::string& path, const std::string& mode_text,
+                    std::string* effective, std::string* error) {
+                    const auto mode = aiagent::permissions::ParseMode(mode_text);
+                    if (!mode.has_value()) {
+                        if (error != nullptr) {
+                            *error = "invalid mode: " + mode_text;
+                        }
+                        return false;
+                    }
+                    permission_store.Set(path, *mode);
+                    if (effective != nullptr) {
+                        *effective = aiagent::permissions::ModeName(*mode);
+                    }
+                    return true;
+                });
+        gateway.SetPermissionRemoveHandler([&](const std::string& path, std::string*) {
+            permission_store.Remove(path);
+            return true;
+        });
+
+        httplib::Client perm(base);
+        const auto perm_put = perm.Put(
+                "/api/v1/permissions",
+                R"({"path":"/tmp/permission-test","mode":"workspace"})",
+                "application/json");
+        Expect(perm_put && perm_put->status == 200, "PUT permissions should succeed");
+
+        const auto perm_eff =
+                perm.Get("/api/v1/permissions/effective?path=/tmp/permission-test");
+        Expect(perm_eff && perm_eff->status == 200,
+               "effective endpoint should succeed");
+        const auto perm_eff_json = nlohmann::json::parse(perm_eff->body);
+        Expect(perm_eff_json.value("mode", std::string()) == "workspace",
+               "effective mode should be workspace");
+        Expect(perm_eff_json.value("source", std::string()) == "exact",
+               "effective source should be exact");
+
+        const auto perm_inherited = perm.Get(
+                "/api/v1/permissions/effective?path=/tmp/permission-test/sub");
+        Expect(perm_inherited && perm_inherited->status == 200,
+               "inherited effective endpoint should succeed");
+        Expect(nlohmann::json::parse(perm_inherited->body).value("source",
+                                                                 std::string()) ==
+                       "inherited",
+               "child path should inherit");
+
+        const auto perm_default =
+                perm.Get("/api/v1/permissions/effective?path=/tmp/other-perm");
+        Expect(nlohmann::json::parse(perm_default->body).value("source", std::string()) ==
+                       "default",
+               "unset path should report default");
+
+        const auto perm_bad = perm.Put(
+                "/api/v1/permissions",
+                R"({"path":"/tmp/permission-test","mode":"bogus"})",
+                "application/json");
+        Expect(perm_bad && perm_bad->status == 400, "invalid mode should return 400");
+
+        const auto perm_list = perm.Get("/api/v1/permissions");
+        Expect(perm_list && perm_list->status == 200, "permissions list should succeed");
+        const auto perm_list_json = nlohmann::json::parse(perm_list->body);
+        Expect(perm_list_json.value("default_mode", std::string()) == "confirm",
+               "list should include default mode");
+
+        const auto perm_del =
+                perm.Delete("/api/v1/permissions?path=/tmp/permission-test");
+        Expect(perm_del && perm_del->status == 200,
+               "DELETE permissions should succeed");
+        const auto perm_after =
+                perm.Get("/api/v1/permissions/effective?path=/tmp/permission-test");
+        Expect(nlohmann::json::parse(perm_after->body).value("source", std::string()) ==
+                       "default",
+               "after delete, path falls back to default");
 
         const auto sessions_p1 = http.Get(base + "/api/v1/sessions");
         const auto session_list_p1 = nlohmann::json::parse(sessions_p1.body);

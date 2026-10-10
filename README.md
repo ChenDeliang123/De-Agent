@@ -17,6 +17,7 @@
 - 任务与消息历史通过 SQLite 持久化。
 - 上下文压缩：超阈值时自动摘要较早消息，避免长会话撞上下文窗口。
 - 文件工具路径沙箱：`read`/`write`/`edit` 默认只能访问工作目录及其子目录。
+- 权限模式：按工作路径选择 `confirm` / `workspace` / `full`，后端据此裁决工具调用。
 - 内置本地 REST + SSE 后端，配套零 npm 依赖的终端 coding 客户端。
 
 [a2a-protocol]: https://gitee.com/chen_dl/a2a-protocol
@@ -201,6 +202,7 @@ de logs      # 查看后端日志
 /status           查看后端健康状态与当前会话
 /tools            列出 Agent 可用工具（coding + MCP）
 /cwd [dir]        查看/切换工具工作目录
+/permissions [m]  查看/切换当前工作路径的权限模式（confirm|workspace|full|list|reset|show）
 /clear            清屏
 /help             显示全部指令
 /hotkeys          显示键盘快捷键
@@ -261,6 +263,10 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | `GET` | `/api/v1/sessions` | 会话列表（`id` + `title` + `updated_at`，按最近使用排序） |
 | `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
 | `GET` | `/api/v1/tools` | 可用工具清单（coding + MCP） |
+| `GET` | `/api/v1/permissions` | 权限配置列表（默认模式 + 显式路径） |
+| `GET` | `/api/v1/permissions/effective?path=<abs>` | 查询某路径的有效权限模式 |
+| `PUT` | `/api/v1/permissions` | 设置某路径的权限模式 `{path, mode}` |
+| `DELETE` | `/api/v1/permissions?path=<abs>` | 重置某路径为默认 |
 | `GET` | `/health` | 健康检查 |
 
 同步对话示例：
@@ -387,7 +393,47 @@ agents_md_max_depth = 16
 - 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；同步 `/api/v1/chat`
   和 A2A `SendMessage` 暂不保证使用项目指令。
 
+## 权限模式
+
+Agent 在某个工作路径下的行为由「权限模式」决定。终端用 `/permissions`
+查看与切换；后端在模型发起工具调用时按模式裁决（拒绝会作为工具结果回填，
+不会中断整轮对话）。
+
+| 模式 | 读 | 工作区内写 | 工作区外写 | 命令 |
+| --- | :---: | :---: | :---: | :---: |
+| `confirm`（默认） | ✅ | 需确认 | ❌ | 需确认 |
+| `workspace` | ✅ | ✅ | ❌ | 需确认 |
+| `full` | ✅ | ✅ | ✅ | ✅ |
+
+> 当前阶段（M1）**逐次人工确认尚未实现**：`confirm` 的写/命令、`workspace`
+> 的命令会先表现为**拒绝并提示**，接入审批后再弹确认。
+
+- 权限按 **canonical 工作路径**存储，支持父目录就近继承；`full` 不参与继承。
+- 数据存在**用户级目录**（默认 `~/.de/permissions.json`，目录按需创建），
+  可用 `[storage] data_dir` / `$DE_HOME` / `$XDG_DATA_HOME` 覆盖。
+- 模式可在 `[permissions]` 配置默认值与上限；`full` 需要 CLI 二次确认。
+
+```ini
+[permissions]
+default_mode = confirm
+max_mode = full
+allow_full_access = true
+```
+
+终端命令：
+
+```text
+/permissions                    查看当前目录的有效模式（TTY 下打开选择器）
+/permissions workspace          设置模式（confirm | workspace | full）
+/permissions list               列出所有显式配置
+/permissions reset              清除当前目录的显式配置（回到默认/继承）
+/permissions show               打印有效模式与能力摘要
+```
+
 ## 工具沙箱
+
+> 文件工具的路径沙箱是「权限模式」在文件操作上的具体执行：`workspace` /
+> `confirm` 下开启，`full` 下关闭（`policy.allow_outside`）。
 
 `read` / `write` / `edit` 三个文件工具默认启用路径沙箱：路径会被
 canonical 化（解析 `.`、`..` 与符号链接），解析结果必须落在「本次请求的
@@ -410,7 +456,8 @@ sandbox_roots =
 - **`bash` 工具不受该策略约束**：它在工作目录下执行任意命令，仍可访问
   全盘。文件沙箱是「文件工具」的边界，不是进程级沙箱；需要更强隔离请
   后续引入审批/容器化。
-- 关闭沙箱（`sandbox_enabled = false`）会恢复为「任意路径可读写」，不推荐。
+- 关闭沙箱（`sandbox_enabled = false`）已由权限模式取代：会被兼容映射为
+  默认模式 `full`（不推荐），建议直接用 `/permissions`。
 
 ## A2A
 

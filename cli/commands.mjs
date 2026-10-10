@@ -23,11 +23,15 @@ import {
   cloneSession,
   compactSession,
   deleteSession,
+  effectivePermission,
   health,
+  listPermissions,
   listSessions,
   listTools,
   renameSession,
+  resetPermission,
   sessionStats,
+  setPermission,
 } from "./session.mjs";
 import { renderHotkeys } from "./editor.mjs";
 
@@ -59,6 +63,76 @@ function listSessionsFormatted(ctx, all) {
   all.forEach((entry, index) => {
     ctx.print(`  ${index + 1}. ${sessionTitle(entry, index)}  (${sessionId(entry)})`);
   });
+}
+
+const PERMISSION_MODES = [
+  {
+    value: "confirm",
+    label: "confirm",
+    description: "Ask before every file write or command",
+  },
+  {
+    value: "workspace",
+    label: "workspace",
+    description: "Write inside the workspace; ask before commands",
+  },
+  {
+    value: "full",
+    label: "full",
+    description: "Unrestricted file and shell access (danger)",
+  },
+];
+
+const PERMISSION_ALIASES = {
+  confirm: "confirm",
+  ask: "confirm",
+  workspace: "workspace",
+  ws: "workspace",
+  write: "workspace",
+  full: "full",
+  danger: "full",
+};
+
+function normalizePermissionMode(text) {
+  return PERMISSION_ALIASES[String(text).toLowerCase()] ?? null;
+}
+
+function printPermissionInfo(ctx, info) {
+  const write =
+    info.mode === "full" ? "anywhere" : info.mode === "confirm" ? "ask" : "inside workspace";
+  const command = info.mode === "full" ? "yes" : "ask";
+  ctx.print(`cwd:       ${info.path}`);
+  ctx.print(`mode:      ${info.mode} (${info.source})`);
+  ctx.print("  read:    yes");
+  ctx.print(`  write:   ${write}`);
+  ctx.print(`  command: ${command}`);
+}
+
+async function applyPermissionMode(ctx, cwd, modeText) {
+  const mode = normalizePermissionMode(modeText);
+  if (!mode) {
+    ctx.print(`unknown mode: ${modeText}; use confirm | workspace | full`);
+    return;
+  }
+  if (mode === "full") {
+    const message =
+      "FULL ACCESS gives the model unrestricted file and shell access under\n" +
+      `  ${cwd}\n` +
+      "(it can read/write anywhere and run any command). Enable?";
+    const ok = typeof ctx.confirm === "function" ? await ctx.confirm(message) : false;
+    if (!ok) {
+      ctx.print("cancelled");
+      return;
+    }
+  }
+  try {
+    const result = await setPermission(ctx.backend, cwd, mode);
+    const warn = result.mode === "full" ? "  ⚠ FULL ACCESS" : "";
+    ctx.print(`permission for ${cwd}: ${result.mode}${warn}`);
+    ctx.log("info", "cli", `event=permission_set path=${cwd} mode=${result.mode}`);
+  } catch (error) {
+    ctx.print(`permission change failed: ${error.message}`);
+  }
 }
 
 export async function restoreSessionCwd(ctx) {
@@ -390,6 +464,82 @@ export const commands = [
       ctx.state.cwd = resolved;
       ctx.state.cwdExplicit = true;
       ctx.print(`cwd: ${resolved}`);
+    },
+  },
+  {
+    name: "permissions",
+    aliases: ["perms", "permission"],
+    description: "Show or change the permission mode for the current directory",
+    argHint: "[confirm|workspace|full|show|list|reset]",
+    category: "local",
+    handler: async (ctx, arg) => {
+      const cwd = ctx.state.cwd ?? process.cwd();
+      const token = (arg ?? "").trim().toLowerCase();
+
+      if (token === "list") {
+        try {
+          const data = await listPermissions(ctx.backend);
+          ctx.print(`default: ${data.default_mode}`);
+          const paths = Array.isArray(data.paths) ? data.paths : [];
+          if (paths.length === 0) {
+            ctx.print("(no explicit permissions)");
+            return;
+          }
+          for (const entry of paths) {
+            const warn = entry.mode === "full" ? "  ⚠" : "";
+            ctx.print(`  ${entry.path}  ${entry.mode}${warn}`);
+          }
+        } catch (error) {
+          ctx.print(`permission list failed: ${error.message}`);
+        }
+        return;
+      }
+
+      if (token === "reset") {
+        try {
+          await resetPermission(ctx.backend, cwd);
+          const info = await effectivePermission(ctx.backend, cwd);
+          ctx.print(
+            `cleared explicit permission for ${cwd} (now ${info.source}: ${info.mode})`,
+          );
+        } catch (error) {
+          ctx.print(`permission reset failed: ${error.message}`);
+        }
+        return;
+      }
+
+      if (token && token !== "show") {
+        await applyPermissionMode(ctx, cwd, token);
+        return;
+      }
+
+      let info;
+      try {
+        info = await effectivePermission(ctx.backend, cwd);
+      } catch (error) {
+        ctx.print(`permission request failed: ${error.message}`);
+        return;
+      }
+      if (token === "show" || typeof ctx.select !== "function") {
+        printPermissionInfo(ctx, info);
+        return;
+      }
+      // 交互式选择：当前模式置顶并标注 (current)。
+      const ordered = [
+        ...PERMISSION_MODES.filter((mode) => mode.value === info.mode),
+        ...PERMISSION_MODES.filter((mode) => mode.value !== info.mode),
+      ];
+      const index = await ctx.select(
+        ordered.map((mode) => ({
+          label: mode.label,
+          description: `${mode.description}${mode.value === info.mode ? "  (current)" : ""}`,
+        })),
+        `Select permission for ${cwd} (↑/↓ move, Enter apply, Esc cancel):`,
+      );
+      if (index === null || index === undefined || !ordered[index]) {
+        return;
+      }
+      await applyPermissionMode(ctx, cwd, ordered[index].value);
     },
   },
   {

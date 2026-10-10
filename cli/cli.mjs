@@ -227,6 +227,10 @@ function makeSelector(editor) {
     );
 }
 
+function makeSelect(editor) {
+  return (items, prompt) => editor.selectList(items, prompt);
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -276,6 +280,7 @@ async function main() {
     },
     renderHistory: (backendUrl, sessionId) => renderHistory(backendUrl, sessionId),
     selectSession: editor ? makeSelector(editor) : null,
+    select: editor ? makeSelect(editor) : null,
     confirm: editor
       ? async (message) => {
           const result = await editor.readLine(`${message} (y/N) `);

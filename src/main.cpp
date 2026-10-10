@@ -601,6 +601,63 @@ int main(int argc, char** argv) {
             }
             return tools_info;
         });
+        // 权限模式：按工作路径查询/设置/重置，供 CLI /permissions 使用。
+        web_gateway.SetPermissionsListHandler([&]() {
+            aiagent::web::PermissionsSnapshot snapshot;
+            snapshot.default_mode =
+                    aiagent::permissions::ModeName(permission_settings.default_mode);
+            for (const auto& [path, mode] : permission_store->List()) {
+                snapshot.entries.push_back(
+                        {path, aiagent::permissions::ModeName(mode)});
+            }
+            return snapshot;
+        });
+        web_gateway.SetPermissionResolveHandler(
+                [&](const std::string& path, std::string* mode, std::string* source) {
+                    if (const auto entry = permission_store->Resolve(path);
+                        entry.has_value()) {
+                        *mode = aiagent::permissions::ModeName(entry->mode);
+                        *source = entry->inherited ? "inherited" : "exact";
+                    } else {
+                        *mode = aiagent::permissions::ModeName(
+                                permission_settings.default_mode);
+                        *source = "default";
+                    }
+                    return true;
+                });
+        web_gateway.SetPermissionSetHandler(
+                [&](const std::string& path, const std::string& mode_text,
+                    std::string* effective_mode, std::string* error) {
+                    const auto mode = aiagent::permissions::ParseMode(mode_text);
+                    if (!mode.has_value()) {
+                        if (error != nullptr) {
+                            *error = "invalid mode: " + mode_text;
+                        }
+                        return false;
+                    }
+                    const auto clamped = aiagent::permissions::ClampMode(
+                            *mode, permission_settings.max_mode,
+                            permission_settings.allow_full_access);
+                    permission_store->Set(path, clamped);
+                    if (effective_mode != nullptr) {
+                        *effective_mode = aiagent::permissions::ModeName(clamped);
+                    }
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "event=permission_changed path=" + path + " mode=" +
+                                    aiagent::permissions::ModeName(clamped));
+                    return true;
+                });
+        web_gateway.SetPermissionRemoveHandler(
+                [&](const std::string& path, std::string* error) {
+                    (void)error;
+                    // 幂等：未显式配置时也视为成功（重置为默认）。
+                    permission_store->Remove(path);
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "event=permission_reset path=" + path);
+                    return true;
+                });
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,
