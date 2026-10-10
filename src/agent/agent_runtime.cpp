@@ -31,6 +31,22 @@ std::string RoleToLlmRole(a2a::models::Role role) {
     }
 }
 
+std::string BashCommandFromArguments(const std::string& arguments) {
+    if (arguments.empty()) {
+        return {};
+    }
+    try {
+        const nlohmann::json json = nlohmann::json::parse(arguments);
+        if (json.is_object() && json.contains("command") &&
+            json["command"].is_string()) {
+            return json["command"].get<std::string>();
+        }
+    } catch (const nlohmann::json::exception&) {
+        // 参数不是合法 JSON 时视为无命令。
+    }
+    return {};
+}
+
 void AppendPermissionMode(std::string& content, permissions::PermissionMode mode) {
     content += "\n\nCurrent permission mode: ";
     content += permissions::ModeName(mode);
@@ -76,6 +92,10 @@ void AgentRuntime::SetPermissionStore(
 
 void AgentRuntime::SetPermissionSettings(const PermissionSettings& settings) {
     permission_settings_ = settings;
+}
+
+void AgentRuntime::SetBashPolicy(permissions::BashPolicy policy) {
+    bash_policy_ = std::move(policy);
 }
 
 permissions::PermissionMode AgentRuntime::ResolvePermissionMode(
@@ -133,7 +153,8 @@ void AgentRuntime::GrantSessionAllow(const std::string& context_id,
 AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         const std::string& tool_name,
         const permissions::PermissionPolicy& policy,
-        const std::string& context_id) const {
+        const std::string& context_id,
+        const std::string& bash_command) const {
     if (tool_name == "read") {
         if (!policy.allow_read) {
             return {ToolGate::kDeny,
@@ -153,6 +174,18 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         return {ToolGate::kAllow, {}};
     }
     if (tool_name == "bash") {
+        // 命令级白/黑名单优先于模式：deny 不可被确认绕过，allow 免确认。
+        if (!bash_command.empty()) {
+            const permissions::BashDecision bash_decision =
+                    permissions::EvaluateBashPolicy(bash_command, bash_policy_);
+            if (bash_decision == permissions::BashDecision::kDeny) {
+                return {ToolGate::kDeny,
+                        "permission denied: command blocked by bash policy"};
+            }
+            if (bash_decision == permissions::BashDecision::kAllow) {
+                return {ToolGate::kAllow, {}};
+            }
+        }
         if (!policy.allow_command) {
             return {ToolGate::kDeny,
                     "permission denied: command execution is disabled by the current "
@@ -174,7 +207,12 @@ AgentRuntime::ToolDecision AgentRuntime::DecideTool(
         const std::string& context_id,
         const AgentEventCallback& on_event,
         bool interactive) {
-    const ToolGateResult gate = CheckToolGate(call.name, context.policy, context_id);
+    std::string bash_command;
+    if (call.name == "bash") {
+        bash_command = BashCommandFromArguments(call.arguments);
+    }
+    const ToolGateResult gate =
+            CheckToolGate(call.name, context.policy, context_id, bash_command);
     if (gate.gate == ToolGate::kAllow) {
         return {true, {}};
     }

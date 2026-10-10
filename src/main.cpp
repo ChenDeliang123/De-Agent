@@ -34,6 +34,7 @@
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/log.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
+#include "aiagent/permissions/bash_policy.hpp"
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
@@ -394,6 +395,40 @@ int main(int argc, char** argv) {
                         aiagent::permissions::ModeName(permission_settings.default_mode) +
                         " allow_full_access=" +
                         (permission_settings.allow_full_access ? "true" : "false"));
+
+        // bash 命令白/黑名单：用户级规则文件；不存在时写入带注释的默认文件。
+        std::string bash_policy_path = storage_config.bash_policy_file;
+        if (bash_policy_path.empty()) {
+            bash_policy_path = app_paths.bash_policy_file;
+        }
+        if (bash_policy_path.empty()) {
+            std::filesystem::path fallback = db_path;
+            fallback.replace_filename("bash_policy.rules");
+            bash_policy_path = fallback.string();
+        }
+        aiagent::permissions::BashPolicy bash_policy;
+        std::string bash_policy_error;
+        if (aiagent::permissions::LoadBashPolicyFile(bash_policy_path, &bash_policy,
+                                                     &bash_policy_error)) {
+            // 已存在：以文件为准。
+        } else if (aiagent::permissions::WriteDefaultBashPolicyFile(bash_policy_path)) {
+            bash_policy = aiagent::permissions::DefaultBashPolicy();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "main",
+                    "bash policy default file written: " + bash_policy_path);
+        } else {
+            bash_policy = aiagent::permissions::DefaultBashPolicy();
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "main",
+                    "using built-in bash policy (cannot write " + bash_policy_path +
+                            ")");
+        }
+        runtime.SetBashPolicy(bash_policy);
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "main",
+                "bash policy file=" + bash_policy_path + " deny=" +
+                        std::to_string(bash_policy.deny.size()) + " allow=" +
+                        std::to_string(bash_policy.allow.size()));
 
         auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
         tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(

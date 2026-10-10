@@ -61,6 +61,9 @@ sandbox_roots =
 data_dir =
 ; 权限文件；留空时用 <data_dir>/permissions.json。
 permissions_file =
+; bash 命令白/黑名单文件；留空时用 <data_dir>/bash_policy.rules。
+; 文件不存在时会自动生成一份带注释的默认规则，用户可直接编辑。
+bash_policy_file =
 
 [permissions]
 ; 新路径（未单独配置）时的默认模式：confirm | workspace | full。

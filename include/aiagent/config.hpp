@@ -55,6 +55,7 @@ struct ToolsConfig {
 struct StorageConfig {
     std::string data_dir;          // 空则按 DE_HOME/XDG_DATA_HOME/HOME 解析
     std::string permissions_file;  // 空则用 <data_dir>/permissions.json
+    std::string bash_policy_file;  // 空则用 <data_dir>/bash_policy.rules
 };
 
 // 权限模式配置（[permissions]）。

@@ -18,6 +18,7 @@
 #include "aiagent/agent/compaction.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/permissions/bash_policy.hpp"
 #include "aiagent/permissions/permission_policy.hpp"
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/tools/tool_context.hpp"
@@ -67,6 +68,9 @@ public:
     // 可选：注入按路径权限存储与默认设置。未注入时使用 default_mode。
     void SetPermissionStore(std::shared_ptr<permissions::PermissionStore> store);
     void SetPermissionSettings(const PermissionSettings& settings);
+
+    // 可选：注入 bash 命令白/黑名单。未注入时不做命令级拦截。
+    void SetBashPolicy(permissions::BashPolicy policy);
 
     // 可选：注入审批回调。未注入时“需要确认”的工具直接拒绝。
     void SetApprovalHandler(ApprovalHandler handler);
@@ -146,7 +150,8 @@ private:
     };
     ToolGateResult CheckToolGate(const std::string& tool_name,
                                  const permissions::PermissionPolicy& policy,
-                                 const std::string& context_id) const;
+                                 const std::string& context_id,
+                                 const std::string& bash_command) const;
 
     // 结合审批通道得出工具是否可执行；needs-approval 时会发 kApprovalRequest
     // 事件并调用 approval_handler_ 阻塞等待。
@@ -181,6 +186,7 @@ private:
     std::shared_ptr<ProjectInstructionsLoader> instructions_loader_;
     std::shared_ptr<permissions::PermissionStore> permission_store_;
     PermissionSettings permission_settings_;
+    permissions::BashPolicy bash_policy_;
     ApprovalHandler approval_handler_;
     mutable std::mutex session_allow_mutex_;
     // context_id -> 本会话「总是允许」的工具名集合（仅内存，不持久化）。

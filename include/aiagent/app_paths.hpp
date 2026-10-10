@@ -16,6 +16,7 @@ namespace aiagent {
 struct AppPaths {
     std::string data_dir;
     std::string permissions_file;
+    std::string bash_policy_file;
 };
 
 AppPaths ResolveAppPaths(const std::string& explicit_data_dir = {});

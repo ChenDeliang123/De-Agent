@@ -432,6 +432,28 @@ allow_full_access = true
 /permissions show               打印有效模式与能力摘要
 ```
 
+### bash 命令白/黑名单
+
+在权限模式之上，用一份**用户可编辑的纯文本规则文件**给 `bash` 加命令级策略：
+`deny` 永不执行（不可被确认绕过），`allow` 免确认；都不命中才回落到模式。
+
+- 文件：默认 `~/.de/bash_policy.rules`（可用 `[storage] bash_policy_file` 覆盖）；
+  **不存在时首次启动自动生成**一份带注释的默认规则，直接编辑即可。
+- 格式：一行一条，`#` 注释，`deny`/`allow` 前缀；token 前缀匹配，`re:` 走正则。
+- 判定顺序：`deny > allow > 模式`；`allow` 要求命令的**每个分段**都命中。
+
+```text
+# deny  mkfs
+# deny  re: (curl|wget)[^|]*\|\s*(sh|bash)
+# allow git status
+# allow git diff
+# allow ls
+```
+
+> 字符串匹配不是安全边界（`$IFS`、引号、别名等可绕过）；真正的安全靠
+> `confirm`/`workspace` 的逐次确认或进程级沙箱。完整建议清单见
+> `docs/权限模式规划.md` 附录。
+
 ## 工具沙箱
 
 > 文件工具的路径沙箱是「权限模式」在文件操作上的具体执行：`workspace` /

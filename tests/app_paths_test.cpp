@@ -30,6 +30,8 @@ void TestExplicitWins() {
     Expect(paths.data_dir == "/tmp/explicit", "explicit data_dir wins");
     Expect(paths.permissions_file == "/tmp/explicit/permissions.json",
            "permissions file derives from data_dir");
+    Expect(paths.bash_policy_file == "/tmp/explicit/bash_policy.rules",
+           "bash policy file derives from data_dir");
 }
 
 void TestEnvFallbacks() {

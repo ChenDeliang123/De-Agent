@@ -234,8 +234,8 @@ public:
 // 第一次调用请求指定工具，第二次返回最终回复。
 class OneShotToolModel final : public aiagent::llm::IModelClient {
 public:
-    explicit OneShotToolModel(std::string tool_name)
-        : tool_name_(std::move(tool_name)) {}
+    explicit OneShotToolModel(std::string tool_name, std::string arguments = "{}")
+        : tool_name_(std::move(tool_name)), arguments_(std::move(arguments)) {}
 
     int calls = 0;
 
@@ -249,7 +249,7 @@ public:
         choice.role = "assistant";
         if (calls == 1) {
             choice.tool_calls.push_back(
-                    aiagent::llm::ToolCall{"call-1", tool_name_, "{}"});
+                    aiagent::llm::ToolCall{"call-1", tool_name_, arguments_});
         } else {
             choice.content = "done";
         }
@@ -267,7 +267,7 @@ public:
         if (calls == 1) {
             event.finish_reason = "tool_calls";
             event.tool_calls.push_back(
-                    aiagent::llm::ToolCall{"call-1", tool_name_, "{}"});
+                    aiagent::llm::ToolCall{"call-1", tool_name_, arguments_});
         } else {
             event.content = "done";
             event.finish_reason = "stop";
@@ -279,6 +279,7 @@ public:
 
 private:
     std::string tool_name_;
+    std::string arguments_;
 };
 
 // 奇数调用请求工具，偶数调用返回最终回复（用于测试会话内“总是允许”缓存）。
@@ -1141,6 +1142,41 @@ int main() {
                     a2a::models::Role::kUser, "run tool", "text/plain");
             runtime.HandleMessageStreamingEvents(user, {user}, "ctx-deny", nullptr);
             Expect(provider->write_calls == 0, "denied write does not execute");
+        }
+        // bash 黑名单：deny 命中 -> 不执行（即使 full）。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            auto model = std::make_shared<OneShotToolModel>(
+                    "bash", R"({"command":"sudo reboot"})");
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(provider);
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = PermissionMode::kFull;
+            runtime.SetPermissionSettings(settings);
+            runtime.SetBashPolicy(aiagent::permissions::ParseBashPolicy("deny sudo\n"));
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "run tool", "text/plain");
+            runtime.HandleMessageStreaming(user, {user}, "ctx-bash-deny", nullptr);
+            Expect(provider->bash_calls == 0,
+                   "bash policy deny blocks the command even in full mode");
+        }
+        // bash 白名单：allow 命中 -> 免确认（workspace 下 bash 本需确认）。
+        {
+            auto provider = std::make_shared<RecordingPermissionProvider>();
+            auto model = std::make_shared<OneShotToolModel>(
+                    "bash", R"({"command":"git status"})");
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(provider);
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = PermissionMode::kWorkspace;
+            runtime.SetPermissionSettings(settings);
+            runtime.SetBashPolicy(
+                    aiagent::permissions::ParseBashPolicy("allow git status\n"));
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "run tool", "text/plain");
+            runtime.HandleMessageStreaming(user, {user}, "ctx-bash-allow", nullptr);
+            Expect(provider->bash_calls == 1,
+                   "bash policy allow skips the confirmation requirement");
         }
     } catch (const std::exception& e) {
         std::cerr << "agent runtime permission test failed: " << e.what() << '\n';

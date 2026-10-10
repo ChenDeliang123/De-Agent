@@ -100,6 +100,7 @@ add_library(aiagent_agent STATIC
   src/agent/history_cache.cpp
   src/agent/project_instructions.cpp
   src/agent/session_meta_store.cpp
+  src/permissions/bash_policy.cpp
   src/permissions/permission_policy.cpp
   src/permissions/permission_store.cpp
   src/tools/run_command.cpp
@@ -204,6 +205,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(approval_broker_test tests/approval_broker_test.cpp)
   target_link_libraries(approval_broker_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_approval_broker COMMAND approval_broker_test)
+
+  add_executable(bash_policy_test tests/bash_policy_test.cpp)
+  target_link_libraries(bash_policy_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_bash_policy COMMAND bash_policy_test)
 
   add_executable(app_paths_test tests/app_paths_test.cpp)
   target_link_libraries(app_paths_test PRIVATE aiagent_agent)
