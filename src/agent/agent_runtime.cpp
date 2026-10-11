@@ -4,7 +4,6 @@
 #include "a2a/core/id.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <stdexcept>
 #include <utility>
 #include <vector>
