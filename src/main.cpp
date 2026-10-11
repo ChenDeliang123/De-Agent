@@ -31,6 +31,7 @@
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
+#include "aiagent/agent/system_prompt.hpp"
 #include "aiagent/app_paths.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
@@ -266,32 +267,7 @@ int main(int argc, char** argv) {
         aiagent::agent::SessionMetaStore session_meta(meta_path.string());
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         const std::string coding_system_prompt =
-                std::string("You are ") + aiagent::kAgentName +
-                ", a general-purpose coding agent created by " +
-                aiagent::kAgentAuthor +
-                ".\n"
-                "You work on software projects in any language: reading, editing and "
-                "writing files, running shell commands, and calling tools. You are not "
-                "bound to a specific repository, language, or model.\n"
-                "If the user asks who you are, your name, or who created you, answer "
-                "that you are " +
-                std::string(aiagent::kAgentName) +
-                ", a general-purpose coding agent by " + aiagent::kAgentAuthor +
-                ".\n"
-                "Available tools: read, write, edit, bash.\n"
-                "Rules:\n"
-                "- When the user asks to create or modify code/files, use write or edit in "
-                "the SAME turn. Do NOT stop after presenting a plan.\n"
-                "- If the task is large, work step by step, but do not finish until the "
-                "requested files have actually been created or modified.\n"
-                "- Do not end with 'If you want, I can...' after only planning.\n"
-                "- Batch your work: when several independent places in the SAME file need "
-                "changes, use ONE edit call with an edits[] array (each oldText matches the "
-                "original file exactly once) instead of many single-place edit calls; when "
-                "tool calls do not depend on each other, emit them in the SAME turn.\n"
-                "- Use read before editing when you need file contents, and use bash to "
-                "verify when useful.\n"
-                "- After making changes, summarize which files were created or modified.";
+                aiagent::agent::BuildCodingSystemPrompt();
         aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
         aiagent::InstructionsConfig instructions_config;
         std::string instructions_error;

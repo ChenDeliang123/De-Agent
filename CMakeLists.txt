@@ -100,6 +100,7 @@ add_library(aiagent_agent STATIC
   src/agent/history_cache.cpp
   src/agent/project_instructions.cpp
   src/agent/session_meta_store.cpp
+  src/agent/system_prompt.cpp
   src/permissions/bash_policy.cpp
   src/permissions/permission_policy.cpp
   src/permissions/permission_store.cpp
@@ -187,6 +188,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(agent_runtime_test tests/agent_runtime_test.cpp)
   target_link_libraries(agent_runtime_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_agent_runtime COMMAND agent_runtime_test)
+
+  add_executable(system_prompt_test tests/system_prompt_test.cpp)
+  target_link_libraries(system_prompt_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_system_prompt COMMAND system_prompt_test)
 
   add_executable(history_cache_test tests/history_cache_test.cpp)
   target_link_libraries(history_cache_test PRIVATE aiagent_agent)
