@@ -974,9 +974,9 @@ int main() {
         settings.enabled = true;
         settings.context_window = 3000;
         settings.reserve_tokens = 200;  // 阈值 2800
-        // 保留量要略大于「单次工具结果」的估算，否则切点会落在尾部 tool 消息上、
-        // 找不到合法切点而直接跳过（FindCutPoint 的已知边界，见规划文档）。
-        settings.keep_recent_tokens = 1200;
+        // 故意把保留量设得比单次工具结果还小：覆盖「切点只能退回 < i」的边界，
+        // 确认这种配置下仍然会尝试压缩（而不是静默放弃）。
+        settings.keep_recent_tokens = 300;
         settings.min_gain_ratio = 0.3;
         runtime.SetCompactionSettings(settings);
         std::vector<aiagent::agent::CompactionRecord> recorded;

@@ -239,6 +239,19 @@ void TestFindCutPoint() {
                "cut point must be user/assistant, never tool");
     }
 
+    // 单条尾部消息本身就超过预算（例如一条大工具结果配很小的保留量）：
+    // 必须退回到最近的「< i」切点继续压缩，而不是判定不可压缩。
+    const auto oversized_tail = FindCutPoint(messages, 100);
+    Expect(oversized_tail.valid,
+           "a single oversized tail message should still yield a cut point");
+    if (oversized_tail.valid) {
+        const std::string& role = messages[oversized_tail.first_kept_index].role;
+        Expect(role == "user" || role == "assistant",
+               "fallback cut point must stay on user/assistant");
+        Expect(oversized_tail.first_kept_index == 6,
+               "fallback should keep the last assistant together with its tool result");
+    }
+
     // 只有 system 时不可压缩。
     const auto tiny = FindCutPoint({TextMessage("system", "sys")}, 10);
     Expect(!tiny.valid, "single system message should not be compactable");

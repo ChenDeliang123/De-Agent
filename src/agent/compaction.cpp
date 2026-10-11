@@ -386,11 +386,15 @@ CutPointResult FindCutPoint(const std::vector<llm::ChatMessage>& messages,
         }
         accumulated += tokens;
         if (accumulated >= keep_recent_tokens) {
+            // 优先取「>= i」的最近切点（少保留一点）；若不存在（例如 i 正好落在
+            // 排在最尾部的 tool 结果上，或单条尾部消息本身就超过预算），则退回到
+            // 「< i」的最近切点 —— 多保留一条消息，但绝不因此判定"不可压缩"。
             for (const std::size_t candidate : cut_points) {
                 if (candidate >= i) {
                     cut = candidate;
                     break;
                 }
+                cut = candidate;
             }
             break;
         }
