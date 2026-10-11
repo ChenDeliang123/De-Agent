@@ -184,6 +184,8 @@ ChatResult ParseChatResponse(const std::string& body) {
         result.usage.prompt_tokens = JsonInt(root["usage"], "prompt_tokens");
         result.usage.completion_tokens = JsonInt(root["usage"], "completion_tokens");
         result.usage.total_tokens = JsonInt(root["usage"], "total_tokens");
+        result.usage.prompt_cache_hit_tokens =
+                JsonInt(root["usage"], "prompt_cache_hit_tokens");
     }
     return result;
 }
@@ -201,6 +203,8 @@ StreamChunk ParseStreamChunk(const std::string& data) {
         chunk.usage.prompt_tokens = JsonInt(root["usage"], "prompt_tokens");
         chunk.usage.completion_tokens = JsonInt(root["usage"], "completion_tokens");
         chunk.usage.total_tokens = JsonInt(root["usage"], "total_tokens");
+        chunk.usage.prompt_cache_hit_tokens =
+                JsonInt(root["usage"], "prompt_cache_hit_tokens");
     }
     if (root.contains("choices") && root["choices"].is_array() &&
         !root["choices"].empty()) {
@@ -347,6 +351,7 @@ void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
             http.AddHeader("Content-Type", "application/json");
 
             std::map<std::size_t, ToolCall> pending_tool_calls;
+            ChatUsage usage;
             bool parse_failed = false;
             std::string parse_error;
 
@@ -356,6 +361,9 @@ void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
                 }
                 try {
                     const StreamChunk chunk = ParseStreamChunk(data);
+                    if (chunk.usage.total_tokens > 0) {
+                        usage = chunk.usage;
+                    }
                     if (!chunk.role.empty() || !chunk.content.empty() ||
                         !chunk.reasoning_content.empty() || !chunk.finish_reason.empty() ||
                         chunk.usage.total_tokens > 0) {
@@ -418,7 +426,12 @@ void DeepSeekClient::ChatStream(const std::vector<ChatMessage>& messages,
                     aiagent::LogLevel::kInfo, "deepseek",
                     "mode=stream event=request_end status=200 duration_ms=" +
                             std::to_string(duration_ms) +
-                            " delivered_events=" + (delivered_any ? "true" : "false"));
+                            " delivered_events=" + (delivered_any ? "true" : "false") +
+                            " prompt_tokens=" + std::to_string(usage.prompt_tokens) +
+                            " completion_tokens=" +
+                            std::to_string(usage.completion_tokens) +
+                            " cache_hit_tokens=" +
+                            std::to_string(usage.prompt_cache_hit_tokens));
             return;
         } catch (const DeepSeekException& e) {
             const bool retry = !delivered_any &&

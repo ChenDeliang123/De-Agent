@@ -36,6 +36,9 @@ struct ChatUsage {
     int prompt_tokens = 0;
     int completion_tokens = 0;
     int total_tokens = 0;
+    // DeepSeek 的自动前缀缓存命中量（未命中则 0）。
+    // 用途：观测"压缩是否把缓存打掉"，以及长上下文的真实成本。
+    int prompt_cache_hit_tokens = 0;
 };
 
 struct ChatChoice {

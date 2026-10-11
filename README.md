@@ -361,16 +361,29 @@ Steps 等六段），只保留最近 `keep_recent_tokens` 的消息，摘要作�
 ```ini
 [compaction]
 enabled = true
-context_window = 64000
-reserve_tokens = 16384
-keep_recent_tokens = 20000
+context_window = 1000000   ; 模型真实窗口（deepseek-flash / v4-pro）
+reserve_tokens = 200000    ; 给一次输出 + 摘要预留 → 触发线 80 万
+compact_at_tokens = 0      ; 独立软阈值；0 = 只用「窗口 - 预留」
+keep_recent_tokens = 60000 ; 压缩后保留的最近上下文
+min_gain_ratio = 0.3       ; 收益下限：压完没降到 70% 以下就放弃
 ```
 
 说明：
 
-- `context_window` 请按实际模型填写（如 DeepSeek 128k 模型可填 `128000`）。
+- `context_window` 请按实际模型填写（deepseek-flash / deepseek-v4-pro 为
+  `1000000`）。实测：单轮耗时由「这一轮思考/输出多少」主导，与上下文大小关系
+  很弱；反而压缩会打破前缀缓存（cacheRead 单价约为 input 的 1/50）并丢掉上下文，
+  所以默认压得很少（触发线 80 万）。
+- `compact_at_tokens` 是独立软阈值：填了则与「窗口 - 预留」取较小者，想「每轮更轻」
+  可以调小（例如 `300000`），代价是更早丢上下文。
+- `keep_recent_tokens` 必须显著小于触发线；启动时会检查，太贴近则夹到阈值的 1/3
+  并在日志里 warning（否则会退化成"每轮都要再压一次"）。
+- `min_gain_ratio` 是收益下限：压缩后没明显变小就保持原历史，记
+  `event=compaction_skipped reason=low_gain`，不再白花一次摘要调用。
 - 流式请求会自动开启 `stream_options.include_usage`，用真实 usage 计量；
-  拿不到 usage 时退回按字节估算。
+  拿不到 usage 时退回按字节估算。触发口径只算 **prompt**（不含本轮 completion），
+  避免一次大写入把估算顶过阈值。每轮日志会记录
+  `prompt_tokens/completion_tokens/cache_hit_tokens`，便于观察缓存命中与成本。
 - 若模型返回上下文超长错误或 `finish_reason=length`，会强制压缩并
   **重试一次**；重试仍失败则向上报错（不会无限重试）。
 - 摘要会附加 `<read-files>` / `<modified-files>` 清单，压缩后仍能记住

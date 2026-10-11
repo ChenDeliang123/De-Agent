@@ -374,7 +374,8 @@ void TestStreamUsageEvent() {
                                               "\"finish_reason\":null}]}\n\n"
                                               "data: {\"id\":\"c\",\"choices\":[],"
                                               "\"usage\":{\"prompt_tokens\":11,"
-                                              "\"completion_tokens\":2,\"total_tokens\":13}}\n\n"
+                                              "\"completion_tokens\":2,\"total_tokens\":13,"
+                                              "\"prompt_cache_hit_tokens\":7}}\n\n"
                                               "data: [DONE]\n\n";
                                       sink.write(frames.data(), frames.size());
                                       sink.done();
@@ -398,6 +399,9 @@ void TestStreamUsageEvent() {
         });
         Expect(text == "hi", "stream content should still be delivered");
         Expect(seen.total_tokens == 13, "stream usage total_tokens should be surfaced");
+        Expect(seen.prompt_tokens == 11, "stream usage prompt_tokens should be surfaced");
+        Expect(seen.prompt_cache_hit_tokens == 7,
+               "stream usage prompt_cache_hit_tokens should be surfaced");
         Expect(seen.prompt_tokens == 11, "stream usage prompt_tokens should be surfaced");
     } catch (const std::exception& e) {
         Expect(false, std::string("stream usage chat should not throw: ") + e.what());
