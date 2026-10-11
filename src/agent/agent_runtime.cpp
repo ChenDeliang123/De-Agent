@@ -4,12 +4,25 @@
 #include "a2a/core/id.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace aiagent::agent {
 namespace {
+
+// 上下文占用口径：只算 prompt（不含 model 的 completion）。
+// 旧实现用 usage.total_tokens，一次大写入（例如 24KB file content ≈ 7K completion）
+// 会把估算顶过阈值、提前触发压缩；实测 28 次压缩里 13 次"压完反而更大"。
+// 兼容只报 total 的实现：用 total - completion 反推。
+int UsageContextTokens(const llm::ChatUsage& usage) {
+    if (usage.prompt_tokens > 0) {
+        return usage.prompt_tokens;
+    }
+    const int derived = usage.total_tokens - usage.completion_tokens;
+    return derived > 0 ? derived : usage.total_tokens;
+}
 
 std::string FirstText(const a2a::models::Message& message) {
     for (const auto& part : message.parts) {
@@ -347,6 +360,22 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
 
 void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
     compaction_settings_ = settings;
+    // 记一行策略快照：之后任何一次会话日志都能看出当时的阈值/保留量/收益下限，
+    // 避免"压缩为什么这么频繁"这类问题只能靠翻配置猜。
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "agent_runtime",
+            "event=compaction_settings enabled=" +
+                    std::string(compaction_settings_.enabled ? "true" : "false") +
+                    " context_window=" + std::to_string(compaction_settings_.context_window) +
+                    " reserve_tokens=" + std::to_string(compaction_settings_.reserve_tokens) +
+                    " compact_at_tokens=" +
+                    std::to_string(compaction_settings_.compact_at_tokens) +
+                    " threshold=" +
+                    std::to_string(EffectiveCompactThreshold(compaction_settings_)) +
+                    " keep_recent_tokens=" +
+                    std::to_string(compaction_settings_.keep_recent_tokens) +
+                    " min_gain_ratio=" +
+                    std::to_string(compaction_settings_.min_gain_ratio));
 }
 
 void AgentRuntime::SetCompactionCallback(CompactionCallback callback) {
@@ -358,6 +387,7 @@ std::optional<CompactionRecord> AgentRuntime::MaybeCompactBeforeCall(
         int& last_usage_tokens,
         std::size_t& last_usage_message_count,
         std::size_t& last_compacted_size,
+        int& gain_retry_at_tokens,
         const std::string& run_id,
         const std::string& context_id,
         bool force) {
@@ -368,6 +398,11 @@ std::optional<CompactionRecord> AgentRuntime::MaybeCompactBeforeCall(
         const ContextUsageEstimate estimate = EstimateContextTokens(
                 chat_messages, last_usage_tokens, last_usage_message_count);
         if (!ShouldCompact(estimate.tokens, compaction_settings_)) {
+            return std::nullopt;
+        }
+        // 上次因收益不足跳过时，至少要涨到"那时再压就能达标"的规模才值得再试一次，
+        // 否则会退化成"每轮都白花一次摘要调用"。
+        if (gain_retry_at_tokens > 0 && estimate.tokens < gain_retry_at_tokens) {
             return std::nullopt;
         }
         // 同一批消息不重复压缩，避免压缩后仍超阈值时反复调用摘要模型。
@@ -382,6 +417,35 @@ std::optional<CompactionRecord> AgentRuntime::MaybeCompactBeforeCall(
             // 无法找到安全切点时标记已尝试，避免每轮重复计算。
             last_compacted_size = chat_messages.size();
             return std::nullopt;
+        }
+        // 收益下限：压完至少要降 min_gain_ratio，否则保持原历史（强制压缩不受限）。
+        // 没有这道闸时实测 28 次压缩里有 13 次"压完反而更大"，白白多花一次摘要往返。
+        if (!force && compaction_settings_.min_gain_ratio > 0.0 &&
+            outcome.tokens_before > 0) {
+            const double allowed_after =
+                    static_cast<double>(outcome.tokens_before) *
+                    (1.0 - compaction_settings_.min_gain_ratio);
+            if (static_cast<double>(outcome.tokens_after) > allowed_after) {
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kInfo, "agent_runtime",
+                        "run=" + run_id +
+                                " event=compaction_skipped reason=low_gain tokens_before=" +
+                                std::to_string(outcome.tokens_before) +
+                                " tokens_after=" + std::to_string(outcome.tokens_after) +
+                                " min_gain_ratio=" +
+                                std::to_string(compaction_settings_.min_gain_ratio));
+                const double remaining =
+                        std::max(0.0, 1.0 - compaction_settings_.min_gain_ratio);
+                gain_retry_at_tokens =
+                        remaining > 0.0
+                                ? static_cast<int>(static_cast<double>(outcome.tokens_after) /
+                                                   remaining) +
+                                          1
+                                : 0;
+                // 同一批消息不再重试（下一条消息进来后自然重新评估）。
+                last_compacted_size = chat_messages.size();
+                return std::nullopt;
+            }
         }
         CompactionRecord record;
         record.forced = force;
@@ -402,6 +466,7 @@ std::optional<CompactionRecord> AgentRuntime::MaybeCompactBeforeCall(
         chat_messages = std::move(outcome.messages);
         last_usage_tokens = 0;
         last_usage_message_count = 0;
+        gain_retry_at_tokens = 0;
         last_compacted_size = chat_messages.size();
         if (compaction_callback_) {
             compaction_callback_(context_id, record);
@@ -544,6 +609,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     int last_usage_tokens = 0;
     std::size_t last_usage_message_count = 0;
     std::size_t last_compacted_size = static_cast<std::size_t>(-1);
+    int gain_retry_at_tokens = 0;
     bool overflow_retry_used = false;
     llm::ChatResult result;
     for (int round = 0;; ++round) {
@@ -552,8 +618,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             break;
         }
         MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
-                               last_usage_message_count, last_compacted_size, run_id,
-                               context_id);
+                               last_usage_message_count, last_compacted_size,
+                               gain_retry_at_tokens, run_id, context_id);
         const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
         const std::size_t messages_at_call = chat_messages.size();
         try {
@@ -563,7 +629,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             if (!overflow_retry_used && IsContextOverflowMessage(e.what()) &&
                 MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
                                        last_usage_message_count, last_compacted_size,
-                                       run_id, context_id, /*force=*/true)) {
+                                       gain_retry_at_tokens, run_id, context_id,
+                                       /*force=*/true)) {
                 overflow_retry_used = true;
                 --round;
                 continue;
@@ -581,14 +648,15 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             IsRecoverableLengthStop(choice.finish_reason) &&
             MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
                                    last_usage_message_count, last_compacted_size,
-                                   run_id, context_id, /*force=*/true)) {
+                                   gain_retry_at_tokens, run_id, context_id,
+                                   /*force=*/true)) {
             overflow_retry_used = true;
             --round;
             continue;
         }
         if (choice.tool_calls.empty()) {
             if (has_usage) {
-                last_usage_tokens = result.usage.total_tokens;
+                last_usage_tokens = UsageContextTokens(result.usage);
                 last_usage_message_count = messages_at_call;
             }
             break;
@@ -605,7 +673,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         chat_messages.push_back(std::move(assistant));
         if (has_usage) {
             // usage 覆盖到这条 assistant（含其 completion），工具结果算尾部。
-            last_usage_tokens = result.usage.total_tokens;
+            // 这里只取 prompt 部分作为上下文占用（见 UsageContextTokens）。
+            last_usage_tokens = UsageContextTokens(result.usage);
             last_usage_message_count = chat_messages.size();
         }
 
@@ -739,6 +808,7 @@ std::string AgentRuntime::RunStreaming(
     int last_usage_tokens = 0;
     std::size_t last_usage_message_count = 0;
     std::size_t last_compacted_size = static_cast<std::size_t>(-1);
+    int gain_retry_at_tokens = 0;
     bool overflow_retry_used = false;
     for (int round = 0;; ++round) {
         if (should_cancel && should_cancel()) {
@@ -750,7 +820,7 @@ std::string AgentRuntime::RunStreaming(
         }
         if (const auto record = MaybeCompactBeforeCall(
                     chat_messages, last_usage_tokens, last_usage_message_count,
-                    last_compacted_size, run_id, context_id);
+                    last_compacted_size, gain_retry_at_tokens, run_id, context_id);
             record.has_value()) {
             EmitCompactionEvent(*record, on_event);
         }
@@ -760,7 +830,7 @@ std::string AgentRuntime::RunStreaming(
         std::string round_reply;
         std::string finish_reason;
         const std::size_t messages_at_call = chat_messages.size();
-        int stream_usage_tokens = 0;
+        llm::ChatUsage round_usage;
 
         try {
             model_->ChatStream(
@@ -768,7 +838,7 @@ std::string AgentRuntime::RunStreaming(
                     tool_specs,
                     [&](const llm::StreamEvent& event) {
                         if (event.usage.total_tokens > 0) {
-                            stream_usage_tokens = event.usage.total_tokens;
+                            round_usage = event.usage;
                         }
                         if (!event.content.empty()) {
                             round_reply += event.content;
@@ -791,8 +861,8 @@ std::string AgentRuntime::RunStreaming(
             if (!overflow_retry_used && IsContextOverflowMessage(e.what())) {
                 if (const auto record = MaybeCompactBeforeCall(
                             chat_messages, last_usage_tokens,
-                            last_usage_message_count, last_compacted_size, run_id,
-                            context_id, /*force=*/true);
+                            last_usage_message_count, last_compacted_size,
+                            gain_retry_at_tokens, run_id, context_id, /*force=*/true);
                     record.has_value()) {
                     EmitCompactionEvent(*record, on_event);
                     overflow_retry_used = true;
@@ -808,7 +878,8 @@ std::string AgentRuntime::RunStreaming(
             IsRecoverableLengthStop(finish_reason)) {
             if (const auto record = MaybeCompactBeforeCall(
                         chat_messages, last_usage_tokens, last_usage_message_count,
-                        last_compacted_size, run_id, context_id, /*force=*/true);
+                        last_compacted_size, gain_retry_at_tokens, run_id, context_id,
+                        /*force=*/true);
                 record.has_value()) {
                 EmitCompactionEvent(*record, on_event);
                 overflow_retry_used = true;
@@ -818,10 +889,11 @@ std::string AgentRuntime::RunStreaming(
         }
 
         reply += round_reply;
-        const bool has_usage = stream_usage_tokens > 0;
+        const bool has_usage = round_usage.total_tokens > 0;
         if (streamed_tool_calls.empty()) {
             if (has_usage) {
-                last_usage_tokens = stream_usage_tokens;
+                // 口径：只把 prompt 当作上下文占用（不含本轮输出）。
+                last_usage_tokens = UsageContextTokens(round_usage);
                 last_usage_message_count = messages_at_call;
             }
             break;
@@ -836,7 +908,7 @@ std::string AgentRuntime::RunStreaming(
         assistant.tool_calls = streamed_tool_calls;
         chat_messages.push_back(std::move(assistant));
         if (has_usage) {
-            last_usage_tokens = stream_usage_tokens;
+            last_usage_tokens = UsageContextTokens(round_usage);
             last_usage_message_count = chat_messages.size();
         }
 

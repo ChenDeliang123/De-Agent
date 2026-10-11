@@ -594,6 +594,108 @@ public:
     }
 };
 
+// 只报「大 completion + 小 prompt」的模型：验证触发口径只看 prompt。
+// 旧实现用 total_tokens，会被一次大写入顶过阈值而提前压缩。
+class CompletionHeavyModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+    int summary_calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "## Goal\nshould not be used";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++stream_calls;
+        aiagent::llm::StreamEvent event;
+        event.usage.prompt_tokens = 200;
+        event.usage.completion_tokens = 20000;
+        event.usage.total_tokens = 20200;
+        if (stream_calls == 1) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-ok", "ok_tool", "{}"});
+        } else {
+            event.content = "done-without-compaction";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
+// 摘要比原文还长的模型：验证收益下限（压缩后没有明显变小就放弃，且不重复尝试）。
+class LowGainSummaryModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+    int summary_calls = 0;
+    bool saw_summary_marker = false;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        ++summary_calls;
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        // 故意比被摘要的内容还长：tokens_after 不会低于 before 的 70%。
+        choice.content = "## Goal\n" + std::string(40000, 'x');
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>& messages,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++stream_calls;
+        int approx_tokens = 0;
+        for (const auto& message : messages) {
+            if (message.content.find(aiagent::agent::kCompactionSummaryMarker) !=
+                std::string::npos) {
+                saw_summary_marker = true;
+            }
+            std::size_t bytes = message.content.size() +
+                                message.reasoning_content.size() +
+                                message.tool_call_id.size();
+            for (const auto& call : message.tool_calls) {
+                bytes += call.name.size() + call.arguments.size();
+            }
+            approx_tokens += static_cast<int>((bytes + 2) / 3) + 4;
+        }
+        aiagent::llm::StreamEvent event;
+        event.usage.prompt_tokens = approx_tokens;
+        event.usage.total_tokens = approx_tokens;
+        if (stream_calls <= 4) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-ok", "ok_tool", "{}"});
+        } else {
+            event.content = "done-after-low-gain";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
 a2a::models::AgentCard BuildCard() {
     using a2a::models::AgentCard;
 
@@ -814,6 +916,8 @@ int main() {
         settings.context_window = 1000000;
         settings.reserve_tokens = 1000;
         settings.keep_recent_tokens = 1;
+        // 收益下限拉到 1.0（任何压缩都不达标）：强制压缩必须绕过它，否则防溢出闸门失效。
+        settings.min_gain_ratio = 1.0;
         runtime.SetCompactionSettings(settings);
 
         auto history = MultiTurnHistory();
@@ -823,7 +927,7 @@ int main() {
         const std::string reply = runtime.HandleMessageStreaming(
                 user, history, "ctx-overflow", nullptr);
         Expect(reply == "recovered",
-               "context overflow should be recovered after compaction");
+               "context overflow should be recovered even with an impossible min_gain_ratio");
         Expect(model->stream_calls == 2, "overflow recovery should retry once");
         Expect(model->summary_calls == 1, "overflow recovery should compact once");
         Expect(model->saw_summary_marker,
@@ -831,6 +935,68 @@ int main() {
     } catch (const std::exception& e) {
         std::cerr << "agent runtime overflow recovery test failed: " << e.what()
                   << '\n';
+        return 1;
+    }
+
+    try {
+        // 触发口径：只看 prompt_tokens，不被上一轮的大 completion 顶过阈值。
+        auto model = std::make_shared<CompletionHeavyModel>();
+        auto tools = std::make_shared<OkToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 10000;
+        settings.reserve_tokens = 1000;  // 阈值 9000，远大于 prompt_tokens=200
+        settings.keep_recent_tokens = 1000;
+        runtime.SetCompactionSettings(settings);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "small task", "text/plain");
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, {user}, "ctx-usage-basis", nullptr);
+        Expect(reply == "done-without-compaction",
+               "turn should finish without compaction");
+        Expect(model->summary_calls == 0,
+               "large completion tokens must not trigger compaction (prompt_tokens is the basis)");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime usage-basis test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        // 收益下限：摘要比原文还长时放弃压缩、保留原历史、且不每轮重试。
+        auto model = std::make_shared<LowGainSummaryModel>();
+        auto tools = std::make_shared<BigToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+        aiagent::agent::CompactionSettings settings;
+        settings.enabled = true;
+        settings.context_window = 3000;
+        settings.reserve_tokens = 200;  // 阈值 2800
+        // 保留量要略大于「单次工具结果」的估算，否则切点会落在尾部 tool 消息上、
+        // 找不到合法切点而直接跳过（FindCutPoint 的已知边界，见规划文档）。
+        settings.keep_recent_tokens = 1200;
+        settings.min_gain_ratio = 0.3;
+        runtime.SetCompactionSettings(settings);
+        std::vector<aiagent::agent::CompactionRecord> recorded;
+        runtime.SetCompactionCallback(
+                [&](const std::string&, const aiagent::agent::CompactionRecord& record) {
+                    recorded.push_back(record);
+                });
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "low gain task", "text/plain");
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, {user}, "ctx-low-gain", nullptr);
+        Expect(reply == "done-after-low-gain", "turn should still finish");
+        Expect(model->summary_calls == 1,
+               "a low-gain compaction should be attempted once and then skipped");
+        Expect(recorded.empty(), "low-gain compaction must not be reported as applied");
+        Expect(!model->saw_summary_marker,
+               "history must be kept when the compaction has no real gain");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime low-gain test failed: " << e.what() << '\n';
         return 1;
     }
 

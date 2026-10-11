@@ -2,6 +2,8 @@
 
 #include <cctype>
 #include <cstring>
+#include <algorithm>
+#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -199,11 +201,55 @@ ContextUsageEstimate EstimateContextTokens(
     return estimate;
 }
 
+int EffectiveCompactThreshold(const CompactionSettings& settings) {
+    if (settings.context_window <= 0) {
+        return 0;
+    }
+    const int window_budget = settings.context_window - settings.reserve_tokens;
+    const int fallback = std::max(1, settings.context_window / 2);
+    int threshold = window_budget > 0 ? window_budget : fallback;
+    if (settings.compact_at_tokens > 0) {
+        // 软阈值只允许比硬线更早触发，不允许超过它。
+        threshold = std::min(threshold, settings.compact_at_tokens);
+    }
+    return std::max(1, threshold);
+}
+
+CompactionAdjustment NormalizeCompactionSettings(CompactionSettings* settings) {
+    CompactionAdjustment adjustment;
+    if (settings == nullptr) {
+        return adjustment;
+    }
+    const int threshold = EffectiveCompactThreshold(*settings);
+    if (threshold <= 0 || settings->keep_recent_tokens <= 0) {
+        adjustment.keep_recent_tokens = settings->keep_recent_tokens;
+        return adjustment;
+    }
+    const int max_keep = std::max(1, threshold / 3);
+    if (settings->keep_recent_tokens <= max_keep) {
+        adjustment.keep_recent_tokens = settings->keep_recent_tokens;
+        return adjustment;
+    }
+    adjustment.changed = true;
+    adjustment.keep_recent_tokens = max_keep;
+    adjustment.reason = "keep_recent_tokens=" +
+                        std::to_string(settings->keep_recent_tokens) +
+                        " is too close to the compaction threshold=" +
+                        std::to_string(threshold) + "; clamped to " +
+                        std::to_string(max_keep);
+    settings->keep_recent_tokens = max_keep;
+    return adjustment;
+}
+
 bool ShouldCompact(int context_tokens, const CompactionSettings& settings) {
-    if (!settings.enabled || settings.context_window <= 0) {
+    if (!settings.enabled) {
         return false;
     }
-    return context_tokens > settings.context_window - settings.reserve_tokens;
+    const int threshold = EffectiveCompactThreshold(settings);
+    if (threshold <= 0) {
+        return false;
+    }
+    return context_tokens > threshold;
 }
 
 bool IsContextOverflowMessage(const std::string& message) {

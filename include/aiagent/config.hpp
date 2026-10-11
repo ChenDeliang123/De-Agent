@@ -36,9 +36,18 @@ struct LogConfig {
 // 上下文压缩配置。语义见 agent/compaction.hpp 的 CompactionSettings。
 struct CompactionConfig {
     bool enabled = true;
-    int context_window = 64000;
-    int reserve_tokens = 16384;
-    int keep_recent_tokens = 20000;
+    // 模型真实窗口（deepseek-flash / deepseek-v4-pro 为 1,000,000）。
+    // 只表示硬上限；压缩触发线见 compact_at_tokens 与 reserve_tokens。
+    int context_window = 1000000;
+    // 给「一次输出 + 摘要」预留的空间：触发线 = context_window - reserve_tokens。
+    int reserve_tokens = 200000;
+    // 独立软阈值：>0 时与「窗口 - 预留」取较小者；0 表示只用「窗口 - 预留」。
+    // 想"每轮更轻"就调小它（如 300000），代价是更早丢上下文。
+    int compact_at_tokens = 0;
+    // 压缩后保留的最近上下文（本地估算口径：字节/3）。
+    int keep_recent_tokens = 60000;
+    // 压缩收益下限：压完至少降低这么多比例才提交；0 表示不做收益判断。
+    double min_gain_ratio = 0.3;
 };
 
 // 文件工具（read/write/edit）的访问沙箱配置（[tools]）。

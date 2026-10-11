@@ -320,7 +320,17 @@ int main(int argc, char** argv) {
         compaction_settings.enabled = compaction_config.enabled;
         compaction_settings.context_window = compaction_config.context_window;
         compaction_settings.reserve_tokens = compaction_config.reserve_tokens;
+        compaction_settings.compact_at_tokens = compaction_config.compact_at_tokens;
         compaction_settings.keep_recent_tokens = compaction_config.keep_recent_tokens;
+        compaction_settings.min_gain_ratio = compaction_config.min_gain_ratio;
+        // 防呆：keep_recent 太贴近阈值会让压缩退化成"压完立刻又压"，启动时纠正并留痕。
+        const auto compaction_adjustment =
+                aiagent::agent::NormalizeCompactionSettings(&compaction_settings);
+        if (compaction_adjustment.changed) {
+            aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "main",
+                                         "compaction settings adjusted: " +
+                                                 compaction_adjustment.reason);
+        }
         runtime.SetCompactionSettings(compaction_settings);
         runtime.SetCompactionCallback(
                 [&](const std::string& context_id,

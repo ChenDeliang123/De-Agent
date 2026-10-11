@@ -14,13 +14,36 @@ namespace aiagent::agent {
 // 上下文压缩（compaction）配置。对齐 Pi 的 CompactionSettings：
 //   - reserve_tokens：给模型输出与摘要预留的空间；
 //   - keep_recent_tokens：压缩后保留的最近 token 数。
-// 当 context_tokens > context_window - reserve_tokens 时触发压缩。
+// 触发线 = 生效阈值（见 EffectiveCompactThreshold）：
+//   - context_window：模型真实窗口（硬上限）；
+//   - compact_at_tokens：独立软阈值，>0 时与「窗口 - 预留」取较小者；
+//   - min_gain_ratio：压缩收益下限，压完没降到 (1-ratio) 以下就放弃。
 struct CompactionSettings {
     bool enabled = true;
-    int context_window = 64000;
-    int reserve_tokens = 16384;
-    int keep_recent_tokens = 20000;
+    int context_window = 1000000;
+    int reserve_tokens = 200000;
+    int compact_at_tokens = 0;
+    int keep_recent_tokens = 60000;
+    double min_gain_ratio = 0.3;
 };
+
+// 生效压缩阈值（token）。
+//   - compact_at_tokens > 0：取 min(compact_at_tokens, context_window - reserve_tokens)，
+//     保证软阈值永远不会超过硬线；
+//   - compact_at_tokens == 0：用 context_window - reserve_tokens（旧行为）；
+//   - 两者都无效（窗口或预留配得离谱）时退化为 context_window / 2，
+//     避免"阈值为负 → 每轮都压缩"。
+int EffectiveCompactThreshold(const CompactionSettings& settings);
+
+// 配置规整（启动时调用）：keep_recent_tokens 必须显著小于生效阈值，
+// 否则压缩会退化成"压完只剩两三轮余量、每轮都要再压"。命中时夹到阈值的 1/3。
+struct CompactionAdjustment {
+    bool changed = false;
+    int keep_recent_tokens = 0;
+    std::string reason;
+};
+
+CompactionAdjustment NormalizeCompactionSettings(CompactionSettings* settings);
 
 // 上下文 token 估算结果。
 //   - usage_tokens：最近一次模型响应的真实用量；

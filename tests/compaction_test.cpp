@@ -152,6 +152,66 @@ void TestShouldCompact() {
     Expect(!ShouldCompact(100000, settings), "zero context window should be ignored");
 }
 
+void TestEffectiveCompactThreshold() {
+    using aiagent::agent::CompactionSettings;
+    using aiagent::agent::EffectiveCompactThreshold;
+    using aiagent::agent::ShouldCompact;
+
+    CompactionSettings settings;
+    settings.context_window = 1000000;
+    settings.reserve_tokens = 200000;
+    Expect(EffectiveCompactThreshold(settings) == 800000,
+           "default threshold should be context_window - reserve_tokens");
+    Expect(!ShouldCompact(800000, settings), "equal to threshold should not compact");
+    Expect(ShouldCompact(800001, settings), "above threshold should compact");
+
+    // 软阈值只允许比硬线更早触发，不允许超过硬线。
+    settings.compact_at_tokens = 300000;
+    Expect(EffectiveCompactThreshold(settings) == 300000,
+           "smaller soft threshold should win");
+    settings.compact_at_tokens = 900000;
+    Expect(EffectiveCompactThreshold(settings) == 800000,
+           "soft threshold must not exceed context_window - reserve_tokens");
+
+    // 预留配得离谱（>= 窗口）时退化为窗口一半，避免阈值为负导致每轮都压缩。
+    settings.compact_at_tokens = 0;
+    settings.reserve_tokens = 1000000;
+    Expect(EffectiveCompactThreshold(settings) == 500000,
+           "bogus reserve should fall back to half of the window");
+    Expect(!ShouldCompact(200000, settings),
+           "fallback threshold should still gate compaction");
+
+    settings.context_window = 0;
+    Expect(EffectiveCompactThreshold(settings) == 0, "zero window disables the threshold");
+}
+
+void TestNormalizeCompactionSettings() {
+    using aiagent::agent::CompactionSettings;
+    using aiagent::agent::NormalizeCompactionSettings;
+
+    // keep_recent 太贴近阈值 → 夹到阈值 1/3 并给出原因（这就是"每 40 秒压一次"的成因）。
+    CompactionSettings too_close;
+    too_close.context_window = 1000000;
+    too_close.reserve_tokens = 200000;
+    too_close.keep_recent_tokens = 700000;
+    const auto adjusted = NormalizeCompactionSettings(&too_close);
+    Expect(adjusted.changed, "keep_recent close to the threshold should be adjusted");
+    Expect(too_close.keep_recent_tokens == 800000 / 3,
+           "keep_recent should be clamped to a third of the threshold");
+    Expect(!adjusted.reason.empty(), "adjustment should explain itself");
+
+    // 健康配置不动。
+    CompactionSettings healthy;
+    healthy.context_window = 1000000;
+    healthy.reserve_tokens = 200000;
+    healthy.keep_recent_tokens = 60000;
+    const auto untouched = NormalizeCompactionSettings(&healthy);
+    Expect(!untouched.changed, "healthy settings should stay untouched");
+    Expect(healthy.keep_recent_tokens == 60000, "healthy keep_recent should be preserved");
+
+    Expect(!NormalizeCompactionSettings(nullptr).changed, "null settings should be a no-op");
+}
+
 void TestFindCutPoint() {
     using aiagent::agent::FindCutPoint;
 
@@ -408,10 +468,30 @@ keep_recent_tokens = 8000
     Expect(defaults.has_value(), "missing section should return defaults");
     if (defaults.has_value()) {
         Expect(defaults->enabled, "default enabled should be true");
-        Expect(defaults->context_window == 64000, "default context_window");
-        Expect(defaults->reserve_tokens == 16384, "default reserve_tokens");
-        Expect(defaults->keep_recent_tokens == 20000, "default keep_recent_tokens");
+        // 默认对齐 deepseek-flash 的真实窗口（1M）；阈值取「窗口 - 预留」= 80 万。
+        Expect(defaults->context_window == 1000000, "default context_window");
+        Expect(defaults->reserve_tokens == 200000, "default reserve_tokens");
+        Expect(defaults->compact_at_tokens == 0, "default compact_at_tokens");
+        Expect(defaults->keep_recent_tokens == 60000, "default keep_recent_tokens");
+        Expect(defaults->min_gain_ratio == 0.3, "default min_gain_ratio");
     }
+
+    // 新增键：软阈值与收益下限。
+    const auto soft = aiagent::ParseCompactionConfig(
+            "[compaction]\ncompact_at_tokens = 300000\nmin_gain_ratio = 0.5\n", &error);
+    Expect(soft.has_value(), "compact_at_tokens/min_gain_ratio should parse");
+    if (soft.has_value()) {
+        Expect(soft->compact_at_tokens == 300000, "compact_at_tokens should parse");
+        Expect(soft->min_gain_ratio == 0.5, "min_gain_ratio should parse");
+    }
+
+    const auto bad_soft = aiagent::ParseCompactionConfig(
+            "[compaction]\ncompact_at_tokens = -1\n", &error);
+    Expect(!bad_soft.has_value(), "negative compact_at_tokens should fail");
+
+    const auto bad_ratio = aiagent::ParseCompactionConfig(
+            "[compaction]\nmin_gain_ratio = 1.5\n", &error);
+    Expect(!bad_ratio.has_value(), "min_gain_ratio above 1 should fail");
 
     // 非法值应报错。
     const auto bad = aiagent::ParseCompactionConfig(
@@ -429,6 +509,8 @@ int main() {
     TestEstimateTokens();
     TestEstimateContextTokens();
     TestShouldCompact();
+    TestEffectiveCompactThreshold();
+    TestNormalizeCompactionSettings();
     TestFindCutPoint();
     TestSerializeConversation();
     TestCompactMessages();

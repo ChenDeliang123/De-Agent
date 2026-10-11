@@ -406,6 +406,38 @@ std::optional<CompactionConfig> ParseCompactionConfig(const std::string& content
                 }
                 return std::nullopt;
             }
+        } else if (key == "compact_at_tokens") {
+            try {
+                const int parsed = std::stoi(value);
+                if (parsed < 0) {
+                    if (error != nullptr) {
+                        *error = "compact_at_tokens must be non-negative";
+                    }
+                    return std::nullopt;
+                }
+                config.compact_at_tokens = parsed;
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid compact_at_tokens: " + value;
+                }
+                return std::nullopt;
+            }
+        } else if (key == "min_gain_ratio") {
+            try {
+                const double parsed = std::stod(value);
+                if (parsed < 0.0 || parsed > 1.0) {
+                    if (error != nullptr) {
+                        *error = "min_gain_ratio must be within [0, 1]";
+                    }
+                    return std::nullopt;
+                }
+                config.min_gain_ratio = parsed;
+            } catch (const std::exception&) {
+                if (error != nullptr) {
+                    *error = "invalid min_gain_ratio: " + value;
+                }
+                return std::nullopt;
+            }
         }
     }
 

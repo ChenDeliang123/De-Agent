@@ -201,6 +201,7 @@ private:
             int& last_usage_tokens,
             std::size_t& last_usage_message_count,
             std::size_t& last_compacted_size,
+            int& gain_retry_at_tokens,
             const std::string& run_id,
             const std::string& context_id,
             bool force = false);
