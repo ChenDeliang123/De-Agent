@@ -440,18 +440,29 @@ export class TranscriptRenderer {
       name === "edit" &&
       args &&
       typeof args === "object" &&
-      (args.oldText !== undefined || args.newText !== undefined)
+      (args.oldText !== undefined ||
+        args.newText !== undefined ||
+        Array.isArray(args.edits))
     ) {
-      for (const line of String(args.oldText ?? "").split("\n")) {
-        if (line !== "") {
-          lines.push(t.fg("diffRemoved", `- ${line}`));
+      // 一次调用可能带多个块（edits[]，对齐 pi）：逐块渲染 -/+，块多时标出序号。
+      const blocks = Array.isArray(args.edits)
+        ? args.edits.filter((block) => block && typeof block === "object")
+        : [{ oldText: args.oldText, newText: args.newText }];
+      blocks.forEach((block, index) => {
+        if (blocks.length > 1) {
+          lines.push(t.dim(`block ${index + 1}/${blocks.length}`));
         }
-      }
-      for (const line of String(args.newText ?? "").split("\n")) {
-        if (line !== "") {
-          lines.push(t.fg("diffAdded", `+ ${line}`));
+        for (const line of String(block.oldText ?? "").split("\n")) {
+          if (line !== "") {
+            lines.push(t.fg("diffRemoved", `- ${line}`));
+          }
         }
-      }
+        for (const line of String(block.newText ?? "").split("\n")) {
+          if (line !== "") {
+            lines.push(t.fg("diffAdded", `+ ${line}`));
+          }
+        }
+      });
       const max = 24;
       if (lines.length > max) {
         return lines.slice(0, max).concat([t.dim(`… (+${lines.length - max} lines)`)]);

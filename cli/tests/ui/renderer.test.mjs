@@ -98,6 +98,26 @@ test("renderer renders an edit diff from tool arguments", () => {
   renderer.endReply();
 });
 
+test("renderer renders every block of a multi-block edit", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+  renderer.startReply();
+  renderer.toolStart("c2", "edit", {
+    path: "a.mjs",
+    edits: [
+      { oldText: "old one", newText: "new one" },
+      { oldText: "old two", newText: "new two" },
+    ],
+  });
+  const text = out.text();
+  assert.ok(text.includes("block 1/2"), "multi-block edit should label each block");
+  assert.ok(text.includes("block 2/2"));
+  assert.ok(text.includes("- old one") && text.includes("+ new one"));
+  assert.ok(text.includes("- old two") && text.includes("+ new two"));
+  renderer.toolEnd(true, "edited a.mjs: 2 replacement(s)");
+  renderer.endReply();
+});
+
 test("wait/stopWaiting drive the spinner for long commands", () => {
   const out = fakeOut(true);
   const renderer = new TranscriptRenderer(out, { mode: "none" });
