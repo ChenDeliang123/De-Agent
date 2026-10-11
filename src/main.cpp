@@ -285,6 +285,10 @@ int main(int argc, char** argv) {
                 "- If the task is large, work step by step, but do not finish until the "
                 "requested files have actually been created or modified.\n"
                 "- Do not end with 'If you want, I can...' after only planning.\n"
+                "- Batch your work: when several independent places in the SAME file need "
+                "changes, use ONE edit call with an edits[] array (each oldText matches the "
+                "original file exactly once) instead of many single-place edit calls; when "
+                "tool calls do not depend on each other, emit them in the SAME turn.\n"
                 "- Use read before editing when you need file contents, and use bash to "
                 "verify when useful.\n"
                 "- After making changes, summarize which files were created or modified.";

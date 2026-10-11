@@ -136,6 +136,68 @@ void TestReadWriteEdit() {
                            context);
     Expect(!result.ok, "edit should fail when oldText is not unique");
 
+    // edit 多块：一次调用替换多处，且按原文位置应用（与数组顺序无关）。
+    WriteFile(dir / "multi.txt", "alpha\nbeta\ngamma\ndelta\n");
+    result = tools.Execute("edit",
+                           {{"path", "multi.txt"},
+                            {"edits", nlohmann::json::array(
+                                              {{{"oldText", "delta"}, {"newText", "DELTA"}},
+                                               {{"oldText", "alpha"}, {"newText", "ALPHA"}}})}},
+                           context);
+    Expect(result.ok, "multi-block edit should succeed");
+    Expect(ReadAll(dir / "multi.txt") == "ALPHA\nbeta\ngamma\nDELTA\n",
+           "multi-block edit should apply every block by position");
+    Expect(result.text.find("2 replacement(s)") != std::string::npos,
+           "multi-block edit should report how many blocks were applied");
+
+    // 原子性：其中一块不匹配时整个调用失败，文件保持原样。
+    const std::string before_failure = ReadAll(dir / "multi.txt");
+    result = tools.Execute("edit",
+                           {{"path", "multi.txt"},
+                            {"edits", nlohmann::json::array(
+                                              {{{"oldText", "beta"}, {"newText", "BETA"}},
+                                               {{"oldText", "missing"}, {"newText", "X"}}})}},
+                           context);
+    Expect(!result.ok, "multi-block edit should fail when one block does not match");
+    Expect(ReadAll(dir / "multi.txt") == before_failure,
+           "a failing multi-block edit must not modify the file");
+    Expect(result.error.find("edits[1]") != std::string::npos,
+           "error message should point at the failing block index");
+
+    // 不唯一的块要拒绝。
+    WriteFile(dir / "multi.txt", "dup dup\n");
+    result = tools.Execute("edit",
+                           {{"path", "multi.txt"},
+                            {"edits", nlohmann::json::array(
+                                              {{{"oldText", "dup"}, {"newText", "x"}}})}},
+                           context);
+    Expect(!result.ok, "multi-block edit should reject a non-unique oldText");
+
+    // 区间重叠要拒绝，且不落盘。
+    WriteFile(dir / "multi.txt", "abcdef\n");
+    result = tools.Execute("edit",
+                           {{"path", "multi.txt"},
+                            {"edits", nlohmann::json::array(
+                                              {{{"oldText", "abcd"}, {"newText", "A"}},
+                                               {{"oldText", "cdef"}, {"newText", "B"}}})}},
+                           context);
+    Expect(!result.ok, "multi-block edit should reject overlapping blocks");
+    Expect(ReadAll(dir / "multi.txt") == "abcdef\n",
+           "overlapping blocks must leave the file untouched");
+
+    // 参数形态错误：空数组、以及与 oldText 混用。
+    result = tools.Execute("edit",
+                           {{"path", "multi.txt"}, {"edits", nlohmann::json::array()}},
+                           context);
+    Expect(!result.ok, "empty edits array should be rejected");
+    result = tools.Execute("edit",
+                           {{"path", "multi.txt"},
+                            {"oldText", "abc"},
+                            {"edits", nlohmann::json::array(
+                                              {{{"oldText", "abc"}, {"newText", "x"}}})}},
+                           context);
+    Expect(!result.ok, "mixing edits[] with oldText should be rejected");
+
     std::filesystem::remove_all(dir);
 }
 

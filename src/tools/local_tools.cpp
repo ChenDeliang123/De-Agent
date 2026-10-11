@@ -2,6 +2,7 @@
 
 #include <json.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -207,17 +208,41 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     llm::ToolSpec edit;
     edit.name = "edit";
     edit.description =
-            "Replace a unique occurrence of oldText with newText in a file. The oldText must "
-            "match exactly once; otherwise the edit is rejected.";
-    edit.parameters = {{"type", "object"},
-                       {"properties",
-                        {{"path", {{"type", "string"},
-                                   {"description", "Path to the file to edit (relative or absolute)"}}},
-                         {"oldText", {{"type", "string"},
-                                      {"description", "Exact text to replace (must be unique)"}}},
-                         {"newText", {{"type", "string"},
-                                      {"description", "Replacement text"}}}}},
-                       {"required", json::array({"path", "oldText", "newText"})}};
+            "Replace exact text in a file. When several independent places in the same file "
+            "change, use ONE call with an edits[] array instead of many single edits. Each "
+            "oldText must match exactly once in the ORIGINAL file and blocks must not overlap; "
+            "the whole call is rejected (nothing written) if any block fails.";
+    const json edit_block_properties = {
+            {"oldText",
+             {{"type", "string"},
+              {"description", "Exact text to replace (must be unique in the original file)"}}},
+            {"newText",
+             {{"type", "string"},
+              {"description", "Replacement text (empty deletes oldText)"}}}};
+    edit.parameters = {
+            {"type", "object"},
+            {"properties",
+             {{"path",
+               {{"type", "string"},
+                {"description", "Path to the file to edit (relative or absolute)"}}},
+              {"oldText",
+               {{"type", "string"},
+                {"description",
+                 "Single replacement: exact text to replace (must be unique in the file)"}}},
+              {"newText",
+               {{"type", "string"},
+                {"description",
+                 "Single replacement: replacement text (empty deletes oldText)"}}},
+              {"edits",
+               {{"type", "array"},
+                {"description",
+                 "Multiple replacements applied atomically; every oldText is matched against "
+                 "the original file."},
+                {"items",
+                 {{"type", "object"},
+                  {"properties", edit_block_properties},
+                  {"required", json::array({"oldText"})}}}}}}},
+            {"required", json::array({"path"})}};
 
     llm::ToolSpec bash;
     bash.name = "bash";
@@ -314,14 +339,58 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             result.error = resolve_error;
             return result;
         }
-        const std::string old_text = arguments.value("oldText", std::string());
-        const std::string new_text = arguments.value("newText", std::string());
-        if (old_text.empty()) {
-            result.error = "edit requires path and non-empty oldText";
-            return result;
+
+        // 参数形态：旧式 {path, oldText, newText} 或新式 {path, edits:[{oldText,newText}]}。
+        // 两者不允许混用，避免"到底改了哪些块"产生歧义。
+        struct EditBlock {
+            std::string old_text;
+            std::string new_text;
+        };
+        std::vector<EditBlock> blocks;
+        const bool has_edits_array =
+                arguments.contains("edits") && arguments["edits"].is_array();
+        if (has_edits_array) {
+            if (arguments.contains("oldText")) {
+                result.error =
+                        "edit accepts either edits[] or oldText/newText, not both";
+                return result;
+            }
+            const auto& edits = arguments["edits"];
+            if (edits.empty()) {
+                result.error = "edit requires a non-empty edits[] array";
+                return result;
+            }
+            for (std::size_t i = 0; i < edits.size(); ++i) {
+                const auto& item = edits[i];
+                if (!item.is_object()) {
+                    result.error = "edits[" + std::to_string(i) + "] must be an object";
+                    return result;
+                }
+                EditBlock block;
+                block.old_text = item.value("oldText", std::string());
+                block.new_text = item.value("newText", std::string());
+                if (block.old_text.empty()) {
+                    result.error = "edits[" + std::to_string(i) +
+                                   "].oldText must be non-empty";
+                    return result;
+                }
+                blocks.push_back(std::move(block));
+            }
+        } else {
+            EditBlock block;
+            block.old_text = arguments.value("oldText", std::string());
+            block.new_text = arguments.value("newText", std::string());
+            if (block.old_text.empty()) {
+                result.error = "edit requires path and non-empty oldText (or an edits[] array)";
+                return result;
+            }
+            blocks.push_back(std::move(block));
         }
+
         aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
-                                     "tool=edit path=" + path + " event=start");
+                                     "tool=edit path=" + path +
+                                             " blocks=" + std::to_string(blocks.size()) +
+                                             " event=start");
         bool ok = false;
         std::string error;
         const std::string content = ReadFile(path, &ok, &error);
@@ -329,17 +398,48 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             result.error = error;
             return result;
         }
-        const size_t first = content.find(old_text);
-        if (first == std::string::npos) {
-            result.error = "oldText not found in file: " + path;
-            return result;
+
+        // 先在原文上校验每一块（恰好匹配一次），再检查区间不重叠；
+        // 全部通过才写盘 —— 任一块失败就整体拒绝，避免"改了一半"。
+        struct Span {
+            std::size_t start = 0;
+            std::size_t end = 0;
+            std::size_t block = 0;
+        };
+        std::vector<Span> spans;
+        spans.reserve(blocks.size());
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            const std::string& old_text = blocks[i].old_text;
+            const std::size_t first = content.find(old_text);
+            if (first == std::string::npos) {
+                result.error = "edits[" + std::to_string(i) + "].oldText not found in file: " +
+                               path;
+                return result;
+            }
+            if (content.find(old_text, first + old_text.size()) != std::string::npos) {
+                result.error = "edits[" + std::to_string(i) +
+                               "].oldText is not unique in file: " + path;
+                return result;
+            }
+            spans.push_back(Span{first, first + old_text.size(), i});
         }
-        if (content.find(old_text, first + old_text.size()) != std::string::npos) {
-            result.error = "oldText is not unique in file: " + path;
-            return result;
+        std::sort(spans.begin(), spans.end(),
+                  [](const Span& a, const Span& b) { return a.start < b.start; });
+        for (std::size_t i = 1; i < spans.size(); ++i) {
+            if (spans[i].start < spans[i - 1].end) {
+                result.error = "edits[" + std::to_string(spans[i - 1].block) + "] and edits[" +
+                               std::to_string(spans[i].block) + "] overlap in file: " + path;
+                return result;
+            }
         }
+
         std::string updated = content;
-        updated.replace(first, old_text.size(), new_text);
+        // 从后往前替换，前面的下标不会失效。
+        for (std::size_t i = spans.size(); i-- > 0;) {
+            const Span& span = spans[i];
+            updated.replace(span.start, span.end - span.start,
+                            blocks[span.block].new_text);
+        }
         std::ofstream output(path, std::ios::binary | std::ios::trunc);
         if (!output) {
             result.error = "cannot open file for write: " + path;
@@ -348,9 +448,11 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         output << updated;
         output.close();
         result.ok = true;
-        result.text = "edited " + path;
+        result.text = "edited " + path + ": " + std::to_string(blocks.size()) +
+                      " replacement(s)";
         aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "tools",
                                      "tool=edit path=" + path +
+                                             " blocks=" + std::to_string(blocks.size()) +
                                              " event=end ok=true");
         return result;
     }

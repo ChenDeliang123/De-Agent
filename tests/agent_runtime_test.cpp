@@ -176,6 +176,69 @@ public:
     }
 };
 
+// 记录执行次数，用于验证"同一轮的多个工具调用都在这一轮执行"。
+class CountingToolProvider final : public aiagent::tools::IToolProvider {
+public:
+    int executions = 0;
+
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        aiagent::llm::ToolSpec tool;
+        tool.name = "ok_tool";
+        return {tool};
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string&,
+            const nlohmann::json&,
+            const aiagent::tools::ToolContext&) override {
+        ++executions;
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = true;
+        result.text = "ok";
+        return result;
+    }
+};
+
+// 一轮里发出两个工具调用，下一轮给出最终答复。
+class DoubleToolModel final : public aiagent::llm::IModelClient {
+public:
+    int stream_calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "done-after-batch";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++stream_calls;
+        aiagent::llm::StreamEvent event;
+        if (stream_calls == 1) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-a", "ok_tool", "{}"});
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-b", "ok_tool", "{}"});
+        } else {
+            event.content = "done-after-batch";
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
 class BigToolProvider final : public aiagent::tools::IToolProvider {
 public:
     std::vector<aiagent::llm::ToolSpec> ListTools() override {
@@ -997,6 +1060,27 @@ int main() {
                "history must be kept when the compaction has no real gain");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime low-gain test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        // 同一轮里的多个工具调用必须在这一轮全部执行、只追加一次请求——
+        // "批量调用省轮次"依赖的正是这个机制。
+        auto model = std::make_shared<DoubleToolModel>();
+        auto tools = std::make_shared<CountingToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "batch two tools", "text/plain");
+        const std::string reply = runtime.HandleMessageStreaming(
+                user, {user}, "ctx-batched-tools", nullptr);
+        Expect(reply == "done-after-batch", "batched tool calls should finish the turn");
+        Expect(tools->executions == 2, "both tool calls of one round should be executed");
+        Expect(model->stream_calls == 2,
+               "two tool calls in one round should need only one follow-up request");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime batched-tools test failed: " << e.what() << '\n';
         return 1;
     }
 
