@@ -135,6 +135,68 @@ cd de-agent-<version>-linux-<arch>
 > 需要把 MCP Server 一并打进去时：`scripts/package-portable.sh --with-mcp`
 > （需先构建 `vendor/mcp-extension-platform`）。
 
+## 使用
+
+安装完成后，在**任意目录**运行 `de` 即可：需要时它会自动拉起后端守护进程，
+然后进入终端客户端（填实际安装位置，如 `./de` 或 `<prefix>/bin/de`）。
+
+```bash
+de
+```
+
+### 让它干活
+
+工具的工作目录 = **你启动 `de` 时所在的目录**。想到哪个项目上工作，先 `cd` 过去再运行：
+
+```bash
+cd ~/my-project
+de
+> 帮我读一下 README，并把 test 目录补一个用例
+```
+
+也可以在会话里用 `/cwd <dir>` 切换，`/status` 可查看当前 cwd、会话与后端状态。
+
+### 你会看到的交互
+
+- **流式输出**：回复逐 token 显示；等待模型/工具时底部有转圈动画（如 `⠋ thinking...`）。
+- **工具调用**：`read`/`write`/`edit`/`bash` 以折叠块展示；`edit` 会渲染 `+/-` diff。
+- **逐次确认**：默认 `confirm` 模式下，写文件与执行命令会先问
+  `[y]es once / [a]lways this session / [N]o`，用 `/permissions` 调整。
+- **中断**：生成过程中按 `Esc` 可停止当前任务。
+
+### 常用指令
+
+输入 `/` 会实时提示候选，`Tab` 补全，`/help` 看全部、`/hotkeys` 看快捷键。最常用的：
+
+```text
+/new              新会话
+/resume           选择历史会话续聊（/sessions 查看列表）
+/cwd [dir]        查看/切换工具工作目录
+/permissions      查看/切换权限模式（confirm|workspace|full）
+/tools            查看可用工具（coding + MCP）
+/status           后端健康 + 当前会话
+/quit             退出
+```
+
+完整指令与说明见下文「终端 coding 客户端」一节。
+
+### 服务管理
+
+后端是后台守护进程，可随时管理：
+
+```bash
+de status     # 后端是否在运行
+de restart    # 重启后端
+de logs       # 跟踪后端日志（de logs cli 看客户端日志）
+de stop       # 停止后端
+```
+
+### 数据在哪
+
+会话历史（SQLite）、权限、日志都放在 `${DE_HOME:-$XDG_DATA_HOME/de:-$HOME/.de}`，
+与安装目录分离：换新版本只需替换安装目录，历史会话仍在。`de doctor` 会打印当前
+解析出的全部路径。
+
 ## 快速开始
 
 ### 1. 初始化 submodule
