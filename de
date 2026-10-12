@@ -39,10 +39,25 @@ elif [ -x "${SELF_DIR}/aiagent_app" ]; then
   PREFIX="$(cd -P "${SELF_DIR}/.." && pwd)"
   BACKEND_BIN="${SELF_DIR}/aiagent_app"
 else
-  echo "de: backend binary not found near ${SELF_DIR}" >&2
-  echo "de: looked for build/aiagent_app, bin/aiagent_app, ./aiagent_app" >&2
-  echo "de: build first (cmake --build build -j) or reinstall the package" >&2
-  exit 1
+  # 后端尚未构建/安装：按目录结构推断布局，让 init/doctor 仍可用。
+  if [ -d "${SELF_DIR}/conf" ] && [ -d "${SELF_DIR}/cli" ]; then
+    LAYOUT="source"
+    PREFIX="${SELF_DIR}"
+    BACKEND_BIN="${SELF_DIR}/build/aiagent_app"
+  elif [ -f "${SELF_DIR}/lib/de/cli/cli.mjs" ]; then
+    LAYOUT="installed"
+    PREFIX="$(cd -P "${SELF_DIR}/.." && pwd)"
+    BACKEND_BIN="${SELF_DIR}/aiagent_app"
+  elif [ -d "${SELF_DIR}/bin" ]; then
+    LAYOUT="package"
+    PREFIX="${SELF_DIR}"
+    BACKEND_BIN="${SELF_DIR}/bin/aiagent_app"
+  else
+    echo "de: backend binary not found near ${SELF_DIR}" >&2
+    echo "de: looked for build/aiagent_app, bin/aiagent_app, ./aiagent_app" >&2
+    echo "de: build first (cmake --build build -j) or reinstall the package" >&2
+    exit 1
+  fi
 fi
 
 # 用户数据目录：与后端 ResolveAppPaths 保持一致（DE_HOME > XDG_DATA_HOME/de > ~/.de）。
@@ -66,6 +81,7 @@ if [ "${LAYOUT}" = "source" ]; then
   DEFAULT_DB_PATH="${PREFIX}/build/db/aiagent_tasks.db"
   DEFAULT_RUNTIME_DIR="${PREFIX}/.runtime"
   SHARE_DIR="${PREFIX}/share/de"
+  EXAMPLE_DIR="${PREFIX}/conf"
   LAUNCH_CWD="${PREFIX}"
 else
   CLI_DIR="${PREFIX}/lib/de/cli"
@@ -74,6 +90,7 @@ else
   DEFAULT_DB_PATH="${DATA_DIR}/aiagent_tasks.db"
   DEFAULT_RUNTIME_DIR="${DATA_DIR}/runtime"
   SHARE_DIR="${PREFIX}/share/de"
+  EXAMPLE_DIR="${SHARE_DIR}/conf"
   LAUNCH_CWD="${DATA_DIR:-${PREFIX}}"
 fi
 
@@ -104,6 +121,8 @@ commands:
   status           show backend status
   restart          stop then start backend
   logs [target]    tail log: backend (default) | cli
+  init             create user config from examples (non-destructive)
+  doctor           check runtime environment and resolved paths
   help             show this help
 
 options:
@@ -139,6 +158,122 @@ pid_alive() {
   local pid
   pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+# 按需创建用户配置（不覆盖已有文件）。源码树布局下写入仓库 conf/，
+# 安装布局下写入 <data_dir>/conf/。
+init_config() {
+  mkdir -p "${DATA_DIR:-${PREFIX}}" "${RUNTIME_DIR}"
+  local rc=0
+
+  if [ -f "${CONFIG_FILE}" ]; then
+    echo "config exists: ${CONFIG_FILE}"
+  else
+    mkdir -p "$(dirname "${CONFIG_FILE}")"
+    if [ -f "${EXAMPLE_DIR}/app.ini.example" ]; then
+      cp "${EXAMPLE_DIR}/app.ini.example" "${CONFIG_FILE}"
+      echo "created ${CONFIG_FILE}"
+      echo "  -> set [deepseek] api_key (or export DEEPSEEK_API_KEY)"
+    else
+      echo "de: example config not found: ${EXAMPLE_DIR}/app.ini.example" >&2
+      rc=1
+    fi
+  fi
+
+  if [ -f "${CLI_CONFIG_FILE}" ]; then
+    echo "cli config exists: ${CLI_CONFIG_FILE}"
+  else
+    mkdir -p "$(dirname "${CLI_CONFIG_FILE}")"
+    if [ -f "${EXAMPLE_DIR}/cli.ini.example" ]; then
+      cp "${EXAMPLE_DIR}/cli.ini.example" "${CLI_CONFIG_FILE}"
+      echo "created ${CLI_CONFIG_FILE}"
+    fi
+  fi
+
+  echo
+  echo "data dir:    ${DATA_DIR:-<none>}"
+  echo "runtime dir: ${RUNTIME_DIR}"
+  echo "next: fill api_key, then run 'de'"
+  return ${rc}
+}
+
+port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}$" >/dev/null
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "[:.]${port}$" >/dev/null
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null
+  fi
+}
+
+DOCTOR_FAILURES=0
+doctor_check() {
+  local label="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf '  ok    %s\n' "${label}"
+  else
+    printf '  FAIL  %s\n' "${label}"
+    DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1))
+  fi
+}
+
+doctor() {
+  DOCTOR_FAILURES=0
+  echo "de doctor"
+  echo "  layout:      ${LAYOUT}"
+  echo "  prefix:      ${PREFIX}"
+  echo "  backend:     ${BACKEND_BIN}"
+  echo "  cli dir:     ${CLI_DIR}"
+  echo "  share dir:   ${SHARE_DIR}"
+  echo "  data dir:    ${DATA_DIR:-<none>}"
+  echo "  runtime dir: ${RUNTIME_DIR}"
+  echo "  config:      ${CONFIG_FILE}"
+  echo "  db:          ${DB_PATH}"
+  echo
+
+  doctor_check "backend binary" test -x "${BACKEND_BIN}"
+  doctor_check "cli entry" test -f "${CLI_DIR}/cli.mjs"
+  doctor_check "config file" test -f "${CONFIG_FILE}"
+
+  if command -v node >/dev/null 2>&1; then
+    printf '  ok    node: %s\n' "$(node --version 2>/dev/null)"
+  else
+    echo "  FAIL  node not found (>= 18 required)"
+    DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1))
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    echo "  ok    curl"
+  else
+    echo "  warn  curl not found; 'de status/start' health check needs it"
+  fi
+
+  if [ -n "${DATA_DIR:-}" ] && mkdir -p "${DATA_DIR}" 2>/dev/null && [ -w "${DATA_DIR}" ]; then
+    echo "  ok    data dir writable"
+  else
+    echo "  FAIL  data dir not writable: ${DATA_DIR:-<none>}"
+    DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1))
+  fi
+
+  local port
+  for port in "${A2A_PORT}" "${BACKEND_PORT}"; do
+    if port_in_use "${port}"; then
+      echo "  warn  port ${port} already in use"
+    else
+      echo "  ok    port ${port} free"
+    fi
+  done
+
+  echo
+  if [ "${DOCTOR_FAILURES}" -gt 0 ]; then
+    echo "doctor: ${DOCTOR_FAILURES} critical problem(s) found"
+    return 1
+  fi
+  echo "doctor: all critical checks passed"
+  return 0
 }
 
 stop_backend() {
@@ -261,6 +396,14 @@ while [ "$#" -gt 0 ]; do
       ACTION="logs"
       shift
       ;;
+    init)
+      ACTION="init"
+      shift
+      ;;
+    doctor|check)
+      ACTION="doctor"
+      shift
+      ;;
     help|--help|-h)
       ACTION="help"
       shift
@@ -327,6 +470,12 @@ case "${ACTION}" in
   restart)
     stop_backend
     start_backend
+    ;;
+  init)
+    init_config
+    ;;
+  doctor)
+    doctor
     ;;
   logs)
     ensure_runtime_dir

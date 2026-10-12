@@ -210,6 +210,12 @@ if(AIAGENT_BUILD_TESTS)
       -DAIAGENT_INSTALL_DATADIR=${CMAKE_INSTALL_DATADIR} -P
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/packaging_install_test.cmake)
 
+  # de 启动器脚本冒烟测试：安装到临时 prefix，校验 init/doctor/布局。
+  add_test(
+    NAME aiagent_de_script
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/de_script_test.sh
+            ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+
   add_executable(logging_test tests/logging_test.cpp)
   target_link_libraries(logging_test PRIVATE aiagent_log aiagent_llm Threads::Threads)
   add_test(NAME aiagent_logging COMMAND logging_test)

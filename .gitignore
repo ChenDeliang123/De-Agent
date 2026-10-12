@@ -4,6 +4,8 @@ vendor_demo
 conf/conf.ini
 conf/cli.ini
 build/
+build-release/
+dist/
 .cache/
 node_modules/
 .runtime/

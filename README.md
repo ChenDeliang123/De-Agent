@@ -104,6 +104,37 @@ DeepSeek 进行对话、按需调用 MCP 与内置文件/命令工具，并以 A
 
 CMake 配置阶段会自动获取 `cpp-httplib` 与 SQLite，需要可用的网络连接。
 
+## 安装（绿色包）
+
+从源码构建并打出一个解包即用的绿色版：
+
+```bash
+git submodule update --init --recursive
+scripts/package-portable.sh
+# → dist/de-agent-<version>-linux-<arch>.tar.gz（附 .sha256）
+```
+
+在目标机器上：
+
+```bash
+tar xzf de-agent-<version>-linux-<arch>.tar.gz
+cd de-agent-<version>-linux-<arch>
+./de init      # 在 ~/.de/conf/conf.ini 生成配置，填入 DeepSeek api_key
+./de doctor    # 检查后端/Node/配置/端口
+./de           # 启动后端并进入终端客户端
+```
+
+运行依赖：`libcurl.so.4`（后端动态链接）、`Node.js ≥ 18`（终端客户端）、
+`curl` 命令（`de` 健康检查）。数据与日志默认放在
+`${DE_HOME:-$XDG_DATA_HOME/de:-$HOME/.de}`，与安装目录分离，升级包不影响会话。
+
+`de` 会自动识别布局：**源码树**（`<repo>/de`）继续使用仓库内的 `.runtime` 与
+`build/db`，开发体验不变；**安装包 / 系统安装**（`<prefix>/bin/de`）使用用户数据
+目录。可用 `de doctor` 查看当前布局解析出的全部路径。
+
+> 需要把 MCP Server 一并打进去时：`scripts/package-portable.sh --with-mcp`
+> （需先构建 `vendor/mcp-extension-platform`）。
+
 ## 快速开始
 
 ### 1. 初始化 submodule
