@@ -59,6 +59,12 @@ int main() {
                    "prompt should prefer working software over big upfront design");
     ExpectContains(prompt, "When the request is ambiguous",
                    "prompt should tell the agent to ship a minimal assumption-driven version");
+    ExpectContains(prompt, "leave the project in a runnable state",
+                   "prompt should require a runnable state at each increment");
+    ExpectContains(prompt, "Treat new feedback as the new plan",
+                   "prompt should tell the agent to respond to change");
+    ExpectContains(prompt, "Work on one slice at a time",
+                   "prompt should limit work in progress to one slice");
 
     if (g_failures != 0) {
         std::cerr << "system prompt test failed with " << g_failures << " failure(s)\n";
