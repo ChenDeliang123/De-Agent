@@ -52,6 +52,14 @@ int main() {
     ExpectContains(prompt, "If a bug survives two focused fix attempts",
                    "prompt should cap bug-chasing with an escalation rule");
 
+    // 5) 敏捷迭代（历史事故：把“实现一个小游戏”当成一次性大工程，先造设计再写代码）。
+    ExpectContains(prompt, "Work in agile iterations",
+                   "prompt should require agile, iterative delivery");
+    ExpectContains(prompt, "Favor working software over an elaborate upfront design",
+                   "prompt should prefer working software over big upfront design");
+    ExpectContains(prompt, "When the request is ambiguous",
+                   "prompt should tell the agent to ship a minimal assumption-driven version");
+
     if (g_failures != 0) {
         std::cerr << "system prompt test failed with " << g_failures << " failure(s)\n";
         return 1;
