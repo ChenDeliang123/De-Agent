@@ -3,7 +3,10 @@
 namespace aiagent {
 
 // 当前项目版本，供 Agent Card 与日志使用。
-inline constexpr const char* kVersion = "0.1.0";
+//
+// 单一来源：由 CMake 的 project(VERSION) 经 configure_file 注入，
+// 不要在本文件里手写版本号（模板为 include/aiagent/version.hpp.in）。
+inline constexpr const char* kVersion = "@PROJECT_VERSION@";
 
 // Agent 身份：自我认知与对外标识。
 inline constexpr const char* kAgentName = "de agent";

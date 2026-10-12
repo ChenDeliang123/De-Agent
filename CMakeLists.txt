@@ -13,6 +13,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
 
+include(GNUInstallDirs)
+
+# 版本头单一来源：由 project(VERSION) 生成到构建目录，避免手写版本号漂移。
+# 模板：include/aiagent/version.hpp.in
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/aiagent/version.hpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/aiagent/version.hpp"
+  @ONLY)
+add_library(aiagent_version INTERFACE)
+target_include_directories(aiagent_version
+                           INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
 option(AIAGENT_BUILD_TESTS "Build AI Agent smoke/integration tests" ON)
 option(AIAGENT_BUILD_EXAMPLES "Build AI Agent example programs" ON)
 
@@ -72,6 +84,8 @@ add_subdirectory("${AIAGENT_A2A_SOURCE_DIR}" a2a-protocol)
 # ---------------------------------------------------------------------------
 add_library(aiagent_log STATIC src/log.cpp)
 target_include_directories(aiagent_log PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# 生成的 version.hpp 通过 aiagent_version 传递到所有下游目标。
+target_link_libraries(aiagent_log PUBLIC aiagent_version)
 
 if(MSVC)
   target_compile_options(aiagent_log PRIVATE /W4 /permissive-)
@@ -173,8 +187,28 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(m0_smoke_test tests/m0_smoke_test.cpp)
   target_include_directories(m0_smoke_test PRIVATE
                              ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(m0_smoke_test PRIVATE a2a::a2a)
+  target_link_libraries(m0_smoke_test PRIVATE a2a::a2a aiagent_version)
   add_test(NAME aiagent_m0_smoke COMMAND m0_smoke_test)
+
+  # 版本单一来源：生成头中的 kVersion 必须等于 project(VERSION)。
+  add_executable(version_test tests/version_test.cpp)
+  target_include_directories(version_test PRIVATE
+                             ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(version_test PRIVATE aiagent_log)
+  target_compile_definitions(version_test PRIVATE
+                             AIAGENT_EXPECTED_VERSION="${PROJECT_VERSION}")
+  add_test(NAME aiagent_version COMMAND version_test)
+
+  # 安装布局冒烟测试：只安装 deagent 组件，校验产物路径。
+  add_test(
+    NAME aiagent_packaging_install
+    COMMAND
+      ${CMAKE_COMMAND} -DAIAGENT_BUILD_DIR=${CMAKE_BINARY_DIR}
+      -DAIAGENT_INSTALL_STAGE=${CMAKE_BINARY_DIR}/install-stage
+      -DAIAGENT_INSTALL_BINDIR=${CMAKE_INSTALL_BINDIR}
+      -DAIAGENT_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
+      -DAIAGENT_INSTALL_DATADIR=${CMAKE_INSTALL_DATADIR} -P
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/packaging_install_test.cmake)
 
   add_executable(logging_test tests/logging_test.cpp)
   target_link_libraries(logging_test PRIVATE aiagent_log aiagent_llm Threads::Threads)
@@ -263,3 +297,31 @@ if(AIAGENT_BUILD_EXAMPLES)
   add_executable(aiagent_deepseek_cli examples/deepseek_chat.cpp)
   target_link_libraries(aiagent_deepseek_cli PRIVATE aiagent_llm)
 endif()
+
+# ---------------------------------------------------------------------------
+# 安装 / 打包
+#
+# 所有本项目产物都带 COMPONENT deagent，这样即使 a2a-protocol 子项目也声明了
+# 自己的 install() 规则，打包时仍可只安装本项目：
+#   cmake --install build --component deagent --prefix <stage>
+# ---------------------------------------------------------------------------
+install(TARGETS aiagent_app
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT deagent)
+
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/de"
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT deagent)
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cli/"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/de/cli
+        COMPONENT deagent
+        PATTERN "tests" EXCLUDE
+        PATTERN ".runtime" EXCLUDE
+        PATTERN "node_modules" EXCLUDE)
+
+install(FILES
+          "${CMAKE_CURRENT_SOURCE_DIR}/conf/app.ini.example"
+          "${CMAKE_CURRENT_SOURCE_DIR}/conf/cli.ini.example"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/de/conf
+        COMPONENT deagent)
