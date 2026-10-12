@@ -57,8 +57,9 @@ void OnSignal(int) {
 struct AppOptions {
     int port = 18080;
     int web_port = 18081;
-    std::string config_path = "conf/conf.ini";
-    std::string db_path = "build/db/aiagent_tasks.db";
+    std::string config_path;  // 空 = 自动查找（cwd / data_dir / share）
+    std::string db_path;      // 空 = <data_dir>/aiagent_tasks.db（回退 build/db/...）
+    std::string share_dir;    // 安装资源目录（share/de）
     std::string mcp_binary;
     std::string mcp_plugins;
     std::string mcp_python_path;
@@ -90,6 +91,9 @@ AppOptions ParseOptions(int argc, char** argv) {
     if (const char* value = std::getenv("AIAGENT_MCP_PYTHON_PATH")) {
         options.mcp_python_path = value;
     }
+    if (const char* value = std::getenv("AIAGENT_SHARE_DIR")) {
+        options.share_dir = value;
+    }
     if (const char* value = std::getenv("AIAGENT_LOG_FILE")) {
         options.log_file = value;
     }
@@ -111,6 +115,8 @@ AppOptions ParseOptions(int argc, char** argv) {
             options.port = std::stoi(argv[++i]);
         } else if (arg == "--web-port" && i + 1 < argc) {
             options.web_port = std::stoi(argv[++i]);
+        } else if (arg == "--share-dir" && i + 1 < argc) {
+            options.share_dir = argv[++i];
         } else if (arg == "--mcp-binary" && i + 1 < argc) {
             options.mcp_binary = argv[++i];
         } else if (arg == "--mcp-plugins" && i + 1 < argc) {
@@ -225,21 +231,50 @@ int main(int argc, char** argv) {
     try {
         const AppOptions options = ParseOptions(argc, argv);
 
+        // 路径解析：先定位配置文件，再解析数据目录与安装资源目录。
+        // 注意：[storage] data_dir 写在配置里，所以这一步只用环境变量解析的 data_dir
+        // 去搜索配置；加载配置后再用其覆盖值用于权限/数据库等。
+        const aiagent::AppPaths env_paths = aiagent::ResolveAppPaths();
+        const std::string share_dir = aiagent::ResolveShareDir(options.share_dir);
+        const std::string config_path =
+                aiagent::ResolveConfigFile(options.config_path, env_paths, share_dir);
+        if (config_path.empty()) {
+            std::cerr << "找不到配置文件；请用 --config 指定，或参照 conf/app.ini.example "
+                         "在 <data_dir>/conf/conf.ini 创建。\n";
+            return 1;
+        }
+
         std::string config_error;
-        const auto config = aiagent::LoadDeepSeekConfigFile(options.config_path, &config_error);
+        const auto config = aiagent::LoadDeepSeekConfigFile(config_path, &config_error);
         if (!config.has_value()) {
             std::cerr << "配置错误: " << config_error << '\n';
             return 1;
         }
 
+        // 用户级数据目录：优先 [storage] data_dir，其次 DE_HOME/XDG/HOME。
+        aiagent::StorageConfig storage_config;
+        std::string storage_error;
+        if (const auto parsed =
+                    aiagent::LoadStorageConfigFile(config_path, &storage_error);
+            parsed.has_value()) {
+            storage_config = *parsed;
+        }
+        const aiagent::AppPaths app_paths =
+                aiagent::ResolveAppPaths(storage_config.data_dir);
+
         aiagent::LogConfig log_config;
         std::string log_error;
-        const auto parsed_log = aiagent::LoadLogConfigFile(options.config_path, &log_error);
+        const auto parsed_log = aiagent::LoadLogConfigFile(config_path, &log_error);
         if (parsed_log.has_value()) {
             log_config = *parsed_log;
         }
         if (!options.log_file.empty()) {
             log_config.file = options.log_file;
+        } else if (log_config.file.empty() && !app_paths.runtime_dir.empty()) {
+            // 安装态：日志落到用户数据目录，避免污染 cwd。
+            std::error_code ec;
+            std::filesystem::create_directories(app_paths.runtime_dir, ec);
+            log_config.file = app_paths.runtime_dir + "/backend.log";
         }
         if (!options.log_level.empty()) {
             log_config.level = options.log_level;
@@ -252,9 +287,15 @@ int main(int argc, char** argv) {
                                         log_config.max_size_bytes,
                                         log_config.max_files);
         aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "main",
-                                     "config loaded: " + options.config_path);
+                                     "config loaded: " + config_path);
 
-        const std::filesystem::path db_path(options.db_path);
+        // 数据库：显式 --db 优先，否则放用户数据目录，最后回退源码树默认。
+        std::string db_file = options.db_path;
+        if (db_file.empty()) {
+            db_file = !app_paths.db_file.empty() ? app_paths.db_file
+                                                 : "build/db/aiagent_tasks.db";
+        }
+        const std::filesystem::path db_path(db_file);
         if (db_path.has_parent_path()) {
             std::filesystem::create_directories(db_path.parent_path());
         }
@@ -272,7 +313,7 @@ int main(int argc, char** argv) {
         aiagent::InstructionsConfig instructions_config;
         std::string instructions_error;
         const auto parsed_instructions = aiagent::LoadInstructionsConfigFile(
-                options.config_path, &instructions_error);
+                config_path, &instructions_error);
         if (!parsed_instructions.has_value()) {
             std::cerr << "配置错误: " << instructions_error << '\n';
             return 1;
@@ -292,7 +333,7 @@ int main(int argc, char** argv) {
         aiagent::CompactionConfig compaction_config;
         std::string compaction_error;
         const auto parsed_compaction =
-                aiagent::LoadCompactionConfigFile(options.config_path, &compaction_error);
+                aiagent::LoadCompactionConfigFile(config_path, &compaction_error);
         if (parsed_compaction.has_value()) {
             compaction_config = *parsed_compaction;
         }
@@ -326,21 +367,12 @@ int main(int argc, char** argv) {
         aiagent::ToolsConfig tools_config;
         std::string tools_error;
         const auto parsed_tools =
-                aiagent::LoadToolsConfigFile(options.config_path, &tools_error);
+                aiagent::LoadToolsConfigFile(config_path, &tools_error);
         if (parsed_tools.has_value()) {
             tools_config = *parsed_tools;
         }
 
-        // 用户级数据目录与权限存储。
-        aiagent::StorageConfig storage_config;
-        std::string storage_error;
-        if (const auto parsed =
-                    aiagent::LoadStorageConfigFile(options.config_path, &storage_error);
-            parsed.has_value()) {
-            storage_config = *parsed;
-        }
-        const aiagent::AppPaths app_paths =
-                aiagent::ResolveAppPaths(storage_config.data_dir);
+        // 用户级权限存储。
         std::string permissions_path = storage_config.permissions_file;
         if (permissions_path.empty()) {
             permissions_path = app_paths.permissions_file;
@@ -355,7 +387,7 @@ int main(int argc, char** argv) {
 
         aiagent::PermissionsConfig permissions_config;
         std::string permissions_error;
-        if (const auto parsed = aiagent::LoadPermissionsConfigFile(options.config_path,
+        if (const auto parsed = aiagent::LoadPermissionsConfigFile(config_path,
                                                                   &permissions_error);
             parsed.has_value()) {
             permissions_config = *parsed;
@@ -461,18 +493,39 @@ int main(int argc, char** argv) {
                 std::filesystem::current_path().string(), tools_config.sandbox_roots));
         runtime.SetToolProvider(tools);
 
-        // MCP：优先读 [mcp] 配置；没有时尝试根目录 vendor 的本地构建。
+        // MCP：优先读 [mcp] 配置；没有时依次尝试安装目录 share/de/mcp 与源码树
+        // vendor 的本地构建（不再只依赖 cwd 下的相对路径）。
         aiagent::MCPConfig mcp_config;
         std::string mcp_error;
-        const auto parsed_mcp = aiagent::LoadMCPConfigFile(options.config_path, &mcp_error);
+        const auto parsed_mcp = aiagent::LoadMCPConfigFile(config_path, &mcp_error);
         if (parsed_mcp.has_value() && parsed_mcp->enabled) {
             mcp_config = *parsed_mcp;
         } else {
+            std::vector<std::string> binary_candidates;
+            std::vector<std::string> plugin_candidates;
+            if (!share_dir.empty()) {
+                binary_candidates.push_back(share_dir + "/mcp/mcp_server");
+                plugin_candidates.push_back(share_dir + "/mcp/plugins");
+            }
+            binary_candidates.push_back(
+                    "vendor/mcp-extension-platform/build/mcp_server/mcp_server");
+            plugin_candidates.push_back(
+                    "vendor/mcp-extension-platform/mcp_server/plugins");
+
+            auto first_existing = [](const std::vector<std::string>& candidates) {
+                for (const auto& candidate : candidates) {
+                    if (std::filesystem::exists(candidate)) {
+                        return candidate;
+                    }
+                }
+                return candidates.empty() ? std::string() : candidates.back();
+            };
+
             mcp_config.binary = options.mcp_binary.empty()
-                                        ? "vendor/mcp-extension-platform/build/mcp_server/mcp_server"
+                                        ? first_existing(binary_candidates)
                                         : options.mcp_binary;
             mcp_config.plugins_dir = options.mcp_plugins.empty()
-                                             ? "vendor/mcp-extension-platform/mcp_server/plugins"
+                                             ? first_existing(plugin_candidates)
                                              : options.mcp_plugins;
             if (!options.mcp_python_path.empty()) {
                 mcp_config.python_path = options.mcp_python_path;
@@ -919,7 +972,7 @@ int main(int argc, char** argv) {
         std::cout << "Agent Card: http://127.0.0.1:" << options.port
                   << "/.well-known/agent-card.json\n";
         std::cout << "Model: " << config->model << '\n';
-        std::cout << "Task DB: " << options.db_path << '\n';
+        std::cout << "Task DB: " << db_path.string() << '\n';
         std::cout << "Press Ctrl+C to stop.\n";
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "main",
