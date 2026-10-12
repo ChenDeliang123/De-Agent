@@ -6,12 +6,16 @@
 #   scripts/package-portable.sh [--with-mcp] [--build-dir DIR] [--clean]
 #
 # 产物：
-#   dist/de-agent-<version>-linux-<arch>.tar.gz
+#   dist/de-agent-<version>-linux-<arch>.tar.gz          # 默认主包（不含 MCP）
 #   dist/de-agent-<version>-linux-<arch>.tar.gz.sha256
+#   dist/de-agent-mcp-<version>-linux-<arch>.tar.gz      # --with-mcp 时另出（可选组件）
 #
 # 说明：
 #   - 只安装 deagent 组件（不含 a2a-protocol 的头/库）。
 #   - 打包不包含 conf/conf.ini（含密钥）；首启用 `./de init` 生成。
+#   - MCP 是独立子项目，默认不进主包；--with-mcp 会另出一个只含
+#     share/de/mcp/ 的可选包，解到主包根即生效：
+#       tar xzf de-agent-mcp-*.tar.gz -C de-agent-<version>-linux-<arch>/
 #   - 若存在 build/_deps 下的依赖源码，会自动复用，避免重新联网下载。
 set -euo pipefail
 
@@ -95,21 +99,6 @@ cmake --install "${BUILD_DIR}" --component deagent --prefix "${PKG_DIR}"
 # 包根放一个 de 软链，方便 `./de`（解析软链后仍能识别安装布局）。
 ln -sf "bin/de" "${PKG_DIR}/de"
 
-if [ "${WITH_MCP}" -eq 1 ]; then
-  MCP_BIN="${ROOT_DIR}/vendor/mcp-extension-platform/build/mcp_server/mcp_server"
-  MCP_PLUGINS="${ROOT_DIR}/vendor/mcp-extension-platform/mcp_server/plugins"
-  if [ -x "${MCP_BIN}" ]; then
-    mkdir -p "${PKG_DIR}/share/de/mcp"
-    cp "${MCP_BIN}" "${PKG_DIR}/share/de/mcp/"
-    if [ -d "${MCP_PLUGINS}" ]; then
-      cp -r "${MCP_PLUGINS}" "${PKG_DIR}/share/de/mcp/plugins"
-    fi
-    echo "bundled MCP server"
-  else
-    echo "warn: --with-mcp but ${MCP_BIN} not built; skipping MCP" >&2
-  fi
-fi
-
 mkdir -p "${DIST_DIR}"
 tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
 (
@@ -121,3 +110,42 @@ echo
 echo "artifact: ${DIST_DIR}/${PACKAGE_NAME}.tar.gz"
 echo "checksum: ${DIST_DIR}/${PACKAGE_NAME}.tar.gz.sha256"
 du -h "${DIST_DIR}/${PACKAGE_NAME}.tar.gz" | awk '{print "size:     " $1}'
+
+# ---------------------------------------------------------------------------
+# 可选组件：MCP Server
+#
+# 独立打包，不混进主包：产物根目录为 share/de/mcp/，解到主包根即可：
+#   tar xzf de-agent-mcp-<ver>-linux-<arch>.tar.gz -C de-agent-<ver>-linux-<arch>/
+# 后端会从 <prefix>/share/de/mcp/{mcp_server,plugins} 自动发现（见 M2a）。
+# ---------------------------------------------------------------------------
+if [ "${WITH_MCP}" -eq 1 ]; then
+  MCP_BIN="${ROOT_DIR}/vendor/mcp-extension-platform/build/mcp_server/mcp_server"
+  MCP_PLUGINS="${ROOT_DIR}/vendor/mcp-extension-platform/mcp_server/plugins"
+  if [ -x "${MCP_BIN}" ] && [ -d "${MCP_PLUGINS}" ]; then
+    MCP_STAGE="${DIST_DIR}/.mcp-stage"
+    rm -rf "${MCP_STAGE}"
+    mkdir -p "${MCP_STAGE}/share/de/mcp"
+    cp "${MCP_BIN}" "${MCP_STAGE}/share/de/mcp/"
+    cp -r "${MCP_PLUGINS}" "${MCP_STAGE}/share/de/mcp/plugins"
+    # 排除 Python 缓存：体积浪费且跨机 Python 版本可能不兼容。
+    find "${MCP_STAGE}/share/de/mcp/plugins" -type d -name '__pycache__' \
+      -prune -exec rm -rf {} +
+    find "${MCP_STAGE}/share/de/mcp/plugins" -type f -name '*.pyc' -delete
+
+    MCP_PACKAGE_NAME="de-agent-mcp-${VERSION}-linux-${ARCH}"
+    tar -C "${MCP_STAGE}" -czf "${DIST_DIR}/${MCP_PACKAGE_NAME}.tar.gz" share
+    (
+      cd "${DIST_DIR}"
+      sha256sum "${MCP_PACKAGE_NAME}.tar.gz" > "${MCP_PACKAGE_NAME}.tar.gz.sha256"
+    )
+    rm -rf "${MCP_STAGE}"
+
+    echo
+    echo "mcp add-on: ${DIST_DIR}/${MCP_PACKAGE_NAME}.tar.gz"
+    echo "  install:  tar xzf ${MCP_PACKAGE_NAME}.tar.gz -C ${PACKAGE_NAME}/"
+    du -h "${DIST_DIR}/${MCP_PACKAGE_NAME}.tar.gz" | awk '{print "  size:     " $1}'
+  else
+    echo "warn: --with-mcp but MCP binary/plugins not found under vendor/; skipped" >&2
+    echo "      build it first: cmake -S vendor/mcp-extension-platform -B vendor/mcp-extension-platform/build && cmake --build vendor/mcp-extension-platform/build -j" >&2
+  fi
+fi

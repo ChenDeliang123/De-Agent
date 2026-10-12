@@ -132,8 +132,38 @@ cd de-agent-<version>-linux-<arch>
 `build/db`，开发体验不变；**安装包 / 系统安装**（`<prefix>/bin/de`）使用用户数据
 目录。可用 `de doctor` 查看当前布局解析出的全部路径。
 
-> 需要把 MCP Server 一并打进去时：`scripts/package-portable.sh --with-mcp`
-> （需先构建 `vendor/mcp-extension-platform`）。
+### 可选组件：MCP 工具
+
+主包**默认不含 MCP**（保持约 2 MB、无 Python 依赖）。MCP Server 是独立子项目，
+以可选包形式单独分发；想要时：
+
+```bash
+# 1) 先构建 MCP Server
+cmake -S vendor/mcp-extension-platform \
+  -B vendor/mcp-extension-platform/build -DCMAKE_BUILD_TYPE=Release
+cmake --build vendor/mcp-extension-platform/build -j
+
+# 2) 出主包 + MCP 可选包
+scripts/package-portable.sh --with-mcp
+# → dist/de-agent-...tar.gz          （1.8 MB）
+# → dist/de-agent-mcp-...tar.gz      （~10 MB，只含 share/de/mcp/）
+```
+
+把可选包解到**主包根目录**即生效（不必重新打主包）：
+
+```bash
+tar xzf de-agent-mcp-<version>-linux-<arch>.tar.gz \
+    -C de-agent-<version>-linux-<arch>/
+./de restart        # 重启后端以加载 MCP
+./de doctor         # 确认路径
+```
+
+生效标志：`GET /api/v1/tools` 会多出 MCP 工具；`de logs` 里可见
+`[mcp] event=server_start ... binary=<prefix>/share/de/mcp/mcp_server`。
+后端会自动从 `<prefix>/share/de/mcp/{mcp_server,plugins}` 发现，无需改配置。
+
+> Python 插件需要目标机器有 `python3`；`native` / `shell` 等插件不需要。
+> 也可在你的 `conf/conf.ini` 的 `[mcp]` 段显式指定 `binary` / `plugins` 覆盖默认发现。
 
 ## 使用
 
