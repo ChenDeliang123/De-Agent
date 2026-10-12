@@ -11,9 +11,73 @@ while [ -L "${SCRIPT_SOURCE}" ]; do
     *) SCRIPT_SOURCE="${SCRIPT_DIR}/${SCRIPT_SOURCE}" ;;
   esac
 done
-ROOT_DIR="$(cd -P "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+SELF_DIR="$(cd -P "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
 
-RUNTIME_DIR="${AIAGENT_RUNTIME_DIR:-${ROOT_DIR}/.runtime}"
+# ---------------------------------------------------------------------------
+# 布局探测
+#
+# 支持三种布局，保证源码树开发与安装包/系统安装都能用：
+#   1) source    源码树：<repo>/de，后端在 <repo>/build/aiagent_app
+#      - 数据/日志仍留在仓库内（.runtime、build/db），保持开发体验不变。
+#   2) package   便携包：包根/de，后端在 <pkg>/bin/aiagent_app
+#   3) installed 系统安装：<prefix>/bin/de，后端在 <prefix>/bin/aiagent_app
+#      - 2/3 的数据/日志落到用户数据目录（DE_HOME/XDG/HOME）。
+# ---------------------------------------------------------------------------
+BACKEND_BIN=""
+LAYOUT=""
+PREFIX=""
+if [ -x "${SELF_DIR}/build/aiagent_app" ]; then
+  LAYOUT="source"
+  PREFIX="${SELF_DIR}"
+  BACKEND_BIN="${SELF_DIR}/build/aiagent_app"
+elif [ -x "${SELF_DIR}/bin/aiagent_app" ]; then
+  LAYOUT="package"
+  PREFIX="${SELF_DIR}"
+  BACKEND_BIN="${SELF_DIR}/bin/aiagent_app"
+elif [ -x "${SELF_DIR}/aiagent_app" ]; then
+  LAYOUT="installed"
+  PREFIX="$(cd -P "${SELF_DIR}/.." && pwd)"
+  BACKEND_BIN="${SELF_DIR}/aiagent_app"
+else
+  echo "de: backend binary not found near ${SELF_DIR}" >&2
+  echo "de: looked for build/aiagent_app, bin/aiagent_app, ./aiagent_app" >&2
+  echo "de: build first (cmake --build build -j) or reinstall the package" >&2
+  exit 1
+fi
+
+# 用户数据目录：与后端 ResolveAppPaths 保持一致（DE_HOME > XDG_DATA_HOME/de > ~/.de）。
+resolve_data_dir() {
+  if [ -n "${DE_HOME:-}" ]; then
+    printf '%s' "${DE_HOME}"
+  elif [ -n "${XDG_DATA_HOME:-}" ]; then
+    printf '%s' "${XDG_DATA_HOME}/de"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s' "${HOME}/.de"
+  else
+    printf '%s' ""
+  fi
+}
+DATA_DIR="$(resolve_data_dir)"
+
+if [ "${LAYOUT}" = "source" ]; then
+  CLI_DIR="${PREFIX}/cli"
+  DEFAULT_CONFIG_FILE="${PREFIX}/conf/conf.ini"
+  CLI_CONFIG_FILE="${PREFIX}/conf/cli.ini"
+  DEFAULT_DB_PATH="${PREFIX}/build/db/aiagent_tasks.db"
+  DEFAULT_RUNTIME_DIR="${PREFIX}/.runtime"
+  SHARE_DIR="${PREFIX}/share/de"
+  LAUNCH_CWD="${PREFIX}"
+else
+  CLI_DIR="${PREFIX}/lib/de/cli"
+  DEFAULT_CONFIG_FILE="${DATA_DIR}/conf/conf.ini"
+  CLI_CONFIG_FILE="${DATA_DIR}/conf/cli.ini"
+  DEFAULT_DB_PATH="${DATA_DIR}/aiagent_tasks.db"
+  DEFAULT_RUNTIME_DIR="${DATA_DIR}/runtime"
+  SHARE_DIR="${PREFIX}/share/de"
+  LAUNCH_CWD="${DATA_DIR:-${PREFIX}}"
+fi
+
+RUNTIME_DIR="${AIAGENT_RUNTIME_DIR:-${DEFAULT_RUNTIME_DIR}}"
 PID_FILE="${RUNTIME_DIR}/backend.pid"
 LOG_FILE="${RUNTIME_DIR}/backend.log"
 CONSOLE_LOG_FILE="${RUNTIME_DIR}/backend-console.log"
@@ -21,9 +85,8 @@ CONSOLE_LOG_FILE="${RUNTIME_DIR}/backend-console.log"
 A2A_PORT="${AIAGENT_PORT:-18080}"
 # 本地 HTTP 后端（终端 CLI 的通信端口）；保留 AIAGENT_WEB_PORT 兼容旧用法。
 BACKEND_PORT="${AIAGENT_BACKEND_PORT:-${AIAGENT_WEB_PORT:-18081}}"
-CONFIG_FILE="${AIAGENT_CONFIG:-${ROOT_DIR}/conf/conf.ini}"
-DB_PATH="${AIAGENT_DB:-${ROOT_DIR}/build/db/aiagent_tasks.db}"
-BACKEND_BIN="${ROOT_DIR}/build/aiagent_app"
+CONFIG_FILE="${AIAGENT_CONFIG:-${DEFAULT_CONFIG_FILE}}"
+DB_PATH="${AIAGENT_DB:-${DEFAULT_DB_PATH}}"
 LOG_LEVEL=""
 LOG_FILE_ARG=""
 
@@ -58,6 +121,9 @@ environment:
   AIAGENT_PORT / AIAGENT_BACKEND_PORT / AIAGENT_CONFIG / AIAGENT_DB
   AIAGENT_WEB_PORT (deprecated alias of AIAGENT_BACKEND_PORT)
   AIAGENT_RUNTIME_DIR
+  DE_HOME / XDG_DATA_HOME (用户数据目录，安装态下存放 db/log/conf)
+
+layout: source | package | installed (auto-detected next to this script)
 EOF
 }
 
@@ -108,6 +174,13 @@ stop_backend() {
 
 start_backend() {
   ensure_runtime_dir
+
+  if [ ! -f "${CONFIG_FILE}" ]; then
+    echo "de: config file not found: ${CONFIG_FILE}" >&2
+    echo "de: copy ${SHARE_DIR}/conf/app.ini.example to ${CONFIG_FILE} and fill api_key" >&2
+    return 1
+  fi
+
   if health_check; then
     echo "backend already running on http://127.0.0.1:${BACKEND_PORT}"
     return 0
@@ -140,15 +213,14 @@ start_backend() {
     --db "${DB_PATH}"
     --port "${A2A_PORT}"
     --web-port "${BACKEND_PORT}"
+    --log-file "${LOG_FILE_ARG:-${LOG_FILE}}"
   )
   if [ -n "${LOG_LEVEL}" ]; then
     backend_args+=(--log-level "${LOG_LEVEL}")
   fi
-  if [ -n "${LOG_FILE_ARG}" ]; then
-    backend_args+=(--log-file "${LOG_FILE_ARG}")
-  fi
+  mkdir -p "${LAUNCH_CWD}"
   (
-    cd "${ROOT_DIR}"
+    cd "${LAUNCH_CWD}"
     nohup "${backend_args[@]}" >>"${CONSOLE_LOG_FILE}" 2>&1 &
     echo $! >"${PID_FILE}"
   )
@@ -288,10 +360,17 @@ case "${ACTION}" in
       exit 1
     fi
 
+    cli_extra=()
+    if [ -f "${CLI_CONFIG_FILE}" ]; then
+      cli_extra+=(--cli-config "${CLI_CONFIG_FILE}")
+    fi
+
     echo "starting CLI (backend http://127.0.0.1:${BACKEND_PORT})..."
     AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
-    "${NODE_BIN}" "${ROOT_DIR}/cli/cli.mjs" \
+    AIAGENT_SHARE_DIR="${SHARE_DIR}" \
+    "${NODE_BIN}" "${CLI_DIR}/cli.mjs" \
       --backend "http://127.0.0.1:${BACKEND_PORT}" \
+      "${cli_extra[@]}" \
       "${CLI_ARGS[@]}"
     cli_status=$?
 

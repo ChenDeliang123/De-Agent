@@ -7,6 +7,8 @@
 //
 // 查找顺序：
 //   --cli-config <file> > $AIAGENT_CLI_CONFIG > ./conf/cli.ini > <repo>/conf/cli.ini
+//   > <data_dir>/conf/cli.ini > $AIAGENT_SHARE_DIR/conf/cli.ini
+// 其中 data_dir 与后端一致（$DE_HOME > $XDG_DATA_HOME/de > ~/.de）。
 // 找不到文件不报错，返回空配置。
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -15,6 +17,21 @@ import { fileURLToPath } from "node:url";
 
 // 本文件位于 cli/src/app/：CLI 包根目录是它的上两级。
 const CLI_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+// 与后端 ResolveAppPaths 保持一致的用户数据目录解析。
+// 无法确定时返回 null，调用方自行回退。
+export function resolveDataDir(env = process.env) {
+  if (typeof env.DE_HOME === "string" && env.DE_HOME.trim() !== "") {
+    return env.DE_HOME.trim();
+  }
+  if (typeof env.XDG_DATA_HOME === "string" && env.XDG_DATA_HOME.trim() !== "") {
+    return join(env.XDG_DATA_HOME.trim(), "de");
+  }
+  if (typeof env.HOME === "string" && env.HOME.trim() !== "") {
+    return join(env.HOME.trim(), ".de");
+  }
+  return null;
+}
 
 export function parseIni(content) {
   const result = {};
@@ -56,6 +73,13 @@ export function resolveCliConfigPath({
     return env.AIAGENT_CLI_CONFIG.trim();
   }
   const candidates = [join(cwd, "conf", "cli.ini"), join(cliDir, "..", "conf", "cli.ini")];
+  const dataDir = resolveDataDir(env);
+  if (dataDir) {
+    candidates.push(join(dataDir, "conf", "cli.ini"));
+  }
+  if (typeof env.AIAGENT_SHARE_DIR === "string" && env.AIAGENT_SHARE_DIR.trim() !== "") {
+    candidates.push(join(env.AIAGENT_SHARE_DIR.trim(), "conf", "cli.ini"));
+  }
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;

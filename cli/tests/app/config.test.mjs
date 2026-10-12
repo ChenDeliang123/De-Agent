@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadCliConfig, parseIni, resolveCliConfigPath, updateCliUiConfig } from "../../src/app/config.mjs";
+import {
+  loadCliConfig,
+  parseIni,
+  resolveCliConfigPath,
+  resolveDataDir,
+  updateCliUiConfig,
+} from "../../src/app/config.mjs";
 
 test("parseIni reads sections, keys and values", () => {
   const ini = parseIni(`
@@ -50,6 +56,40 @@ test("resolveCliConfigPath follows explicit > env > cwd > cli dir", () => {
     assert.equal(
       resolveCliConfigPath({ env: {}, cwd: emptyCwd, cliDir: join(base, "nope", "cli") }),
       null,
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("resolveDataDir follows DE_HOME > XDG_DATA_HOME/de > ~/.de", () => {
+  assert.equal(
+    resolveDataDir({ DE_HOME: "/x/de", XDG_DATA_HOME: "/x/xdg", HOME: "/home/u" }),
+    "/x/de",
+  );
+  assert.equal(
+    resolveDataDir({ XDG_DATA_HOME: "/x/xdg", HOME: "/home/u" }),
+    join("/x/xdg", "de"),
+  );
+  assert.equal(resolveDataDir({ HOME: "/home/u" }), join("/home/u", ".de"));
+  assert.equal(resolveDataDir({}), null);
+});
+
+test("resolveCliConfigPath falls back to <data_dir>/conf/cli.ini", () => {
+  const base = mkdtempSync(join(tmpdir(), "aiagent-cli-config-"));
+  const dataDir = join(base, "data");
+  const emptyCwd = join(base, "empty");
+  try {
+    mkdirSync(join(dataDir, "conf"), { recursive: true });
+    writeFileSync(join(dataDir, "conf", "cli.ini"), "[editor]\n");
+    mkdirSync(emptyCwd, { recursive: true });
+    assert.equal(
+      resolveCliConfigPath({
+        env: { DE_HOME: dataDir },
+        cwd: emptyCwd,
+        cliDir: join(base, "nope", "cli"),
+      }),
+      join(dataDir, "conf", "cli.ini"),
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
