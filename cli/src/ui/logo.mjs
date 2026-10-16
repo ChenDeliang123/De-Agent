@@ -17,33 +17,32 @@
 
 import { clipToWidth, visibleWidth } from "./text.mjs";
 
-// 品牌像素字：'#'=实心像素。每个像素横向渲染 2 列块字符，
-// 宽高由构造保证（d/e 各 5/4 像素宽 × 5 像素高，字形间 2 像素间隔），
-// 行宽严格相等 —— 这是此前手画块字撕裂的根因。
+// 品牌像素字：'#'=实心像素。每个像素横向渲染 2 列块字符。
+// d：右竖干满高（顶端即上伸部 ascender）+ 左圆腹，与 e/a/o 区分的关键；
+// e：顶部横杠 + 中横 + 底部圆腹开口。
+// 两字形均 4 像素宽 × 5 行，行宽由构造保证相等（此前手画块字行宽不一导致撕裂）。
 const PIXEL_D = [
-  "##.#",
-  "#..#",
-  "#..#",
-  "#..#",
-  "###.",
+  ".##.",
+  ".#.#",
+  ".#.#",
+  ".#.#",
+  ".##.",
 ];
 const PIXEL_E = [
-  "####",
+  ".##.",
+  "##..",
+  "##..",
   "#...",
-  "###.",
-  "#...",
-  "####",
+  ".##.",
 ];
 
 // 由像素网格生成块字行（像素 → 2 列块字符，字形间留 2 像素空档）。
+// 行尾补齐到等宽：块字按最大宽度整体居中，参差不齐的左缘正是此前撕裂感的来源。
 function buildWordmark() {
-  const cells = (row, empty) => (row === "#" ? "██" : empty);
-  return PIXEL_D.map(
-    (row, index) =>
-      [...row].map((cell) => cells(cell, "  ")).join("") +
-      "    " +
-      [...PIXEL_E[index]].map((cell) => cells(cell, "  ")).join(""),
-  );
+  const rowToText = (row) => [...row].map((cell) => (cell === "#" ? "██" : "  ")).join("");
+  const rows = PIXEL_D.map((row, index) => rowToText(row) + "    " + rowToText(PIXEL_E[index]));
+  const maxWidth = Math.max(...rows.map((row) => row.length));
+  return rows.map((row) => row.padEnd(maxWidth, " "));
 }
 
 const WORDMARK = buildWordmark();
@@ -151,11 +150,12 @@ export function renderStartupLogo(
   };
 
   if (bigArt) {
-    // 大字模式：逐行渐变上色，块字整体居中。
+    // 大字模式：逐行渐变上色。块字是一个等宽网格 —— 全体按同一缩进居中
+    // （左缘对齐），而不是逐行按自身宽度居中（那会让字形参差）。
     const paint = rgbPainter(t);
-    const artWidth = Math.max(...WORDMARK.map((line) => visibleWidth(line)));
-    const artPad = Math.floor((width - artWidth) / 2);
     const rows = WORDMARK.length;
+    const artWidth = Math.max(...WORDMARK.map((line) => visibleWidth(line)));
+    const artPad = Math.max(0, Math.floor((width - artWidth) / 2));
     WORDMARK.forEach((line, index) => {
       const rgb = gradientRgb(t.palette ?? {}, index / (rows - 1));
       lines.push(" ".repeat(artPad) + paint(rgb, line));
