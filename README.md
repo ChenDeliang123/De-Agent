@@ -191,8 +191,9 @@ sudo dnf remove  de-agent
 `/usr/lib/de/cli`，配置模板在 `/usr/share/de/conf`；**数据仍在 `~/.de`**。
 首次使用 `de init` 生成配置，然后直接 `de`。
 
-- 依赖：后端需 `libcurl4`（由 `dpkg-shlibdeps` 自动分析并与显式依赖合并）；
-  终端客户端需 `nodejs (>= 18)` 与 `curl`；`Recommends: python3`（MCP Python 插件）。
+- 依赖：`Depends` 由 `dpkg-shlibdeps` 自动分析（`libcurl4`、`libc6`、`libstdc++6`…）；
+  `Recommends: nodejs (>= 18), curl, python3`（apt 默认会装；用 nvm 装 node 或发行版
+  自带 node 过旧时不会因硬依赖而拒绝安装）。
 - 出 rpm 需构建机有 `rpm-build`（Debian/Ubuntu：`sudo apt install rpm`）。
 - **发布不需要服务器**：把 `.deb`/`.rpm` 传到 Gitee/GitHub Releases 即可，
   用户 `apt install ./xxx.deb` 下载安装；想要 `apt upgrade` 自动升级再把它们

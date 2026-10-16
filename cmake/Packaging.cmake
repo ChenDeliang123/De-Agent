@@ -43,11 +43,12 @@ set(CPACK_DEBIAN_DEAGENT_PACKAGE_NAME "de-agent")
 set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "de agent maintainers <chen_dl@gitee.com>")
-# 自动分析二进制依赖（libcurl4 / libc6 / libstdc++6 ...），与下面的显式依赖合并。
+# 自动分析二进制依赖（libcurl4 / libc6 / libstdc++6 ...）作为 Depends。
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-# 运行时依赖：后端需 libcurl（SHLIBDEPS 会自动加）；终端客户端需 node >= 18 与 curl。
-set(CPACK_DEBIAN_DEAGENT_PACKAGE_DEPENDS "nodejs (>= 18), curl")
-set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "python3")
+# node/curl/python3 放 Recommends：apt 默认会装，但在用 nvm 装了 node 的机器上
+# （或发行版 nodejs 太旧时）不会因为硬 Depends 而直接拒绝安装。
+set(CPACK_DEBIAN_DEAGENT_PACKAGE_RECOMMENDS
+    "nodejs (>= 18), curl, python3")
 
 # ---------------------------------------------------------------------------
 # RPM（需目标机器安装 rpmbuild；本仓库脚本会在缺失时自动跳过）
@@ -58,8 +59,8 @@ set(CPACK_RPM_DEAGENT_PACKAGE_NAME "de-agent")
 set(CPACK_RPM_PACKAGE_GROUP "Development/Tools")
 # TODO: 选定 LICENSE 后同步这里。
 set(CPACK_RPM_PACKAGE_LICENSE "Proprietary")
-set(CPACK_RPM_PACKAGE_REQUIRES "nodejs >= 18, curl")
-set(CPACK_RPM_PACKAGE_AUTOREQ OFF)
+# 共享库依赖交给 rpm 自动分析（libcurl.so.4 等）；node/curl/python3 放 Recommends。
+set(CPACK_RPM_PACKAGE_RECOMMENDS "nodejs >= 18, curl, python3")
 set(CPACK_RPM_PACKAGE_SUMMARY
     "de agent - C++ coding agent runtime with a zero-dependency terminal client")
 
