@@ -1368,6 +1368,83 @@ void TestTaskToolBackgroundEndToEnd() {
            "background child should converge");
 }
 
+void TestBackgroundNotifyAndAck() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(), Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<ChildModel>(harness, "BG-REPORT", 150);
+                        }),
+            ParentTools());
+
+    std::mutex notify_mutex;
+    std::vector<aiagent::agent::BackgroundNotification> notifications;
+    manager->SetBackgroundNotifyCallback(
+            [&notify_mutex, &notifications](
+                    const aiagent::agent::BackgroundNotification& notification) {
+                std::lock_guard<std::mutex> lock(notify_mutex);
+                notifications.push_back(notification);
+            });
+
+    const auto dispatch = manager->RunBackground(BackgroundRequest("notify me"), 0);
+    Expect(dispatch.ok, "dispatch should succeed");
+    // 未收敛的任务既不算待送出结果，也不能被 ack（不会误吞结果）。
+    Expect(manager->PendingResults().empty(), "running task should not be pending");
+    Expect(manager->AcknowledgeResults({"bg-1"}) == 0, "running task should not be ackable");
+    {
+        std::lock_guard<std::mutex> lock(notify_mutex);
+        Expect(notifications.size() == 1 &&
+                       notifications[0].kind == aiagent::agent::BackgroundNotificationKind::kStarted,
+               "dispatch should notify started exactly once");
+    }
+
+    const auto done = WaitForBackgroundTerminal(manager, "bg-1");
+    Expect(done.has_value() && done->state == aiagent::agent::BackgroundState::kDone,
+           "task should converge");
+    {
+        std::lock_guard<std::mutex> lock(notify_mutex);
+        Expect(notifications.size() == 2 &&
+                       notifications[1].kind == aiagent::agent::BackgroundNotificationKind::kFinished,
+               "convergence should notify finished exactly once");
+        if (notifications.size() == 2) {
+            Expect(notifications[0].task.task_id == "bg-1" &&
+                           notifications[0].task.agent_id == "general#1" &&
+                           notifications[0].task.session_id == "sess-bg" &&
+                           notifications[0].task.state == aiagent::agent::BackgroundState::kRunning,
+                   "started notification should carry the handle with state=running");
+            Expect(notifications[1].task.state == aiagent::agent::BackgroundState::kDone &&
+                           notifications[1].task.result.ok &&
+                           notifications[1].task.result.text == "BG-REPORT",
+                   "finished notification should carry the terminal result");
+        }
+    }
+
+    // 待送出结果：ack 前可见，按 bg-N 或 agent_id 都能核销，且只核销一次。
+    const auto pending = manager->PendingResults();
+    Expect(pending.size() == 1 && pending[0].task_id == "bg-1" &&
+                   pending[0].result.text == "BG-REPORT",
+           "converged result should be pending until acked");
+    Expect(manager->AcknowledgeResults({"bg-1", "bg-1", "bg-999"}) == 1,
+           "ack should count only the first hit of a known result");
+    Expect(manager->PendingResults().empty(), "acked result should leave the pending list");
+    Expect(manager->AcknowledgeResults({"general#1"}) == 0,
+           "already-acked result should not be counted again");
+
+    // 回调抛异常：任务仍正常收敛（通知失败不拖垮 worker）。
+    manager->SetBackgroundNotifyCallback(
+            [](const aiagent::agent::BackgroundNotification&) {
+                throw std::runtime_error("notify boom");
+            });
+    const auto third = manager->RunBackground(BackgroundRequest("boom notify"), 0);
+    Expect(third.ok, "dispatch should still succeed with a throwing callback");
+    const auto third_done = WaitForBackgroundTerminal(manager, third.task_id);
+    Expect(third_done.has_value() &&
+                   third_done->state == aiagent::agent::BackgroundState::kDone,
+           "throwing callback must not break convergence or the result table");
+}
+
 // ---------------------------------------------------------------------------
 // 后台任务（M4a）
 // ---------------------------------------------------------------------------
@@ -1801,6 +1878,7 @@ int main() {
     TestTaskToolBackgroundDispatch();
     TestTaskToolBackgroundErrors();
     TestTaskToolBackgroundEndToEnd();
+    TestBackgroundNotifyAndAck();
     TestBackgroundDispatchAndPoll();
     TestBackgroundTerminalStates();
     TestBackgroundStop();

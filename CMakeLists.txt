@@ -110,9 +110,11 @@ add_library(aiagent_agent STATIC
   src/app_paths.cpp
   src/agent/agent_runtime.cpp
   src/agent/approval_broker.cpp
+  src/agent/background_delivery.cpp
   src/agent/compaction.cpp
   src/agent/history_cache.cpp
   src/agent/project_instructions.cpp
+  src/agent/session_history.cpp
   src/agent/session_meta_store.cpp
   src/agent/sub_agent.cpp
   src/agent/system_prompt.cpp
@@ -301,6 +303,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(sub_agent_test tests/sub_agent_test.cpp)
   target_link_libraries(sub_agent_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_sub_agent COMMAND sub_agent_test)
+
+  add_executable(background_delivery_test tests/background_delivery_test.cpp)
+  target_link_libraries(background_delivery_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_background_delivery COMMAND background_delivery_test)
 
   add_executable(fake_mcp_server tests/fake_mcp_server.cpp)
   target_link_libraries(fake_mcp_server PRIVATE aiagent_llm a2a::a2a)

@@ -37,6 +37,8 @@
 #include "aiagent/agent/approval_broker.hpp"
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/agent/project_instructions.hpp"
+#include "aiagent/agent/background_delivery.hpp"
+#include "aiagent/agent/session_history.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/agent/sub_agent.hpp"
 #include "aiagent/agent/system_prompt.hpp"
@@ -146,36 +148,58 @@ AppOptions ParseOptions(int argc, char** argv) {
     return options;
 }
 
-// 缓存优先地取某个会话的最新历史；缓存未命中时回退存储层。
-// 选取写入时间最新的任务：手动/自动压缩会写入更短的历史，比较条数会选错。
-std::vector<a2a::models::Message> LoadLatestHistory(
-        aiagent::agent::HistoryCache& cache, a2a::server::ITaskStore& store,
-        const std::string& context_id) {
-    std::vector<a2a::models::Message> history;
-    if (context_id.empty()) {
-        return history;
+// 缓存优先地取某个会话的最新历史（见 session_history.hpp）。
+using aiagent::agent::LoadLatestHistory;
+
+// 进程退出守卫：后台任务的 worker 是 detach 的，可能在 main 的局部对象析构之后才收敛
+// 并回调（推送/注入）。这里保证「标记退出」与「回调执行」互斥：退出后的回调直接返回，
+// 不再触碰已析构的局部对象；进行中的回调会让退出方等它跑完。
+class BackgroundCallbackGate {
+public:
+    struct State {
+        std::mutex mutex;
+        bool alive = true;
+    };
+
+    std::shared_ptr<State> state() const { return state_; }
+
+    void Close() {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->alive = false;
     }
-    if (cache.TryGet(context_id, history)) {
-        return history;
-    }
-    std::optional<a2a::core::TimePoint> latest_time;
-    for (const auto& task : store.ListAll()) {
-        if (task.context_id != context_id || task.history.empty()) {
+
+private:
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+};
+
+// 后台任务快照 → 网关结构；session_id 非空时只保留该会话的任务。
+std::vector<aiagent::web::BackgroundTaskInfo> ToBackgroundInfos(
+        const std::vector<aiagent::agent::BackgroundTaskSnapshot>& snapshots,
+        const std::string& session_id) {
+    std::vector<aiagent::web::BackgroundTaskInfo> infos;
+    for (const auto& snapshot : snapshots) {
+        if (!session_id.empty() && snapshot.session_id != session_id) {
             continue;
         }
-        if (latest_time.has_value()) {
-            if (!task.status.timestamp.has_value() ||
-                !(*task.status.timestamp > *latest_time)) {
-                continue;
-            }
-        }
-        history = task.history;
-        latest_time = task.status.timestamp;
+        aiagent::web::BackgroundTaskInfo info;
+        info.task_id = snapshot.task_id;
+        info.agent_id = snapshot.agent_id;
+        info.agent_type = snapshot.agent_type;
+        info.session_id = snapshot.session_id;
+        info.state = aiagent::agent::BackgroundStateName(snapshot.state);
+        info.elapsed_ms = snapshot.elapsed_ms;
+        info.prompt_excerpt = snapshot.prompt_excerpt;
+        info.ok = snapshot.result.ok;
+        info.duration_ms = snapshot.result.duration_ms;
+        info.tool_calls = snapshot.result.tool_calls;
+        info.prompt_tokens = snapshot.result.prompt_tokens;
+        info.completion_tokens = snapshot.result.completion_tokens;
+        info.cache_hit_tokens = snapshot.result.cache_hit_tokens;
+        info.text = snapshot.result.text;
+        info.error = snapshot.result.error;
+        infos.push_back(std::move(info));
     }
-    if (!history.empty()) {
-        cache.Put(context_id, history);
-    }
-    return history;
+    return infos;
 }
 
 // 从历史中取首条 user 文本作为标题，UTF-8 安全截断（最多 48 字节）。
@@ -435,6 +459,9 @@ int main(int argc, char** argv) {
                 });
         // 会话最新历史内存缓存：避免每次请求 ListAll() 全表扫描（长会话 O(n²)）。
         aiagent::agent::HistoryCache history_cache;
+        // 后台结果 → 会话历史注入（规划 §3.3 路径 2）：回合内先排队，下回合开始补写。
+        aiagent::agent::BackgroundResultInjector background_injector(*task_store, history_cache);
+        BackgroundCallbackGate background_gate;
 
         // 内置 coding 工具（read/write/edit/bash）+ 可选的 MCP 工具，合并为一个 provider。
         // 文件工具的路径范围与能力由「权限模式」逐请求决定（见 permissions 模块）。
@@ -685,7 +712,7 @@ int main(int argc, char** argv) {
                     agents_config, agent_definitions,
                     [parent_model_config, permission_store, permission_settings, bash_policy,
                      project_config_cache, trust_store, compaction_settings,
-                     fallback_working_directory, approval_broker,
+                     fallback_working_directory, approval_broker, &background_injector,
                      timeout = permissions_config.approval_timeout_seconds](
                             const aiagent::agent::SubAgentManager::ChildRuntimeSpec& spec)
                             -> std::shared_ptr<aiagent::agent::AgentRuntime> {
@@ -723,11 +750,22 @@ int main(int argc, char** argv) {
                         child_runtime->SetApprovalHandler(
                                 [approval_broker, timeout,
                                  parent_session = spec.parent_session_id,
-                                 prefix = spec.tool_id_prefix](
+                                 prefix = spec.tool_id_prefix, &background_injector](
                                         const aiagent::agent::ApprovalRequest& request) {
                                     const std::string session =
                                             parent_session.empty() ? request.context_id
                                                                    : parent_session;
+                                    // 回合外审批（后台任务在父回合结束后才请求审批）：
+                                    // 立即拒绝并记录，避免 120s 悬挂（规划 §9 决策 ②）。
+                                    if (!session.empty() &&
+                                        !background_injector.TurnActive(session)) {
+                                        aiagent::DefaultLogger().Log(
+                                                aiagent::LogLevel::kWarning, "sub_agent",
+                                                "event=approval_denied_out_of_turn session=" +
+                                                        session +
+                                                        " tool=" + request.tool_name);
+                                        return aiagent::agent::ApprovalDecision::kDeny;
+                                    }
                                     return approval_broker->Wait(
                                             session, prefix + request.tool_call_id,
                                             std::chrono::seconds(timeout));
@@ -744,7 +782,8 @@ int main(int argc, char** argv) {
                 agents_info += " none [prompts missing]";
             }
             agents_info += " (depth=" + std::to_string(agents_config.max_depth) +
-                           ", concurrent=" + std::to_string(agents_config.max_concurrent) + ")";
+                           ", concurrent=" + std::to_string(agents_config.max_concurrent) +
+                           ", background=" + std::to_string(agents_config.max_background) + ")";
             if (agents_config.max_depth > 0 && agent_manager->Enabled()) {
                 tools->Add(aiagent::tools::MakeSubAgentToolProvider(agent_manager, 0));
                 // 只有 task 工具真的注册成功，才在系统消息里注入派发准则。
@@ -760,9 +799,11 @@ int main(int argc, char** argv) {
 
         agent_server.task_manager().SetMessageHandler(
                 [&](const a2a::models::SendMessageRequest& request) {
+                    // 回合边界：先补写上一回合期间排队的后台结果，再读历史。
+                    const auto session = request.message.context_id;
+                    const auto turn = aiagent::agent::BackgroundTurnGuard(&background_injector, session);
                     std::vector<a2a::models::Message> history =
-                            LoadLatestHistory(history_cache, *task_store,
-                                              request.message.context_id);
+                            LoadLatestHistory(&history_cache, *task_store, session);
                     history.push_back(request.message);
                     auto response = runtime.HandleMessage(
                             request.message, history, request.message.context_id);
@@ -777,12 +818,14 @@ int main(int argc, char** argv) {
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
         web_gateway.SetHistoryCache(&history_cache);
         // 子 Agent 快照（GET /api/v1/agents）：定义 + 累计统计；未启用时 enabled=false。
-        web_gateway.SetAgentsInfoHandler([agent_manager, agents_config]() {
+        web_gateway.SetAgentsInfoHandler([agent_manager, agents_config](
+                                                          const std::string& session_id) {
             aiagent::web::SubAgentSnapshot snapshot;
             snapshot.enabled = agent_manager != nullptr && agent_manager->Enabled() &&
                                agents_config.max_depth > 0;
             snapshot.max_depth = agents_config.max_depth;
             snapshot.max_concurrent = agents_config.max_concurrent;
+            snapshot.max_background = agents_config.max_background;
             if (agent_manager != nullptr) {
                 for (const auto& definition : agent_manager->Definitions()) {
                     aiagent::web::SubAgentInfo info;
@@ -800,9 +843,39 @@ int main(int argc, char** argv) {
                 snapshot.prompt_tokens = stats.prompt_tokens;
                 snapshot.completion_tokens = stats.completion_tokens;
                 snapshot.cache_hit_tokens = stats.cache_hit_tokens;
+                snapshot.running = ToBackgroundInfos(agent_manager->RunningSnapshot(), session_id);
+                snapshot.pending_results =
+                        ToBackgroundInfos(agent_manager->PendingResults(), session_id);
             }
             return snapshot;
         });
+        // 后台任务控制：停止（:id 为 bg-N 或 agent_id）与结果回执（ack）。
+        web_gateway.SetBackgroundStopHandler(
+                [agent_manager](const std::string& id, bool* requested, std::string* message) {
+                    if (agent_manager == nullptr) {
+                        if (message != nullptr) {
+                            *message = "sub-agents are not enabled";
+                        }
+                        return false;
+                    }
+                    const aiagent::agent::BackgroundStopOutcome outcome =
+                            agent_manager->Stop(id, message);
+                    if (outcome == aiagent::agent::BackgroundStopOutcome::kNotFound) {
+                        return false;
+                    }
+                    if (requested != nullptr) {
+                        *requested =
+                                outcome == aiagent::agent::BackgroundStopOutcome::kRequested;
+                    }
+                    return true;
+                });
+        web_gateway.SetBackgroundAckHandler(
+                [agent_manager](const std::vector<std::string>& task_ids) -> std::size_t {
+                    if (agent_manager == nullptr) {
+                        return 0;
+                    }
+                    return agent_manager->AcknowledgeResults(task_ids);
+                });
         // 手动压缩：压缩后把更短的历史作为新任务落库，并刷新缓存。
         web_gateway.SetCompactHandler(
                 [&](const std::string& session_id, const std::string& cwd,
@@ -815,7 +888,7 @@ int main(int argc, char** argv) {
                         session_meta.SetCwd(session_id, effective_cwd);
                     }
                     std::vector<a2a::models::Message> history =
-                            LoadLatestHistory(history_cache, *task_store, session_id);
+                            LoadLatestHistory(&history_cache, *task_store, session_id);
                     if (history.empty()) {
                         if (error != nullptr) {
                             *error = "session not found";
@@ -921,7 +994,7 @@ int main(int argc, char** argv) {
                 [&](const std::string& source_id, std::string* new_id,
                     std::string* error) {
                     std::vector<a2a::models::Message> history =
-                            LoadLatestHistory(history_cache, *task_store, source_id);
+                            LoadLatestHistory(&history_cache, *task_store, source_id);
                     if (history.empty()) {
                         if (error != nullptr) {
                             *error = "session not found";
@@ -1155,9 +1228,70 @@ int main(int argc, char** argv) {
                     }
                     return approval_broker->Resolve(session_id, tool_call_id, parsed);
                 });
-        web_gateway.SetCancelObserver([approval_broker](const std::string& session_id) {
-            approval_broker->CancelSession(session_id);
-        });
+        web_gateway.SetCancelObserver(
+                [approval_broker, &agent_manager](const std::string& session_id) {
+                    approval_broker->CancelSession(session_id);
+                    // 会话取消 → 该会话的后台任务一并取消（规划 §3.4）。
+                    if (agent_manager == nullptr) {
+                        return;
+                    }
+                    for (const auto& task : agent_manager->RunningSnapshot()) {
+                        if (task.session_id != session_id) {
+                            continue;
+                        }
+                        std::string message;
+                        agent_manager->Stop(task.task_id, &message);
+                    }
+                });
+
+        // 后台任务的推送与送达（规划 §3.3 路径 2/3）：派发/结果帧推给该会话的活跃
+        // SSE 流（无流则丢弃，CLI 轮询兜底），收敛结果注入父会话历史。
+        if (agent_manager != nullptr) {
+            agent_manager->SetBackgroundNotifyCallback(
+                    [&web_gateway, &background_injector, gate = background_gate.state()](
+                            const aiagent::agent::BackgroundNotification& notification) {
+                        std::lock_guard<std::mutex> lock(gate->mutex);
+                        if (!gate->alive) {
+                            return;  // main 正在退出：不再触碰已析构的局部对象
+                        }
+                        const aiagent::agent::BackgroundTaskSnapshot& task = notification.task;
+                        if (task.session_id.empty()) {
+                            aiagent::DefaultLogger().Log(
+                                    aiagent::LogLevel::kWarning, "main",
+                                    "event=background_no_session task_id=" + task.task_id);
+                            return;
+                        }
+                        if (notification.kind ==
+                            aiagent::agent::BackgroundNotificationKind::kStarted) {
+                            web_gateway.PublishSessionEvent(
+                                    task.session_id, "subagent_start",
+                                    {{"agent_id", task.agent_id},
+                                     {"task_id", task.task_id},
+                                     {"background", true}});
+                            return;
+                        }
+                        web_gateway.PublishSessionEvent(
+                                task.session_id, "subagent_result",
+                                {{"task_id", task.task_id},
+                                 {"agent_id", task.agent_id},
+                                 {"agent_type", task.agent_type},
+                                 {"state", aiagent::agent::BackgroundStateName(task.state)},
+                                 {"ok", task.result.ok},
+                                 {"duration_ms", task.result.duration_ms},
+                                 {"tool_calls", task.result.tool_calls},
+                                 {"prompt_tokens", task.result.prompt_tokens},
+                                 {"completion_tokens", task.result.completion_tokens},
+                                 {"cache_hit_tokens", task.result.cache_hit_tokens},
+                                 {"headline",
+                                  aiagent::agent::BackgroundResultInjector::FormatHeadline(task)},
+                                 {"text", task.result.text}});
+                        if (!background_injector.Deliver(task)) {
+                            aiagent::DefaultLogger().Log(
+                                    aiagent::LogLevel::kWarning, "main",
+                                    "event=background_inject_skipped task_id=" + task.task_id);
+                        }
+                    });
+        }
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,
@@ -1167,8 +1301,11 @@ int main(int argc, char** argv) {
                     if (!cwd.empty()) {
                         session_meta.SetCwd(session_id, cwd);
                     }
+                    // 回合边界：先补写上一回合期间排队的后台结果，再读历史。
+                    const auto turn =
+                            aiagent::agent::BackgroundTurnGuard(&background_injector, session_id);
                     std::vector<a2a::models::Message> history =
-                            LoadLatestHistory(history_cache, *task_store, session_id);
+                            LoadLatestHistory(&history_cache, *task_store, session_id);
 
                     a2a::models::Message user = a2a::models::MakeTextMessage(
                             a2a::models::Role::kUser, content, "text/plain");
@@ -1214,8 +1351,14 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
+        // 退出前确定性收敛：取消后台任务并等待结果写入（有界 5s，超时只告警）。
+        if (agent_manager != nullptr) {
+            agent_manager->ShutdownBackground();
+        }
         http_server.Stop();
         web_gateway.Stop();
+        // 关闭回调闸门：此后任何 detach worker 的收敛回调都不再触碰上面的局部对象。
+        background_gate.Close();
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "aiagent_app failed: " << e.what() << '\n';

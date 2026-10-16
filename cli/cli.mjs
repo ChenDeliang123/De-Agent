@@ -7,9 +7,11 @@ import { TranscriptRenderer } from "./src/ui/renderer.mjs";
 import { BottomRegion } from "./src/ui/bottom.mjs";
 import { log } from "./src/app/logger.mjs";
 import {
+  ackAgentResults,
   approveChat,
   cancelChat,
   effectivePermission,
+  getAgents,
   getProjectPermission,
   listSessions,
   loadHistory,
@@ -42,6 +44,8 @@ const renderer = new TranscriptRenderer(output, { styler: uiStyler, region });
 let activeAbortController = null;
 // 审批提示期间暂停全局 Esc/Ctrl+C 中断，避免与审批输入争抢按键。
 let approvalPending = false;
+// 后台子 Agent 结果的回合内轮询间隔；回合外还会在每轮输入前与回合结束各补一次。
+const BACKGROUND_POLL_INTERVAL_MS = 4000;
 
 if (input.isTTY) {
   input.on("keypress", (_text, key) => {
@@ -142,6 +146,8 @@ async function handleLine(ctx, answer) {
     return;
   }
   ctx.state.sessionId = await sendMessage(ctx, trimmed);
+  // 回合结束后补打：本轮新完成的后台任务结果（回合外轮询挂点之一）。
+  await pollBackgroundResults(ctx, ctx.state.sessionId);
   if (ctx.state.pendingName) {
     try {
       await renameSession(ctx.backend, ctx.state.sessionId, ctx.state.pendingName);
@@ -167,6 +173,16 @@ async function sendMessage(ctx, text) {
   renderer.startReply();
   const controller = new AbortController();
   activeAbortController = controller;
+  // 回合内周期轮询后台任务：首回合 state.sessionId 还是 null，必须用本次请求 id。
+  // 审批提示期间跳过（region 处于挂起态，补打会踩坏交互提示）。
+  // unref：定时器不阻止进程退出；finally 里清理。
+  const backgroundTimer = setInterval(() => {
+    if (approvalPending) {
+      return;
+    }
+    pollBackgroundResults(ctx, requestSessionId);
+  }, BACKGROUND_POLL_INTERVAL_MS);
+  backgroundTimer.unref?.();
   const canSetRaw = input.isTTY && typeof input.setRawMode === "function";
   const wasRaw = canSetRaw ? input.isRaw === true : false;
   if (canSetRaw) {
@@ -198,6 +214,14 @@ async function sendMessage(ctx, text) {
           renderer.toolEnd(Boolean(data.ok), data.text ?? "", agentId);
         } else if (event === "subagent_start") {
           renderer.subagentStart(data);
+        } else if (event === "subagent_result") {
+          // 后台任务完成（回合内到达）：生命周期行 + 报告摘要。
+          // 已打印就立刻回执，否则回合结束后的轮询会把同一条再补打一次；
+          // 帧丢失（写失败）时不会回执，轮询补打即自愈。
+          renderer.subagentResult(data);
+          if (data?.task_id) {
+            ackAgentResults(ctx.backend, [String(data.task_id)]).catch(() => {});
+          }
         } else if (event === "subagent_end") {
           renderer.subagentEnd(data);
         } else if (event === "compaction") {
@@ -231,12 +255,46 @@ async function sendMessage(ctx, text) {
     log("error", "cli", `event=stream_error message=${error.message}`);
     return requestSessionId;
   } finally {
+    clearInterval(backgroundTimer);
     if (activeAbortController === controller) {
       activeAbortController = null;
     }
     if (canSetRaw) {
       input.setRawMode(wasRaw);
     }
+  }
+}
+
+// 补打后台子 Agent 的结果（回合内轮询 / 回合结束 / 每轮输入前共用）：
+// GET agents?session_id → 逐条渲染 pending_results → ack，避免被反复补打。
+// 防重入：同一时刻只允许一个轮询；单次失败只打印一行错误，不抛穿主循环。
+// sessionId 为空（新会话尚未发出第一条消息）时直接跳过，不打扰后端。
+async function pollBackgroundResults(ctx, sessionId) {
+  if (!sessionId || ctx.state.backgroundPollInFlight) {
+    return;
+  }
+  ctx.state.backgroundPollInFlight = true;
+  try {
+    const info = await getAgents(ctx.backend, sessionId);
+    const pending = Array.isArray(info?.pending_results) ? info.pending_results : [];
+    if (pending.length === 0) {
+      return;
+    }
+    const taskIds = [];
+    for (const item of pending) {
+      renderer.subagentResult(item);
+      if (item?.task_id) {
+        taskIds.push(String(item.task_id));
+      }
+    }
+    if (taskIds.length > 0) {
+      await ackAgentResults(ctx.backend, taskIds);
+    }
+  } catch (error) {
+    ctx.print(`background results failed: ${error.message}`);
+  } finally {
+    // 失败也要复位，避免一次网络抖动让轮询永久停摆。
+    ctx.state.backgroundPollInFlight = false;
   }
 }
 
@@ -538,6 +596,8 @@ async function main() {
       while (!state.shouldExit) {
         // 每轮输入前刷新状态行：会话 id / 权限模式 / cwd 可能已被上一条命令改掉。
         updateFooter();
+        // 下一次渲染前，先把后台子 Agent 的迟到结果补打出来。
+        await pollBackgroundResults(ctx, state.sessionId);
         const result = await editor.readLine(PROMPT_LABEL);
         if (result.exit) {
           break;
@@ -547,6 +607,7 @@ async function main() {
     } else {
       const lines = readlinePromises.createInterface({ input, terminal: false });
       for await (const line of lines) {
+        await pollBackgroundResults(ctx, state.sessionId);
         await handleLine(ctx, line);
         if (state.shouldExit) {
           break;

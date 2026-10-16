@@ -3,14 +3,17 @@ import http from "node:http";
 import test from "node:test";
 
 import {
+  ackAgentResults,
   approveChat,
   cancelChat,
   compactSession,
+  getAgents,
   getProjectPermission,
   initProjectPermissions,
   listSessions,
   loadHistory,
   setTrust,
+  stopAgent,
   streamChat,
 } from "../../src/app/session.mjs";
 
@@ -282,6 +285,120 @@ test("cli session client reads project permission, sets trust, and inits", async
       path: "/tmp/proj",
       seed_from_global: true,
     });
+  } finally {
+    await close(backend);
+  }
+});
+
+test("cli session client lists, stops, and acks background agents", async () => {
+  const requests = [];
+  const PENDING = {
+    task_id: "bg-4",
+    agent_id: "explorer#8",
+    agent_type: "explorer",
+    session_id: "s1",
+    state: "done",
+    ok: true,
+    duration_ms: 1000,
+    tool_calls: 1,
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    cache_hit_tokens: 0,
+    text: "report",
+    error: null,
+  };
+  const backend = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ method: request.method, url: request.url, body });
+      const send = (status, payload) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(payload));
+      };
+      if (request.url === "/api/v1/agents" && request.method === "GET") {
+        return send(200, { enabled: true, max_background: 2, running: [], pending_results: [] });
+      }
+      if (request.url === "/api/v1/agents?session_id=s1" && request.method === "GET") {
+        return send(200, {
+          enabled: true,
+          max_background: 2,
+          running: [
+            {
+              task_id: "bg-3",
+              agent_id: "explorer#7",
+              agent_type: "explorer",
+              session_id: "s1",
+              state: "running",
+              elapsed_ms: 12300,
+              prompt_excerpt: "scan cli",
+            },
+          ],
+          pending_results: [PENDING],
+        });
+      }
+      if (request.url === "/api/v1/agents?session_id=boom" && request.method === "GET") {
+        return send(500, {});
+      }
+      if (request.url === "/api/v1/agents/bg-3/stop" && request.method === "POST") {
+        return send(200, { result: "requested", message: "stopping bg-3 (explorer#7)" });
+      }
+      if (request.url === "/api/v1/agents/bg-9/stop" && request.method === "POST") {
+        return send(404, { error: "unknown background task: bg-9" });
+      }
+      if (request.url === "/api/v1/agents/bg-500/stop" && request.method === "POST") {
+        return send(500, {});
+      }
+      if (request.url === "/api/v1/agents/ack" && request.method === "POST") {
+        const payload = JSON.parse(body || "{}");
+        if (payload.task_ids?.[0] === "bg-500") {
+          return send(500, {});
+        }
+        return send(200, { acked: payload.task_ids?.length ?? 0 });
+      }
+      return send(500, { error: `unexpected ${request.method} ${request.url}` });
+    });
+  });
+
+  const port = await listen(backend);
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    // 无 session_id：只打 /api/v1/agents，后端返回全部会话。
+    const all = await getAgents(base);
+    assert.equal(requests[0].method, "GET");
+    assert.equal(requests[0].url, "/api/v1/agents");
+    assert.equal(all.enabled, true);
+    assert.equal(all.max_background, 2);
+
+    // 带 session_id：query 只含该会话的运行中/待补打任务。
+    const scoped = await getAgents(base, "s1");
+    assert.equal(requests[1].url, "/api/v1/agents?session_id=s1");
+    assert.equal(scoped.running[0].task_id, "bg-3");
+    assert.deepEqual(scoped.pending_results, [PENDING]);
+
+    await assert.rejects(getAgents(base, "boom"), /failed to load agents: HTTP 500/);
+
+    const stop = await stopAgent(base, "bg-3");
+    assert.deepEqual(stop, { result: "requested", message: "stopping bg-3 (explorer#7)" });
+    assert.equal(requests[3].method, "POST");
+    assert.equal(requests[3].url, "/api/v1/agents/bg-3/stop");
+    assert.deepEqual(JSON.parse(requests[3].body), {});
+
+    // 404 的 body.error 原样透出；500 无 error 时退回状态码文案。
+    await assert.rejects(stopAgent(base, "bg-9"), /unknown background task: bg-9/);
+    await assert.rejects(stopAgent(base, "bg-500"), /stop agent failed: HTTP 500/);
+
+    // agent_id 形态（含 `#`）必须转义，否则 URL 会被截断。
+    await assert.rejects(stopAgent(base, "explorer#7"), /unexpected POST/);
+    assert.equal(requests[6].url, "/api/v1/agents/explorer%237/stop");
+
+    const ack = await ackAgentResults(base, ["bg-3", "bg-4"]);
+    assert.deepEqual(ack, { acked: 2 });
+    assert.equal(requests[7].method, "POST");
+    assert.equal(requests[7].url, "/api/v1/agents/ack");
+    assert.deepEqual(JSON.parse(requests[7].body), { task_ids: ["bg-3", "bg-4"] });
+    await assert.rejects(ackAgentResults(base, ["bg-500"]), /ack agents failed: HTTP 500/);
   } finally {
     await close(backend);
   }

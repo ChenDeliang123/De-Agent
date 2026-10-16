@@ -331,11 +331,33 @@ int main() {
         Expect(nlohmann::json::parse(agents_off.body).value("enabled", true) == false,
                "agents endpoint should report enabled=false without a handler");
 
-        gateway.SetAgentsInfoHandler([]() {
+        std::vector<std::string> agents_sessions;
+        gateway.SetAgentsInfoHandler([&agents_sessions](const std::string& session_id) {
+            agents_sessions.push_back(session_id);
             aiagent::web::SubAgentSnapshot snapshot;
             snapshot.enabled = true;
             snapshot.max_depth = 1;
             snapshot.max_concurrent = 3;
+            snapshot.max_background = 2;
+            aiagent::web::BackgroundTaskInfo running;
+            running.task_id = "bg-3";
+            running.agent_id = "explorer#7";
+            running.agent_type = "explorer";
+            running.session_id = "sess-bg";
+            running.state = "running";
+            running.elapsed_ms = 42100;
+            running.prompt_excerpt = "investigate the widget";
+            snapshot.running.push_back(running);
+            aiagent::web::BackgroundTaskInfo pending;
+            pending.task_id = "bg-2";
+            pending.agent_id = "general#1";
+            pending.session_id = "sess-bg";
+            pending.state = "done";
+            pending.ok = true;
+            pending.duration_ms = 3900;
+            pending.tool_calls = 2;
+            pending.text = "REPORT";
+            snapshot.pending_results.push_back(pending);
             snapshot.runs = 2;
             snapshot.failures = 1;
             snapshot.cancelled = 0;
@@ -368,6 +390,24 @@ int main() {
                        agents_json["definitions"][0].value("name", std::string()) ==
                                "explorer",
                "agents endpoint should list the definitions");
+        Expect(agents_json.value("max_background", -1) == 2,
+               "agents endpoint should report the background limit");
+        Expect(agents_json["running"].size() == 1 &&
+                       agents_json["running"][0].value("task_id", std::string()) == "bg-3" &&
+                       agents_json["running"][0].value("state", std::string()) == "running" &&
+                       agents_json["running"][0].value("elapsed_ms", 0L) == 42100 &&
+                       agents_json["running"][0].value("prompt_excerpt", std::string()) ==
+                               "investigate the widget",
+               "agents endpoint should list running background tasks");
+        Expect(agents_json["pending_results"].size() == 1 &&
+                       agents_json["pending_results"][0].value("task_id", std::string()) == "bg-2" &&
+                       agents_json["pending_results"][0].value("text", std::string()) == "REPORT" &&
+                       agents_json["pending_results"][0].value("ok", false),
+               "agents endpoint should list unprinted background results");
+        // session_id 查询参数原样透传给装配方（过滤在 main 侧做）。
+        Expect(http.Get(base + "/api/v1/agents?session_id=sess-bg").IsSuccess() &&
+                       !agents_sessions.empty() && agents_sessions.back() == "sess-bg",
+               "agents endpoint should pass session_id through");
 
         std::string compact_cwd;
         gateway.SetCompactHandler(
@@ -674,6 +714,114 @@ int main() {
         Expect(http.Get(base + "/api/v1/sessions/" + session_id + "/stats").status_code ==
                        404,
                "deleted session stats should return 404");
+
+        // 后台任务控制接口：未注入 handler → 501；注入后按契约返回。
+        const auto stop_unset =
+                http.Post(base + "/api/v1/agents/bg-1/stop", "{}", "application/json");
+        Expect(stop_unset.status_code == 501, "stop should be 501 without a handler");
+        const auto ack_unset = http.Post(base + "/api/v1/agents/ack",
+                                        R"({"task_ids":["bg-1"]})", "application/json");
+        Expect(ack_unset.status_code == 501, "ack should be 501 without a handler");
+
+        std::vector<std::string> stopped_ids;
+        std::vector<std::vector<std::string>> acked_batches;
+        gateway.SetBackgroundStopHandler([&stopped_ids](const std::string& id, bool* requested,
+                                                        std::string* message) {
+            if (id == "bg-9") {
+                if (message != nullptr) {
+                    *message = "unknown background task: bg-9";
+                }
+                return false;
+            }
+            stopped_ids.push_back(id);
+            const bool finished = id == "bg-2";
+            if (requested != nullptr) {
+                *requested = !finished;
+            }
+            if (message != nullptr) {
+                *message = finished ? "bg-2 already finished (done)"
+                                    : "stopping " + id + " (explorer#7)";
+            }
+            return true;
+        });
+        gateway.SetBackgroundAckHandler(
+                [&acked_batches](const std::vector<std::string>& ids) -> std::size_t {
+                    acked_batches.push_back(ids);
+                    return ids.size();
+                });
+
+        const auto stop_requested =
+                http.Post(base + "/api/v1/agents/bg-1/stop", "{}", "application/json");
+        Expect(stop_requested.IsSuccess() &&
+                       nlohmann::json::parse(stop_requested.body).value("result", std::string()) ==
+                               "requested",
+               "stop should report requested for a running task, got: " + stop_requested.body);
+        const auto stop_finished =
+                http.Post(base + "/api/v1/agents/bg-2/stop", "{}", "application/json");
+        Expect(stop_finished.IsSuccess() &&
+                       nlohmann::json::parse(stop_finished.body).value("result", std::string()) ==
+                               "finished",
+               "stop should report an already finished task, got: " + stop_finished.body);
+        const auto stop_by_agent = http.Post(
+                base + "/api/v1/agents/explorer%237/stop", "{}", "application/json");
+        Expect(stop_by_agent.IsSuccess() && stopped_ids.size() == 3 &&
+                       stopped_ids.back() == "explorer#7",
+               "stop should accept the agent id form, got: " + stop_by_agent.body);
+        const auto stop_unknown =
+                http.Post(base + "/api/v1/agents/bg-9/stop", "{}", "application/json");
+        Expect(stop_unknown.status_code == 404 &&
+                       nlohmann::json::parse(stop_unknown.body)
+                                       .value("error", std::string())
+                                       .find("bg-9") != std::string::npos,
+               "unknown task should return 404, got: " + stop_unknown.body);
+
+        const auto ack = http.Post(base + "/api/v1/agents/ack",
+                                   R"({"task_ids":["bg-1","bg-2"]})", "application/json");
+        Expect(ack.IsSuccess() && nlohmann::json::parse(ack.body).value("acked", 0) == 2 &&
+                       acked_batches.size() == 1 && acked_batches[0].size() == 2,
+               "ack should pass the ids through and report the count, got: " + ack.body);
+        const auto ack_bad =
+                http.Post(base + "/api/v1/agents/ack", "{not json", "application/json");
+        Expect(ack_bad.status_code == 400, "invalid ack body should be rejected");
+
+        // 回合外事件推送：活跃流内到达的帧按序补发；无活跃流时静默丢弃。
+        gateway.SetStreamEventHandler(
+                [&gateway](const std::string& session_id, const std::string&,
+                           const std::string&,
+                           const aiagent::agent::AgentEventCallback& on_event,
+                           const aiagent::web::WebGateway::CancelCallback&) {
+                    aiagent::agent::AgentEvent token;
+                    token.kind = aiagent::agent::AgentEventKind::kToken;
+                    token.content = "先";
+                    on_event(token);
+                    gateway.PublishSessionEvent(session_id, "subagent_result",
+                                                {{"task_id", "bg-3"},
+                                                 {"agent_id", "explorer#7"},
+                                                 {"ok", true}});
+                });
+        std::string queued_body;
+        const auto queued = http.PostStream(
+                base + "/api/v1/chat/stream",
+                R"({"session_id":"sess-queue","message":"queue-me"})", "application/json",
+                [&queued_body](std::string_view chunk) {
+                    queued_body.append(chunk.data(), chunk.size());
+                });
+        Expect(queued.IsSuccess(), "stream with a published background frame should succeed");
+        const auto queued_frames = ParseSseFrames(queued_body);
+        const auto* result_frame = FindFrame(queued_frames, "subagent_result");
+        Expect(result_frame != nullptr &&
+                       result_frame->data.value("task_id", std::string()) == "bg-3" &&
+                       result_frame->data.value("ok", false),
+               "published frame should reach the active stream, body: " + queued_body);
+        const std::size_t result_pos = queued_body.find("event: subagent_result");
+        const std::size_t done_pos = queued_body.find("event: done");
+        Expect(result_pos != std::string::npos && done_pos != std::string::npos &&
+                       result_pos < done_pos,
+               "published frame should arrive before done");
+        // 无活跃流：丢弃（CLI 轮询兜底），不影响后续请求。
+        gateway.PublishSessionEvent("sess-absent", "subagent_result", {{"task_id", "bg-404"}});
+        Expect(http.Get(base + "/health").IsSuccess(),
+               "publishing without an active stream should not break the gateway");
 
         gateway.Stop();
     } catch (const std::exception& e) {

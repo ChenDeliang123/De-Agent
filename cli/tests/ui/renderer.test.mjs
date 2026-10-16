@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { BottomRegion } from "../../src/ui/bottom.mjs";
 import { TranscriptRenderer, displayWidth } from "../../src/ui/renderer.mjs";
+import { visibleWidth } from "../../src/ui/text.mjs";
 import { captureOutput } from "../helpers/virtual-terminal.mjs";
 
 const SPINNER_RE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
@@ -338,4 +339,100 @@ test("renderer clips sub-agent lines to the terminal width", () => {
     }
   }
   assert.ok(out.text().includes("…"), "overlong sub-agent lines are clipped with an ellipsis");
+});
+
+test("renderer prints background sub-agent dispatch and result summary", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  // 前台子 Agent（无 background 字段）保持原样；后台任务补 `in background (task_id)`。
+  renderer.subagentStart("explorer#1");
+  renderer.subagentStart({ agent_id: "explorer#7", task_id: "bg-3", background: true });
+  // subagent_result 与回合外补打 pending_results 走同一个渲染函数。
+  renderer.subagentResult({
+    task_id: "bg-3",
+    agent_id: "explorer#7",
+    agent_type: "explorer",
+    state: "done",
+    ok: true,
+    duration_ms: 12345,
+    tool_calls: 4,
+    prompt_tokens: 5000,
+    completion_tokens: 200,
+    cache_hit_tokens: 0,
+    text: "l1\nl2\nl3\nl4\nl5\nl6\n",
+  });
+  const text = out.text();
+  assert.ok(text.includes("  ↳ explorer#1 started"), text);
+  assert.ok(text.includes("  ↳ explorer#7 started in background (bg-3)"), text);
+  assert.ok(text.includes("  ↳ explorer#7 done in 12.3s · 4 tool calls · 5.2k tokens"), text);
+  assert.ok(text.includes("    l1"), `missing first report line: ${text}`);
+  assert.ok(text.includes("    l5"), `missing fifth report line: ${text}`);
+  assert.ok(!text.includes("    l6"), `the sixth report line should be folded: ${text}`);
+  // 6 行报告展示 5 行，余下 1 行折叠（末尾换行不算一行）。
+  assert.ok(text.includes("    … (+1 lines)"), text);
+});
+
+test("renderer renders failed background results with the error reason", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  // 无 error 字段时退回终态（timed_out/cancelled/failed）。
+  renderer.subagentResult({
+    task_id: "bg-4",
+    agent_id: "explorer#7",
+    ok: false,
+    state: "timed_out",
+    duration_ms: 60000,
+    tool_calls: 2,
+    text: "",
+  });
+  // error 优先，且失败帧的报告正文照常展示。
+  renderer.subagentResult({
+    task_id: "bg-5",
+    agent_id: "general#2",
+    ok: false,
+    state: "failed",
+    error: "boom",
+    text: "partial report",
+  });
+  const text = out.text();
+  assert.ok(text.includes("  ↳ explorer#7 failed: timed_out"), text);
+  assert.ok(text.includes("  ↳ general#2 failed: boom"), text);
+  assert.ok(text.includes("    partial report"), text);
+  assert.ok(!text.includes("… (+"), `short reports are not folded: ${text}`);
+});
+
+test("renderer clips background result lines to the terminal width", () => {
+  const rows = [];
+  for (const mode of ["none", "truecolor"]) {
+    const out = fakeOut(false);
+    out.columns = 40;
+    const renderer = new TranscriptRenderer(out, { mode });
+    renderer.subagentStart({ agent_id: "explorer#7", task_id: "bg-3", background: true });
+    renderer.subagentResult({
+      task_id: "bg-3",
+      agent_id: "a-very-long-background-agent-name#7",
+      ok: true,
+      duration_ms: 12345,
+      tool_calls: 400,
+      prompt_tokens: 500000,
+      completion_tokens: 200,
+      text: `${"x".repeat(200)}\n${"y".repeat(300)}\nshort`,
+    });
+    for (const line of out.text().split("\n")) {
+      if (line !== "") {
+        rows.push({ mode, line });
+      }
+    }
+  }
+  for (const { line } of rows) {
+    assert.ok(visibleWidth(line) <= 40, `line overflows the terminal: ${JSON.stringify(line)}`);
+  }
+  assert.ok(
+    rows.some(({ line }) => line.includes("…")),
+    "overlong background result lines are clipped with an ellipsis",
+  );
+  // 报告正文没超过 5 行，不出现折叠行。
+  assert.ok(!rows.some(({ line }) => line.includes("(+")), "no folding for a 3-line report");
 });

@@ -13,6 +13,8 @@ const IDLE_DELAY_MS = 500;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_INTERVAL_MS = 100;
 const TOOL_PREVIEW_LINES = 8;
+// 后台任务（subagent_result）补打报告摘要时最多显示的行数，余下折叠。
+const MaxResultLines = 5;
 // 单行超过该长度就先按普通段落刷出，避免长行长时间不显示。
 const MAX_PARTIAL_LINE = 200;
 
@@ -482,11 +484,20 @@ export class TranscriptRenderer {
 
   // 子 Agent 开始：dim 单行，如 `  ↳ explorer#1 started`。
   // 参数既可以是 agent id 字符串，也可以是整帧 data（取其中的 agent_id）。
+  // data.background === true 时是后台任务，补一段 `in background (bg-3)`。
   subagentStart(agentOrData) {
     this.#beginOutput();
     this.#flushMdBuffer();
     const agent = this.#agentName(agentOrData) || "subagent";
-    this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} ${agent} started`));
+    const background =
+      agentOrData && typeof agentOrData === "object" && agentOrData.background === true;
+    if (!background) {
+      this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} ${agent} started`));
+      return;
+    }
+    const taskId = String(agentOrData.task_id ?? "").trim();
+    const suffix = taskId ? ` in background (${taskId})` : " in background";
+    this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} ${agent} started${suffix}`));
   }
 
   // 子 Agent 结束：成功 `  ↳ explorer#1 done in 3.9s · 3 tool calls`；
@@ -501,21 +512,66 @@ export class TranscriptRenderer {
       this.#writeClipped(t.dim(`  ${this.#sym.subagent} ${agent} failed: ${reason}`));
       return;
     }
+    this.#writeClipped(this.#doneLine(agent, data));
+  }
+
+  // 后台任务完成（subagent_result 帧，或回合外轮询补打的 pending_results）：
+  // 复用前台的生命周期行形态，随后补一段报告摘要（最多 5 行，余下折叠）。
+  subagentResult(data = {}) {
+    this.#beginOutput();
+    this.#flushMdBuffer();
+    this.#endContentBlock();
+    const t = this.#t;
+    const agent = this.#agentName(data) || "subagent";
+    if (data?.ok === false) {
+      // 失败原因优先取 error，其次取终态（failed/cancelled/timed_out）。
+      const reason =
+        String(data?.error ?? "").trim() || String(data?.state ?? "").trim() || "unknown error";
+      this.#writeClipped(t.dim(`  ${this.#sym.subagent} ${agent} failed: ${reason}`));
+    } else {
+      this.#writeClipped(this.#doneLine(agent, data));
+    }
+    this.#writeReportSummary(data?.text);
+  }
+
+  // 成功行：`  ↳ explorer#1 done in 3.9s · 3 tool calls · 4.4k tokens`。
+  #doneLine(agent, data) {
+    const t = this.#t;
     const duration = formatDuration(data?.duration_ms);
     const calls = Number(data?.tool_calls);
     const count = Number.isFinite(calls) && calls > 0 ? calls : 0;
     const head = `${agent} done${duration ? ` in ${duration}` : ""}`;
     const parts = [`${count} tool call${count === 1 ? "" : "s"}`];
-    // 用量归集（M3）：后端 subagent_end 帧带 prompt/completion token，有则补一段。
+    // 用量归集（M3）：帧里带 prompt/completion token 时补一段。
     const prompt = Number(data?.prompt_tokens);
     const completion = Number(data?.completion_tokens);
     const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
     if (total > 0) {
       parts.push(total < 1000 ? `${total} tokens` : `${(total / 1000).toFixed(1)}k tokens`);
     }
-    this.#writeClipped(
-      t.dim(`  ${this.#sym.subagent} ${head} ${this.#sym.dot} ${parts.join(` ${this.#sym.dot} `)}`),
+    return t.dim(
+      `  ${this.#sym.subagent} ${head} ${this.#sym.dot} ${parts.join(` ${this.#sym.dot} `)}`,
     );
+  }
+
+  // 后台任务的报告摘要：缩进 4 格的 dim 行，最多 5 行，超出部分折叠成 `… (+N lines)`。
+  // 逐行走 #writeClipped，长行按终端宽度裁剪，不越界。
+  #writeReportSummary(text) {
+    const source = String(text ?? "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n+$/, "");
+    if (source.trim() === "") {
+      return;
+    }
+    const lines = source.split("\n");
+    const shown = lines.slice(0, MaxResultLines);
+    for (const line of shown) {
+      this.#writeClipped(this.#t.dim(`    ${line}`));
+    }
+    const hidden = lines.length - shown.length;
+    if (hidden > 0) {
+      this.#writeClipped(this.#t.dim(`    … (+${hidden} lines)`));
+    }
   }
 
   #ensureAssistantLabel() {

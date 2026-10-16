@@ -55,6 +55,26 @@ struct SubAgentInfo {
     std::vector<std::string> tools;  // 空 = 继承父工具集
 };
 
+// 一条后台任务在接口上的表示（GET /api/v1/agents 的 running[]/pending_results[]）。
+struct BackgroundTaskInfo {
+    std::string task_id;         // bg-3
+    std::string agent_id;        // explorer#7
+    std::string agent_type;      // explorer
+    std::string session_id;      // 派发它的父会话
+    std::string state;           // running/done/failed/cancelled/timed_out
+    long elapsed_ms = 0;
+    std::string prompt_excerpt;  // running[] 用
+    // pending_results[] 才有内容：结果与报告正文。
+    bool ok = false;
+    long duration_ms = 0;
+    int tool_calls = 0;
+    long long prompt_tokens = 0;
+    long long completion_tokens = 0;
+    long long cache_hit_tokens = 0;
+    std::string text;
+    std::string error;
+};
+
 // 子 Agent 运行时快照（GET /api/v1/agents）。
 struct SubAgentSnapshot {
     bool enabled = false;
@@ -70,6 +90,10 @@ struct SubAgentSnapshot {
     long long completion_tokens = 0;
     long long cache_hit_tokens = 0;
     std::vector<SubAgentInfo> definitions;
+    // 后台任务（M4c）：受理上限 + 运行中列表 + 未打印（未 ack）的终态结果。
+    int max_background = 0;
+    std::vector<BackgroundTaskInfo> running;
+    std::vector<BackgroundTaskInfo> pending_results;
 };
 
 // 会话最近一次加载的项目指令来源（只含路径/大小，不含指令正文）。
@@ -124,7 +148,17 @@ public:
     using ToolsHandler = std::function<std::vector<ToolInfo>()>;
 
     // 子 Agent 运行时快照（GET /api/v1/agents）。未设置时返回 enabled=false。
-    using AgentsInfoHandler = std::function<SubAgentSnapshot()>;
+    // session_id 非空时，running[]/pending_results[] 只含该会话的后台任务。
+    using AgentsInfoHandler = std::function<SubAgentSnapshot(const std::string& session_id)>;
+
+    // 停止一条后台任务（POST /api/v1/agents/:id/stop）。返回 false → 404（id 未知）；
+    // 否则 *requested 表示本次是否真的置了取消（false = 已结束）。
+    using BackgroundStopHandler = std::function<bool(const std::string& id, bool* requested,
+                                                     std::string* message)>;
+
+    // 把已打印的后台结果标记为已送出（POST /api/v1/agents/ack）。
+    using BackgroundAckHandler =
+            std::function<std::size_t(const std::vector<std::string>& task_ids)>;
 
     // 权限清单（GET /api/v1/permissions）。
     using PermissionsListHandler = std::function<PermissionsSnapshot()>;
@@ -216,6 +250,15 @@ public:
 
     // 注入子 Agent 快照处理逻辑。未设置时 /agents 接口返回 enabled=false。
     void SetAgentsInfoHandler(AgentsInfoHandler handler);
+
+    // 注入后台任务停止/结果回执逻辑（未设置时对应接口返回 501）。
+    void SetBackgroundStopHandler(BackgroundStopHandler handler);
+    void SetBackgroundAckHandler(BackgroundAckHandler handler);
+
+    // 向某个会话的活跃 SSE 流推送一帧（后台任务的派发/结果通知）。
+    // 无活跃流时丢弃（CLI 有轮询兜底）；线程安全，可在任意线程调用。
+    void PublishSessionEvent(const std::string& session_id, const std::string& event,
+                             const nlohmann::json& payload);
 
     // 注入权限相关处理逻辑。未设置时对应接口返回 501。
     void SetPermissionsListHandler(PermissionsListHandler handler);

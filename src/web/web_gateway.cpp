@@ -24,6 +24,7 @@
 #include "a2a/server/task_store.hpp"
 
 #include "aiagent/agent/history_cache.hpp"
+#include "aiagent/agent/session_history.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/log.hpp"
 
@@ -55,31 +56,7 @@ std::string FirstText(const a2a::models::Message& message) {
 std::vector<a2a::models::Message> LatestHistory(a2a::server::ITaskStore& store,
                                                 aiagent::agent::HistoryCache* history_cache,
                                                 const std::string& context_id) {
-    std::vector<a2a::models::Message> history;
-    if (history_cache != nullptr && history_cache->TryGet(context_id, history)) {
-        return history;
-    }
-    // 取该会话写入时间最新的任务：手动/自动压缩会写入更短的历史，
-    // 单纯比较 history.size() 会错误地回退到压缩前的旧任务。
-    std::optional<a2a::core::TimePoint> latest_time;
-    for (const auto& task : store.ListAll()) {
-        if (task.context_id != context_id || task.history.empty()) {
-            continue;
-        }
-        if (latest_time.has_value()) {
-            if (!task.status.timestamp.has_value() ||
-                !(*task.status.timestamp > *latest_time)) {
-                continue;
-            }
-        }
-        history = task.history;
-        latest_time = task.status.timestamp;
-    }
-    if (history_cache != nullptr && !history.empty()) {
-        // 冷启动回填，避免每个会话都重复全表扫描。
-        history_cache->Put(context_id, history);
-    }
-    return history;
+    return aiagent::agent::LoadLatestHistory(history_cache, store, context_id);
 }
 
 std::string RoleName(a2a::models::Role role) {
@@ -122,6 +99,32 @@ std::string SessionTitleFromHistory(const std::vector<a2a::models::Message>& his
         }
     }
     return "新对话";
+}
+
+// 后台任务快照 → JSON（GET /api/v1/agents 的 running[]/pending_results[]）。
+nlohmann::json BackgroundTasksJson(const std::vector<BackgroundTaskInfo>& tasks) {
+    nlohmann::json array = nlohmann::json::array();
+    for (const auto& task : tasks) {
+        nlohmann::json item = {{"task_id", task.task_id},
+                               {"agent_id", task.agent_id},
+                               {"agent_type", task.agent_type},
+                               {"session_id", task.session_id},
+                               {"state", task.state},
+                               {"elapsed_ms", task.elapsed_ms},
+                               {"prompt_excerpt", task.prompt_excerpt},
+                               {"ok", task.ok},
+                               {"duration_ms", task.duration_ms},
+                               {"tool_calls", task.tool_calls},
+                               {"prompt_tokens", task.prompt_tokens},
+                               {"completion_tokens", task.completion_tokens},
+                               {"cache_hit_tokens", task.cache_hit_tokens},
+                               {"error", task.error}};
+        if (!task.text.empty()) {
+            item["text"] = task.text;
+        }
+        array.push_back(std::move(item));
+    }
+    return array;
 }
 
 // 将 AgentEvent 序列化为 SSE 帧（event + data）。arguments 原始 JSON 若能
@@ -288,6 +291,14 @@ public:
         agents_handler_ = std::move(handler);
     }
 
+    void SetBackgroundStopHandler(WebGateway::BackgroundStopHandler handler) {
+        background_stop_handler_ = std::move(handler);
+    }
+
+    void SetBackgroundAckHandler(WebGateway::BackgroundAckHandler handler) {
+        background_ack_handler_ = std::move(handler);
+    }
+
     void SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {
         permissions_list_handler_ = std::move(handler);
     }
@@ -329,14 +340,29 @@ public:
     }
 
     void CancelSession(const std::string& session_id) {
-        std::lock_guard<std::mutex> lock(cancels_mutex_);
-        const auto it = active_cancels_.find(session_id);
-        if (it != active_cancels_.end() && it->second) {
-            it->second->store(true);
+        std::lock_guard<std::mutex> lock(streams_mutex_);
+        const auto it = active_streams_.find(session_id);
+        if (it != active_streams_.end() && it->second && it->second->cancel_flag) {
+            it->second->cancel_flag->store(true);
         }
         if (cancel_observer_) {
             cancel_observer_(session_id);
         }
+    }
+
+    void PublishSessionEvent(const std::string& session_id, const std::string& event,
+                             const nlohmann::json& payload) {
+        std::shared_ptr<ActiveStream> stream;
+        {
+            std::lock_guard<std::mutex> lock(streams_mutex_);
+            const auto it = active_streams_.find(session_id);
+            if (it == active_streams_.end() || !it->second) {
+                return;  // 没有活跃流：丢掉（CLI 轮询 pending_results 兜底）
+            }
+            stream = it->second;
+        }
+        std::lock_guard<std::mutex> queue_lock(stream->queue_mutex);
+        stream->queued_frames.emplace_back(event, payload);
     }
 
 private:
@@ -711,13 +737,18 @@ private:
         // 子 Agent 运行时快照（/agents）：定义清单 + 累计统计。
         // 未注入 handler（未启用多 Agent）时返回 enabled=false（200）。
         server_.Get("/api/v1/agents",
-                    [this](const httplib::Request&, httplib::Response& response) {
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        const std::string session_id =
+                                request.has_param("session_id")
+                                        ? request.get_param_value("session_id")
+                                        : std::string();
                         nlohmann::json payload = {{"enabled", false}};
                         if (agents_handler_) {
-                            const SubAgentSnapshot snapshot = agents_handler_();
+                            const SubAgentSnapshot snapshot = agents_handler_(session_id);
                             payload = {{"enabled", snapshot.enabled},
                                        {"max_depth", snapshot.max_depth},
                                        {"max_concurrent", snapshot.max_concurrent},
+                                       {"max_background", snapshot.max_background},
                                        {"stats",
                                         {{"runs", snapshot.runs},
                                          {"failures", snapshot.failures},
@@ -734,9 +765,72 @@ private:
                                                        {"tools", definition.tools}});
                             }
                             payload["definitions"] = std::move(definitions);
+                            payload["running"] = BackgroundTasksJson(snapshot.running);
+                            payload["pending_results"] =
+                                    BackgroundTasksJson(snapshot.pending_results);
                         }
                         response.set_content(payload.dump(), "application/json");
                     });
+
+        // 停止一条后台子 Agent：POST /api/v1/agents/:id/stop（:id 为 bg-N 或 agent_id）。
+        server_.Post("/api/v1/agents/:id/stop",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!background_stop_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"background tasks not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         const std::string id = request.path_params.at("id");
+                         bool requested = false;
+                         std::string message;
+                         if (!background_stop_handler_(id, &requested, &message)) {
+                             response.status = 404;
+                             response.set_content(
+                                     nlohmann::json{{"error", message}}.dump(),
+                                     "application/json");
+                             return;
+                         }
+                         response.set_content(
+                                 nlohmann::json{{"result", requested ? "requested" : "finished"},
+                                                {"message", message}}
+                                         .dump(),
+                                 "application/json");
+                     });
+
+        // 后台结果回执：POST /api/v1/agents/ack + {"task_ids":[...]}。
+        server_.Post("/api/v1/agents/ack",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!background_ack_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"background tasks not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             std::vector<std::string> task_ids;
+                             if (body.contains("task_ids") && body["task_ids"].is_array()) {
+                                 for (const auto& id : body["task_ids"]) {
+                                     if (id.is_string()) {
+                                         task_ids.push_back(id.get<std::string>());
+                                     }
+                                 }
+                             }
+                             response.set_content(
+                                     nlohmann::json{
+                                             {"acked", background_ack_handler_(task_ids)}}
+                                             .dump(),
+                                     "application/json");
+                         } catch (const std::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", e.what()}}.dump(),
+                                     "application/json");
+                         }
+                     });
 
         // 权限模式：查询/设置/删除（工作路径级）。
         server_.Get("/api/v1/permissions",
@@ -1166,16 +1260,17 @@ private:
                         return false;
                     }
                     const RequestIdGuard request_guard(std::string(a2a::core::NewUuid()));
-                    auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
+                    auto stream = std::make_shared<ActiveStream>();
+                    stream->cancel_flag = std::make_shared<std::atomic<bool>>(false);
                     {
-                        std::lock_guard<std::mutex> lock(cancels_mutex_);
-                        active_cancels_[session_id] = cancel_flag;
+                        std::lock_guard<std::mutex> lock(streams_mutex_);
+                        active_streams_[session_id] = stream;
                     }
-                    const auto clear_cancel = [this, session_id, cancel_flag]() {
-                        std::lock_guard<std::mutex> lock(cancels_mutex_);
-                        const auto it = active_cancels_.find(session_id);
-                        if (it != active_cancels_.end() && it->second == cancel_flag) {
-                            active_cancels_.erase(it);
+                    const auto unregister = [this, session_id, stream]() {
+                        std::lock_guard<std::mutex> lock(streams_mutex_);
+                        const auto it = active_streams_.find(session_id);
+                        if (it != active_streams_.end() && it->second == stream) {
+                            active_streams_.erase(it);
                         }
                     };
                     const auto write = [&sink](const std::string& event,
@@ -1183,6 +1278,18 @@ private:
                         const std::string frame =
                                 "event: " + event + "\ndata: " + payload.dump() + "\n\n";
                         return sink.write(frame.data(), frame.size());
+                    };
+                    // 回合外事件（后台任务的派发/结果）先出队再写本回合自己的帧：
+                    // 队列由 worker 线程入队，写 socket 只发生在当前（provider）线程。
+                    const auto flush_queued = [stream, &write]() {
+                        std::vector<std::pair<std::string, nlohmann::json>> frames;
+                        {
+                            std::lock_guard<std::mutex> lock(stream->queue_mutex);
+                            frames.swap(stream->queued_frames);
+                        }
+                        for (const auto& [name, payload] : frames) {
+                            write(name, payload);
+                        }
                     };
                     try {
                         write("started", {{"session_id", session_id}});
@@ -1192,10 +1299,12 @@ private:
                                     session_id,
                                     content,
                                     cwd,
-                                    [&write](const aiagent::agent::AgentEvent& event) {
+                                    [&write, &flush_queued](
+                                            const aiagent::agent::AgentEvent& event) {
+                                        flush_queued();
                                         WriteAgentEventFrame(write, event);
                                     },
-                                    [cancel_flag] { return cancel_flag->load(); });
+                                    [stream] { return stream->cancel_flag->load(); });
                         } else if (stream_handler_) {
                             stream_handler_(
                                     session_id,
@@ -1208,6 +1317,7 @@ private:
                             write("content", {{"content", result.value("content", "")}});
                             done_payload["task_id"] = result.value("task_id", "");
                         }
+                        flush_queued();
                         write("done", done_payload);
                     } catch (const std::exception& e) {
                         aiagent::DefaultLogger().Log(
@@ -1224,7 +1334,7 @@ private:
                             aiagent::LogLevel::kInfo, "web",
                             "session=" + session_id + " event=stream_end duration_ms=" +
                                     std::to_string(duration_ms));
-                    clear_cancel();
+                    unregister();
                     sink.done();
                     return false;
                 });
@@ -1237,6 +1347,14 @@ private:
     std::thread thread_;
     int port_ = 0;
     bool running_ = false;
+    // 活跃 SSE 流：取消标志 + 回合外事件（后台结果）队列。
+    // 队列由任意线程入队，只有流的写线程（provider 线程）排空，避免并发写 socket。
+    struct ActiveStream {
+        std::shared_ptr<std::atomic<bool>> cancel_flag;
+        std::mutex queue_mutex;
+        std::vector<std::pair<std::string, nlohmann::json>> queued_frames;
+    };
+
     WebGateway::StreamChatHandler stream_handler_;
     WebGateway::StreamEventHandler stream_event_handler_;
     WebGateway::CompactHandler compact_handler_;
@@ -1246,6 +1364,8 @@ private:
     WebGateway::CloneHandler clone_handler_;
     WebGateway::ToolsHandler tools_handler_;
     WebGateway::AgentsInfoHandler agents_handler_;
+    WebGateway::BackgroundStopHandler background_stop_handler_;
+    WebGateway::BackgroundAckHandler background_ack_handler_;
     WebGateway::PermissionsListHandler permissions_list_handler_;
     WebGateway::PermissionResolveHandler permission_resolve_handler_;
     WebGateway::PermissionSetHandler permission_set_handler_;
@@ -1256,8 +1376,8 @@ private:
     WebGateway::ApproveHandler approve_handler_;
     WebGateway::CancelObserver cancel_observer_;
     aiagent::agent::SessionMetaStore* session_meta_store_ = nullptr;
-    std::mutex cancels_mutex_;
-    std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_cancels_;
+    std::mutex streams_mutex_;
+    std::map<std::string, std::shared_ptr<ActiveStream>> active_streams_;
 };
 
 WebGateway::WebGateway(a2a::server::AgentServer& agent_server,
@@ -1305,6 +1425,19 @@ void WebGateway::SetToolsHandler(WebGateway::ToolsHandler handler) {
 
 void WebGateway::SetAgentsInfoHandler(WebGateway::AgentsInfoHandler handler) {
     impl_->SetAgentsInfoHandler(std::move(handler));
+}
+
+void WebGateway::SetBackgroundStopHandler(WebGateway::BackgroundStopHandler handler) {
+    impl_->SetBackgroundStopHandler(std::move(handler));
+}
+
+void WebGateway::SetBackgroundAckHandler(WebGateway::BackgroundAckHandler handler) {
+    impl_->SetBackgroundAckHandler(std::move(handler));
+}
+
+void WebGateway::PublishSessionEvent(const std::string& session_id, const std::string& event,
+                                     const nlohmann::json& payload) {
+    impl_->PublishSessionEvent(session_id, event, payload);
 }
 
 void WebGateway::SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {

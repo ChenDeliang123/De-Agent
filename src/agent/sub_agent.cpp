@@ -503,6 +503,8 @@ struct SubAgentManager::BackgroundTask {
     std::string prompt_excerpt;
     // 结果已就绪并写入本记录：ShutdownBackground 的有界等待以它为收敛点。
     bool delivered = false;
+    // 结果已送出（CLI 打印后 ack）：PendingResults 只列未送出的终态结果。
+    bool result_reported = false;
     // 结果就绪前持有的线程句柄；worker 在收敛临界区内对它自 detach，
     // 保证记录被回收时不存在"可 join 句柄被析构 → std::terminate"的路径。
     std::thread worker;
@@ -617,6 +619,18 @@ BackgroundStartResult SubAgentManager::RunBackground(const SubAgentRequest& requ
     dispatch.ok = true;
     dispatch.task_id = task->task_id;
     dispatch.agent_id = task->agent_id;
+    // 派发通知：装配方（网关/CLI）据此立刻显示"已派发"；state 固定为 running，
+    // 与任务是否恰好已经跑完无关（保证 started 先于 finished 送达）。
+    BackgroundNotification notification;
+    notification.kind = BackgroundNotificationKind::kStarted;
+    notification.task.task_id = task->task_id;
+    notification.task.agent_id = task->agent_id;
+    notification.task.agent_type = task->agent_type;
+    notification.task.session_id = task->session_id;
+    notification.task.state = BackgroundState::kRunning;
+    notification.task.prompt_excerpt = task->prompt_excerpt;
+    notification.task.started = task->started;
+    NotifyBackground(notification);
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "sub_agent",
             "event=background_start task_id=" + dispatch.task_id +
@@ -723,6 +737,68 @@ void SubAgentManager::ShutdownBackground(std::chrono::milliseconds timeout) {
     }
 }
 
+std::vector<BackgroundTaskSnapshot> SubAgentManager::PendingResults() const {
+    std::vector<BackgroundTaskSnapshot> snapshots;
+    {
+        std::lock_guard<std::mutex> lock(background_mutex_);
+        for (const auto& [task_id, task] : background_tasks_) {
+            if (task->state != BackgroundState::kRunning && !task->result_reported) {
+                snapshots.push_back(SnapshotLocked(*task));
+            }
+        }
+    }
+    std::sort(snapshots.begin(), snapshots.end(),
+              [](const BackgroundTaskSnapshot& a, const BackgroundTaskSnapshot& b) {
+                  return a.started < b.started;
+              });
+    return snapshots;
+}
+
+std::size_t SubAgentManager::AcknowledgeResults(const std::vector<std::string>& ids) {
+    std::lock_guard<std::mutex> lock(background_mutex_);
+    std::size_t acknowledged = 0;
+    for (const auto& id : ids) {
+        BackgroundTask* task = FindBackgroundLocked(id);
+        if (task == nullptr || task->state == BackgroundState::kRunning ||
+            task->result_reported) {
+            continue;
+        }
+        task->result_reported = true;
+        ++acknowledged;
+    }
+    return acknowledged;
+}
+
+void SubAgentManager::SetBackgroundNotifyCallback(BackgroundNotifyCallback callback) {
+    std::lock_guard<std::mutex> lock(background_mutex_);
+    background_notify_ = std::move(callback);
+}
+
+void SubAgentManager::NotifyBackground(const BackgroundNotification& notification) const {
+    BackgroundNotifyCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(background_mutex_);
+        callback = background_notify_;
+    }
+    if (!callback) {
+        return;
+    }
+    try {
+        callback(notification);
+    } catch (const std::exception& e) {
+        // 推送/注入失败不能拖垮 worker（结果已在结果表里，父仍可用 task_result 取到）。
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "sub_agent",
+                "event=background_notify_failed task_id=" + notification.task.task_id +
+                        " message=" + e.what());
+    } catch (...) {
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "sub_agent",
+                "event=background_notify_failed task_id=" + notification.task.task_id +
+                        " message=unknown error");
+    }
+}
+
 const SubAgentManager::BackgroundTask* SubAgentManager::FindBackgroundLocked(
         const std::string& id) const {
     const auto it = background_tasks_.find(id);
@@ -736,6 +812,10 @@ const SubAgentManager::BackgroundTask* SubAgentManager::FindBackgroundLocked(
         }
     }
     return nullptr;
+}
+
+SubAgentManager::BackgroundTask* SubAgentManager::FindBackgroundLocked(const std::string& id) {
+    return const_cast<BackgroundTask*>(std::as_const(*this).FindBackgroundLocked(id));
 }
 
 BackgroundTaskSnapshot SubAgentManager::SnapshotLocked(const BackgroundTask& task) const {
@@ -759,11 +839,14 @@ BackgroundTaskSnapshot SubAgentManager::SnapshotLocked(const BackgroundTask& tas
 
 void SubAgentManager::ConvergeBackground(const std::shared_ptr<BackgroundTask>& task,
                                          const SubAgentResult& result) {
+    BackgroundNotification notification;
+    notification.kind = BackgroundNotificationKind::kFinished;
     {
         std::lock_guard<std::mutex> lock(background_mutex_);
         task->result = result;
         task->state = TerminalStateFor(result);
         task->delivered = true;
+        notification.task = SnapshotLocked(*task);
         if (task->worker.joinable()) {
             // 结果就绪后立即 detach：记录被回收时不再持有可 join 句柄。
             task->worker.detach();
@@ -786,6 +869,8 @@ void SubAgentManager::ConvergeBackground(const std::shared_ptr<BackgroundTask>& 
                     " prompt_tokens=" + std::to_string(result.prompt_tokens) +
                     " completion_tokens=" + std::to_string(result.completion_tokens) +
                     " cache_hit_tokens=" + std::to_string(result.cache_hit_tokens));
+    // 收敛通知在结果表写入之后：装配方（历史注入/SSE 推送）可能阻塞，不影响等待方。
+    NotifyBackground(notification);
 }
 
 std::optional<AgentDefinitionLoadResult> LoadAgentDefinitions(

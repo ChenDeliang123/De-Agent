@@ -98,12 +98,46 @@ export async function listTools(backendUrl) {
   return response.json();
 }
 
-export async function getAgents(backendUrl) {
-  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/agents`);
+// 子 Agent 总览。传 session_id 时只返回该会话的运行中/待补打任务（M4c 后台任务）。
+export async function getAgents(backendUrl, sessionId) {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/agents${query}`);
   if (!response.ok) {
     throw new Error(`failed to load agents: HTTP ${response.status}`);
   }
   return response.json();
+}
+
+// 停止一个后台子 Agent 任务；:id 既接受 task_id（bg-3）也接受 agent_id（explorer#7）。
+// 200 返回 {result:"requested"|"finished"}；404 的 body.error 原样抛出给调用方展示。
+export async function stopAgent(backendUrl, id) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/agents/${encodeURIComponent(id)}/stop`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: encoder.encode("{}"),
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `stop agent failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+// 把已经打印过的后台任务结果标记为已读（否则会被反复补打）。
+export async function ackAgentResults(backendUrl, taskIds) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/agents/ack`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(JSON.stringify({ task_ids: taskIds })),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `ack agents failed: HTTP ${response.status}`);
+  }
+  return body;
 }
 
 export async function health(backendUrl) {

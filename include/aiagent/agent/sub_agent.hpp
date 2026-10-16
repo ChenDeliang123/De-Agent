@@ -106,6 +106,19 @@ struct BackgroundStartResult {
 // Stop() 的结果：已置取消 / 未知 id / 已结束（终态不可再取消）。
 enum class BackgroundStopOutcome { kRequested, kNotFound, kFinished };
 
+// 后台任务生命周期通知：派发成功（父/CLI 立刻可见）与收敛（结果送达的触发点）。
+enum class BackgroundNotificationKind { kStarted, kFinished };
+
+struct BackgroundNotification {
+    BackgroundNotificationKind kind = BackgroundNotificationKind::kStarted;
+    // kStarted：state=running、result 为空；kFinished：终态 + 结果。
+    BackgroundTaskSnapshot task;
+};
+
+// 通知回调：在后台 worker 线程上同步调用，实现方自己保证线程安全；
+// 不得反向调用 Manager 的阻塞接口（Stop/ShutdownBackground 会等待，构成自等死锁）。
+using BackgroundNotifyCallback = std::function<void(const BackgroundNotification&)>;
+
 // 多 Agent 协同的核心：定义装载、并发闸门、深度控制、超时/取消、结果截断、
 // 事件归属转发。
 //
@@ -184,6 +197,15 @@ public:
     // 结果表保留的已完成任务上限（超出按完成顺序回收最旧的，避免无界增长）。
     static constexpr std::size_t kBackgroundResultRetention = 20;
 
+    // 后台任务派发/收敛通知（每条任务各触发一次）；传空可解除。
+    void SetBackgroundNotifyCallback(BackgroundNotifyCallback callback);
+
+    // 尚未送出（未 ack）的终态结果，按派发顺序——CLI 的回合外补打数据源。
+    std::vector<BackgroundTaskSnapshot> PendingResults() const;
+
+    // 标记结果已送出（CLI 打印后的回执）；ids 为 bg-N 或 agent_id；返回标记条数。
+    std::size_t AcknowledgeResults(const std::vector<std::string>& ids);
+
     SubAgentStats Stats() const;
 
 private:
@@ -234,7 +256,11 @@ private:
 
     // 结果表（background_mutex_ 保护）。
     const BackgroundTask* FindBackgroundLocked(const std::string& id) const;
+    BackgroundTask* FindBackgroundLocked(const std::string& id);
     BackgroundTaskSnapshot SnapshotLocked(const BackgroundTask& task) const;
+
+    // 通知装配方（推送/注入）；回调异常在此吞掉并记日志，不允许拖垮 worker。
+    void NotifyBackground(const BackgroundNotification& notification) const;
 
     // 后台任务收敛：写结果与终态、置 delivered（ShutdownBackground 的有界等待以它
     // 为准）、detach 自己的线程句柄（记录被回收时不能再持有可 join 句柄）、
@@ -266,6 +292,7 @@ private:
             std::make_shared<std::atomic<bool>>(false);
     std::size_t background_running_ = 0;  // 已派发未收敛（含等槽位）的后台任务数
     std::atomic<unsigned long long> background_counter_{0};
+    BackgroundNotifyCallback background_notify_;  // 装配方一次设置，worker 只读拷贝
 };
 
 // 定义装载结果：可用定义 + 因缺提示词被跳过的内置定义名。
