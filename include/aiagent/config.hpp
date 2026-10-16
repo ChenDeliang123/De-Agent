@@ -93,6 +93,9 @@ struct AgentsConfig {
     bool enabled = true;
     int max_depth = 1;        // 0=禁用派生；1=子 Agent 不可再派生
     int max_concurrent = 3;   // 同时运行的子 Agent 上限
+    // 后台任务上限（0 = 关闭后台派发）。后台任务与前台共享 max_concurrent 总闸门，
+    // 这里限制的是"已受理但未收敛"的后台任务数，超限直接拒绝、不排队。
+    int max_background = 2;
     // 子 Agent 硬超时。实测（2026-10-16）：默认给太大时，任务粒度过粗的子 Agent
     // 会一路漫游到接近超时上限（300s 的批次实测 280s 才返回），所以默认收紧到 120s。
     long default_timeout_s = 120;

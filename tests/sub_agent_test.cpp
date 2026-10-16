@@ -14,6 +14,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -28,6 +30,7 @@
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/llm/usage_tracking_model.hpp"
+#include "aiagent/log.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/filtered_tool_provider.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
@@ -155,6 +158,7 @@ public:
                     const std::vector<aiagent::llm::ToolSpec>&,
                     const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
             override {
+        harness_->streams.fetch_add(1);
         harness_->Enter();
         if (delay_ms_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
@@ -215,6 +219,59 @@ public:
 private:
     std::shared_ptr<Harness> harness_;
     std::string report_;
+};
+
+// 后台任务专用：模型直接抛错（断言 failed 终态与错误原因透传）。
+class FailingModel final : public aiagent::llm::IModelClient {
+public:
+    FailingModel(std::shared_ptr<Harness> harness, std::string message)
+        : harness_(std::move(harness)), message_(std::move(message)) {}
+
+    aiagent::llm::ChatResult Chat(const std::vector<aiagent::llm::ChatMessage>&,
+                                  const std::vector<aiagent::llm::ToolSpec>&,
+                                  const std::optional<std::string>&) override {
+        return EmptyChatResult();
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>&) override {
+        harness_->streams.fetch_add(1);
+        throw std::runtime_error(message_);
+    }
+
+private:
+    std::shared_ptr<Harness> harness_;
+    std::string message_;
+};
+
+// 后台任务专用：ChatStream 阻塞固定时长且不检查取消
+//（断言 ShutdownBackground 的有界等待：到点即返回，不 join 阻塞退出）。
+class BlockingModel final : public aiagent::llm::IModelClient {
+public:
+    BlockingModel(std::shared_ptr<Harness> harness, int delay_ms)
+        : harness_(std::move(harness)), delay_ms_(delay_ms) {}
+
+    aiagent::llm::ChatResult Chat(const std::vector<aiagent::llm::ChatMessage>&,
+                                  const std::vector<aiagent::llm::ToolSpec>&,
+                                  const std::optional<std::string>&) override {
+        return EmptyChatResult();
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        harness_->streams.fetch_add(1);
+        harness_->Enter();
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
+        harness_->Leave();
+        EmitText(on_event, "SLOW-REPORT");
+    }
+
+private:
+    std::shared_ptr<Harness> harness_;
+    int delay_ms_ = 0;
 };
 
 // 父 Agent 专用：第一轮发 task 工具调用，第二轮把工具结果回显为最终答案。
@@ -297,11 +354,12 @@ public:
 aiagent::AgentsConfig Settings(int max_depth = 1, int max_concurrent = 3,
                                long default_timeout_s = 5, int max_rounds = 6,
                                std::size_t result_max_chars = 8000,
-                               bool stream_events = true) {
+                               bool stream_events = true, int max_background = 2) {
     aiagent::AgentsConfig config;
     config.enabled = true;
     config.max_depth = max_depth;
     config.max_concurrent = max_concurrent;
+    config.max_background = max_background;
     config.default_timeout_s = default_timeout_s;
     config.max_rounds = max_rounds;
     config.result_max_chars = result_max_chars;
@@ -854,7 +912,9 @@ void TestTaskToolBatchAndErrors() {
     Expect(batch.text.find("general#2") != std::string::npos &&
                    batch.text.find("explorer#3") != std::string::npos &&
                    batch.text.find("---") != std::string::npos,
-           "batch results should be concatenated in order with separators");
+           "batch results should be concatenated in order with separators: ok=" +
+                   std::string(batch.ok ? "true" : "false") + " text=" + batch.text +
+                   " error=" + batch.error);
 
     // 参数错误：prompt 与 tasks 混用、空 prompt、未知 type、超批量上限。
     const auto mixed = tool.Execute(
@@ -881,6 +941,456 @@ void TestTaskToolBatchAndErrors() {
            "batch above kMaxTaskBatch should be rejected");
 }
 
+// ---------------------------------------------------------------------------
+// 后台任务（M4a）
+// ---------------------------------------------------------------------------
+
+// 轮询等待后台任务进入终态；超时返回 nullopt。
+std::optional<aiagent::agent::BackgroundTaskSnapshot> WaitForBackgroundTerminal(
+        const std::shared_ptr<aiagent::agent::SubAgentManager>& manager, const std::string& id,
+        int timeout_ms = 5000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto snapshot = manager->PollResult(id);
+        if (snapshot.has_value() &&
+            snapshot->state != aiagent::agent::BackgroundState::kRunning) {
+            return snapshot;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return std::nullopt;
+}
+
+aiagent::agent::SubAgentRequest BackgroundRequest(std::string prompt, std::string type = "general") {
+    aiagent::agent::SubAgentRequest request;
+    request.agent_type = std::move(type);
+    request.prompt = std::move(prompt);
+    request.parent_session_id = "sess-bg";
+    return request;
+}
+
+// 等到子模型被调用 count 次（后台 worker 真正进入运行循环），最多 2s。
+void WaitForStreams(const std::shared_ptr<Harness>& harness, int count) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (harness->streams.load() < count && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+void TestBackgroundDispatchAndPoll() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(), Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<ChildModel>(harness, "BG-REPORT", 200);
+                        }),
+            ParentTools());
+
+    std::atomic<int> forwarded{0};
+    aiagent::agent::SubAgentRequest request =
+            BackgroundRequest("investigate the background widget", "explorer");
+    request.parent_tool_call_id = "call_parent";
+    request.emit = [&forwarded](const aiagent::agent::AgentEvent&) { forwarded.fetch_add(1); };
+    request.should_cancel = []() { return false; };
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto dispatch = manager->RunBackground(request, 0);
+    const long dispatch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+    Expect(dispatch.ok, "background dispatch should succeed");
+    Expect(dispatch.task_id == "bg-1", "first background task should be bg-1");
+    Expect(dispatch.agent_id == "explorer#1", "background dispatch should allocate an agent id");
+    Expect(dispatch_ms < 100,
+           "background dispatch should return immediately, took " +
+                   std::to_string(dispatch_ms) + "ms");
+
+    const auto running = manager->PollResult("bg-1");
+    Expect(running.has_value() && running->state == aiagent::agent::BackgroundState::kRunning,
+           "freshly dispatched task should be running");
+    Expect(running.has_value() && running->agent_id == "explorer#1" &&
+                   running->agent_type == "explorer" && running->session_id == "sess-bg",
+           "snapshot should carry the dispatch identity");
+    Expect(running.has_value() &&
+                   running->prompt_excerpt.find("investigate the background widget") !=
+                           std::string::npos,
+           "snapshot should carry a prompt excerpt");
+    Expect(running.has_value() && running->result.text.empty(),
+           "running task should not expose a report yet");
+    Expect(manager->PollResult("explorer#1").has_value(),
+           "poll should also accept the agent id");
+    const auto running_list = manager->RunningSnapshot();
+    Expect(running_list.size() == 1 && running_list[0].task_id == "bg-1",
+           "running list should contain the dispatched task");
+
+    const auto done = WaitForBackgroundTerminal(manager, "bg-1");
+    Expect(done.has_value() && done->state == aiagent::agent::BackgroundState::kDone,
+           "task should converge to done");
+    Expect(done.has_value() && done->result.ok && done->result.text == "BG-REPORT",
+           "done task should expose the child report");
+    Expect(done.has_value() && done->elapsed_ms >= 200, "elapsed should cover the child run");
+    Expect(manager->RunningSnapshot().empty(), "converged task should leave the running list");
+    Expect(!manager->PollResult("bg-999").has_value(), "unknown id should not resolve");
+
+    const auto stats = manager->Stats();
+    Expect(stats.runs == 1 && stats.failures == 0,
+           "background runs should feed the same stats as foreground runs");
+    Expect(stats.prompt_tokens == 400 && stats.completion_tokens == 40 &&
+                   stats.cache_hit_tokens == 100,
+           "background usage should be collected through the tracking sink");
+    Expect(forwarded.load() == 0,
+           "background tasks must not forward events into the dispatching turn");
+
+    // 成本可观测：后台任务走同一条 subagent_end 日志（token 三字段 + 后台专用事件）。
+    const auto log_dir = TempDir();
+    std::filesystem::create_directories(log_dir);
+    const auto log_path = log_dir / "background_log.txt";
+    std::filesystem::remove(log_path);
+    aiagent::ConfigureDefaultLogger("info", log_path.string());
+    const auto second = manager->RunBackground(BackgroundRequest("log the usage"), 0);
+    Expect(second.ok, "second background task should be admitted");
+    Expect(WaitForBackgroundTerminal(manager, second.task_id).has_value(),
+           "second background task should converge");
+    std::ifstream log_input(log_path);
+    std::ostringstream log_buffer;
+    log_buffer << log_input.rdbuf();
+    std::string logs = log_buffer.str();
+    // background_end 在 delivered 之后写（收敛点优先于日志），这里轮询等它落盘。
+    const auto log_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (logs.find("event=background_end task_id=" + second.task_id) == std::string::npos &&
+           std::chrono::steady_clock::now() < log_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        log_input.clear();
+        log_input.seekg(0);
+        std::ostringstream retry;
+        retry << log_input.rdbuf();
+        logs = retry.str();
+    }
+    Expect(logs.find("event=subagent_end agent_id=general#2") != std::string::npos &&
+                   logs.find("prompt_tokens=400") != std::string::npos &&
+                   logs.find("completion_tokens=40") != std::string::npos &&
+                   logs.find("cache_hit_tokens=100") != std::string::npos,
+           "background runs must keep the usage fields in the subagent_end log");
+    Expect(logs.find("event=background_start task_id=" + second.task_id) != std::string::npos &&
+                   logs.find("event=background_end task_id=" + second.task_id) !=
+                           std::string::npos,
+           "background dispatch and convergence should be logged with the task id");
+}
+
+void TestBackgroundTerminalStates() {
+    // failed：模型抛错，错误原因透传到快照。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(), Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<FailingModel>(harness, "child exploded");
+                            }),
+                ParentTools());
+        const auto dispatch = manager->RunBackground(BackgroundRequest("blow up"), 0);
+        Expect(dispatch.ok, "a failing child should still start in the background");
+        const auto failed = WaitForBackgroundTerminal(manager, dispatch.task_id);
+        Expect(failed.has_value() && failed->state == aiagent::agent::BackgroundState::kFailed,
+               "throwing child should converge to failed");
+        Expect(failed.has_value() && !failed->result.ok &&
+                       failed->result.error.find("child exploded") != std::string::npos,
+               "failure reason should be preserved in the snapshot");
+    }
+    // timed_out：1s 硬超时的循环子 Agent 自行收敛为超时终态。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/1,
+                         /*max_rounds=*/50),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<LoopingChildModel>(harness, 60);
+                            }),
+                ParentTools());
+        const auto dispatch = manager->RunBackground(BackgroundRequest("loop forever"), 0);
+        const auto timed_out =
+                WaitForBackgroundTerminal(manager, dispatch.task_id, /*timeout_ms=*/10000);
+        Expect(timed_out.has_value() &&
+                       timed_out->state == aiagent::agent::BackgroundState::kTimedOut,
+               "child exceeding its timeout should converge to timed_out");
+        Expect(timed_out.has_value() &&
+                       timed_out->result.error.find("timeout") != std::string::npos,
+               "timeout reason should be preserved");
+    }
+}
+
+void TestBackgroundStop() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/30,
+                     /*max_rounds=*/200),
+            Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<LoopingChildModel>(harness, 40);
+                        }),
+            ParentTools());
+
+    const auto dispatch = manager->RunBackground(BackgroundRequest("loop until stopped"), 0);
+    Expect(dispatch.ok, "background dispatch should succeed");
+    // 等 worker 真正进入运行循环，覆盖"运行中被停"的主路径。
+    WaitForStreams(harness, 1);
+    Expect(harness->streams.load() > 0, "child should start streaming before stop");
+
+    std::string message;
+    Expect(manager->Stop(dispatch.task_id, &message) ==
+                   aiagent::agent::BackgroundStopOutcome::kRequested,
+           "stop should be accepted for a running task");
+    const auto stopped = WaitForBackgroundTerminal(manager, dispatch.task_id);
+    Expect(stopped.has_value() && stopped->state == aiagent::agent::BackgroundState::kCancelled,
+           "stopped task should converge to cancelled");
+    Expect(stopped.has_value() && stopped->result.error.find("stopped") != std::string::npos,
+           "stop reason should be visible");
+    Expect(manager->Stop(dispatch.task_id, &message) ==
+                   aiagent::agent::BackgroundStopOutcome::kFinished &&
+                   message.find("cancelled") != std::string::npos,
+           "stopping a finished task should report its terminal state");
+
+    // 也接受 agent_id；未知 id 单独归类。
+    const auto second = manager->RunBackground(BackgroundRequest("stop me by agent id"), 0);
+    Expect(second.ok, "second background dispatch should succeed");
+    Expect(manager->Stop(second.agent_id, &message) ==
+                   aiagent::agent::BackgroundStopOutcome::kRequested,
+           "stop should also accept the agent id");
+    const auto second_stopped = WaitForBackgroundTerminal(manager, second.task_id);
+    Expect(second_stopped.has_value() &&
+                   second_stopped->state == aiagent::agent::BackgroundState::kCancelled,
+           "task stopped by agent id should converge to cancelled");
+    Expect(manager->Stop("bg-999", &message) ==
+                   aiagent::agent::BackgroundStopOutcome::kNotFound &&
+                   message.find("bg-999") != std::string::npos,
+           "unknown id should be reported as not found");
+}
+
+void TestBackgroundGates() {
+    // max_background=0 → 后台关闭（回滚开关）。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/5,
+                         /*max_rounds=*/6, /*result_max_chars=*/8000, /*stream_events=*/true,
+                         /*max_background=*/0),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<ChildModel>(harness, "REPORT");
+                            }),
+                ParentTools());
+        const auto dispatch = manager->RunBackground(BackgroundRequest("x"), 0);
+        Expect(!dispatch.ok && dispatch.error.find("disabled") != std::string::npos,
+               "max_background=0 should disable background dispatch");
+    }
+
+    // max_background=2 → 第 3 个直接拒绝（不排队、不消耗编号）；腾出名额后可再派。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/30,
+                         /*max_rounds=*/6, /*result_max_chars=*/8000, /*stream_events=*/true,
+                         /*max_background=*/2),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<ChildModel>(harness, "REPORT", 300);
+                            }),
+                ParentTools());
+        Expect(manager->RunBackground(BackgroundRequest("hold slot one"), 0).ok,
+               "first background task should be admitted");
+        Expect(manager->RunBackground(BackgroundRequest("hold slot two"), 0).ok,
+               "second background task should be admitted");
+        const auto rejected = manager->RunBackground(BackgroundRequest("one too many"), 0);
+        Expect(!rejected.ok && rejected.error.find("max_background") != std::string::npos,
+               "third background task should be rejected with the limit in the message");
+        Expect(rejected.task_id.empty(), "rejected dispatch must not allocate a task id");
+
+        Expect(WaitForBackgroundTerminal(manager, "bg-1").has_value(),
+               "first background task should converge");
+        const auto third = manager->RunBackground(BackgroundRequest("after a slot frees"), 0);
+        Expect(third.ok && third.task_id == "bg-3",
+               "a freed background slot should admit the next task without reusing ids");
+        manager->ShutdownBackground(std::chrono::milliseconds(3000));
+        Expect(manager->RunningSnapshot().empty(),
+               "shutdown should converge the remaining background tasks");
+    }
+
+    // 与前台共享 max_concurrent 总闸门：max_concurrent=1 时后台任务串行执行。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/1, /*default_timeout_s=*/30,
+                         /*max_rounds=*/6, /*result_max_chars=*/8000, /*stream_events=*/true,
+                         /*max_background=*/3),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<ChildModel>(harness, "REPORT", 60);
+                            }),
+                ParentTools());
+        std::vector<std::string> task_ids;
+        for (int i = 0; i < 3; ++i) {
+            const auto dispatch =
+                    manager->RunBackground(BackgroundRequest("parallel " + std::to_string(i)), 0);
+            Expect(dispatch.ok, "all three background tasks should be admitted");
+            task_ids.push_back(dispatch.task_id);
+        }
+        for (const auto& id : task_ids) {
+            Expect(WaitForBackgroundTerminal(manager, id).has_value(),
+                   "background task should converge");
+        }
+        Expect(harness->max_active.load() == 1,
+               "background tasks must share the max_concurrent gate with foreground runs");
+    }
+}
+
+void TestBackgroundShutdown() {
+    // 取消所有未收敛任务，并在它们写入结果后返回。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/60,
+                         /*max_rounds=*/200),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<LoopingChildModel>(harness, 40);
+                            }),
+                ParentTools());
+        const auto first = manager->RunBackground(BackgroundRequest("loop one"), 0);
+        const auto second = manager->RunBackground(BackgroundRequest("loop two"), 0);
+        Expect(first.ok && second.ok, "both background tasks should be admitted");
+        // 等两个子 Agent 都进入模型调用，确保覆盖"运行中被关闭"的主路径。
+        WaitForStreams(harness, 2);
+        Expect(harness->streams.load() >= 2, "both children should start streaming before shutdown");
+
+        const auto started = std::chrono::steady_clock::now();
+        manager->ShutdownBackground(std::chrono::milliseconds(3000));
+        const long shutdown_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+        Expect(shutdown_ms < 3000, "shutdown should return once every task converged");
+
+        const auto first_snapshot = manager->PollResult(first.task_id);
+        const auto second_snapshot = manager->PollResult(second.task_id);
+        Expect(first_snapshot.has_value() &&
+                       first_snapshot->state == aiagent::agent::BackgroundState::kCancelled &&
+                       first_snapshot->result.error.find("shutting down") != std::string::npos,
+               "shutdown should cancel the running task with a readable reason: got state=" +
+                       (first_snapshot.has_value()
+                                ? std::string(aiagent::agent::BackgroundStateName(
+                                          first_snapshot->state)) +
+                                          " error=" + first_snapshot->result.error
+                                : std::string("no snapshot")));
+        Expect(second_snapshot.has_value() &&
+                       second_snapshot->state == aiagent::agent::BackgroundState::kCancelled,
+               "shutdown should cancel every running task");
+        Expect(manager->RunningSnapshot().empty(), "no task should stay running after shutdown");
+        const auto rejected = manager->RunBackground(BackgroundRequest("after shutdown"), 0);
+        Expect(!rejected.ok && rejected.error.find("shutting down") != std::string::npos,
+               "shutdown should reject new background tasks");
+    }
+
+    // 有界等待：模型不检查取消时，关闭到点即返回，不等 worker 结束。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(), Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<BlockingModel>(harness, 800);
+                            }),
+                ParentTools());
+        const auto dispatch = manager->RunBackground(BackgroundRequest("ignore cancel"), 0);
+        Expect(dispatch.ok, "blocking task should be admitted");
+        // 先等 child 进入 ChatStream（模拟"卡在模型请求里、检查点还没轮到"），
+        // 否则取消会在第一次 should_cancel 检查点生效，测不到有界等待分支。
+        WaitForStreams(harness, 1);
+        Expect(harness->streams.load() == 1, "blocking child should enter the model call");
+
+        const auto started = std::chrono::steady_clock::now();
+        manager->ShutdownBackground(std::chrono::milliseconds(200));
+        const long shutdown_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+        Expect(shutdown_ms >= 200 && shutdown_ms < 700,
+               "shutdown must give up waiting after its timeout, took " +
+                       std::to_string(shutdown_ms) + "ms (streams=" +
+                       std::to_string(harness->streams.load()) + ")");
+        const auto converged = WaitForBackgroundTerminal(manager, dispatch.task_id, 5000);
+        Expect(converged.has_value(),
+               "worker that ignores cancellation should still converge on its own");
+    }
+}
+
+void TestBackgroundRetention() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(), Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<ChildModel>(harness, "REPORT");
+                        }),
+            ParentTools());
+
+    const std::size_t total = aiagent::agent::SubAgentManager::kBackgroundResultRetention + 1;
+    for (std::size_t i = 0; i < total; ++i) {
+        const auto dispatch =
+                manager->RunBackground(BackgroundRequest("sequential " + std::to_string(i)), 0);
+        Expect(dispatch.ok, "sequential dispatch should fit under max_background");
+        const auto done = WaitForBackgroundTerminal(manager, dispatch.task_id);
+        Expect(done.has_value() && done->state == aiagent::agent::BackgroundState::kDone,
+               "sequential background task should finish");
+    }
+
+    Expect(manager->BackgroundSnapshot().size() ==
+                   aiagent::agent::SubAgentManager::kBackgroundResultRetention,
+           "结果表应按上限回收最旧的完成记录");
+    Expect(!manager->PollResult("bg-1").has_value(), "recycled task should no longer resolve");
+    Expect(manager->PollResult("bg-" + std::to_string(total)).has_value(),
+           "newest completed task should stay queryable");
+}
+
+void TestAgentsBackgroundConfig() {
+    std::string error;
+    const auto defaults = aiagent::ParseAgentsConfig("[agents]\nenabled = true\n", &error);
+    Expect(defaults.has_value() && defaults->max_background == 2,
+           "max_background should default to 2");
+
+    error.clear();
+    const auto disabled = aiagent::ParseAgentsConfig("[agents]\nmax_background = 0\n", &error);
+    Expect(disabled.has_value() && disabled->max_background == 0,
+           "max_background=0 should parse (background dispatch off)");
+
+    error.clear();
+    const auto too_large = aiagent::ParseAgentsConfig("[agents]\nmax_background = 20\n", &error);
+    Expect(!too_large.has_value() && error.find("max_background") != std::string::npos,
+           "max_background above 16 should be rejected with the key in the message");
+}
+
 }  // namespace
 
 int main() {
@@ -894,6 +1404,13 @@ int main() {
     TestEventAttribution();
     TestTaskToolEndToEnd();
     TestTaskToolBatchAndErrors();
+    TestBackgroundDispatchAndPoll();
+    TestBackgroundTerminalStates();
+    TestBackgroundStop();
+    TestBackgroundGates();
+    TestBackgroundShutdown();
+    TestBackgroundRetention();
+    TestAgentsBackgroundConfig();
 
     if (g_failures != 0) {
         std::cerr << "sub agent test failed with " << g_failures << " failure(s)\n";

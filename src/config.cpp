@@ -877,6 +877,11 @@ std::optional<AgentsConfig> ParseAgentsConfig(const std::string& content, std::s
                 return std::nullopt;
             }
             config.max_concurrent = static_cast<int>(parsed);
+        } else if (key == "max_background") {
+            if (!parse_int(key, value, 0, 16, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_background = static_cast<int>(parsed);
         } else if (key == "default_timeout_s") {
             if (!parse_int(key, value, 1, 3600, &parsed)) {
                 return std::nullopt;

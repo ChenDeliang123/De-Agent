@@ -4,7 +4,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -73,6 +75,37 @@ struct SubAgentStats {
     long long cache_hit_tokens = 0;
 };
 
+// 后台任务状态机（见 docs/子Agent后台化与可干预规划.md §3.1）：
+// running → done / failed / cancelled / timed_out，终态后不再变化。
+enum class BackgroundState { kRunning, kDone, kFailed, kCancelled, kTimedOut };
+
+// 状态名（日志、错误文本与 CLI 展示共用）。
+const char* BackgroundStateName(BackgroundState state);
+
+// 一条后台任务的对外快照：字段是取样时刻的副本，改动不回流。
+struct BackgroundTaskSnapshot {
+    std::string task_id;         // bg-3（父可见句柄）
+    std::string agent_id;        // explorer#7（派发时即分配，与前台同一套编号）
+    std::string agent_type;      // explorer
+    std::string session_id;      // 派发它的父会话（结果归属；M4c 会话级取消按它过滤）
+    BackgroundState state = BackgroundState::kRunning;
+    std::string prompt_excerpt;  // 派发提示词前 80 字节（UTF-8 边界对齐）
+    std::chrono::steady_clock::time_point started;  // 派发时刻（列表按它排序）
+    long elapsed_ms = 0;         // 运行中 = 已耗时（含等槽位）；终态 = 实际运行耗时
+    SubAgentResult result;       // 终态填充；运行中为空
+};
+
+// 后台派发的启动结果；ok=false 时没有创建任务，error 说明拒绝原因。
+struct BackgroundStartResult {
+    bool ok = false;
+    std::string task_id;
+    std::string agent_id;
+    std::string error;
+};
+
+// Stop() 的结果：已置取消 / 未知 id / 已结束（终态不可再取消）。
+enum class BackgroundStopOutcome { kRequested, kNotFound, kFinished };
+
 // 多 Agent 协同的核心：定义装载、并发闸门、深度控制、超时/取消、结果截断、
 // 事件归属转发。
 //
@@ -120,6 +153,37 @@ public:
     // 批量扇出：并发受 max_concurrent 闸门；返回顺序与输入一致。
     std::vector<SubAgentResult> RunBatch(const std::vector<SubAgentRequest>& requests, int depth);
 
+    // ---- 后台任务（M4a：状态机/结果表/停止/关闭；送达与接口接入见 M4b/M4c）----
+
+    // 后台派发：立即返回句柄（bg-N），子 Agent 在独立线程里跑，结果写进结果表。
+    // 拒绝路径（不创建任务，error 说明原因）：子 Agent 关闭 / 未知类型 / 深度上限 /
+    // 空 prompt / max_background=0 / 未收敛的后台任务已达 max_background（直接拒绝，
+    // 不排队）/ Manager 正在关闭。
+    // 后台任务不继承请求里的 emit 与 should_cancel：二者都是回合作用域的，回合结束
+    // 后调用即悬垂（后台任务按要求跨回合存活）。终止只走 Stop() 与 ShutdownBackground()；
+    // 会话级取消联动在 M4c 接入（按快照里的 session_id 过滤）。
+    BackgroundStartResult RunBackground(const SubAgentRequest& request, int depth);
+
+    // 查询一条后台任务（id 为 bg-N 或 agent_id）；未知（含已被回收）返回 nullopt。
+    std::optional<BackgroundTaskSnapshot> PollResult(const std::string& id) const;
+
+    // 请求停止一条后台任务：置取消标志，子 Agent 在下一个检查点退出（与超时/父取消
+    // 同一条通道）。message 非空时写入人类可读结果。
+    BackgroundStopOutcome Stop(const std::string& id, std::string* message = nullptr);
+
+    // 运行中的后台任务快照，按派发顺序（含正在等 max_concurrent 槽位的任务）。
+    std::vector<BackgroundTaskSnapshot> RunningSnapshot() const;
+
+    // 结果表里全部未回收的任务快照（含终态），按派发顺序。
+    std::vector<BackgroundTaskSnapshot> BackgroundSnapshot() const;
+
+    // 关闭：拒绝新的后台任务，取消所有未收敛任务，等到结果就绪（有界）。
+    // 线程在结果就绪时自行 detach，因此这里不 join；超时只记日志并返回，不阻塞退出。
+    void ShutdownBackground(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
+    // 结果表保留的已完成任务上限（超出按完成顺序回收最旧的，避免无界增长）。
+    static constexpr std::size_t kBackgroundResultRetention = 20;
+
     SubAgentStats Stats() const;
 
 private:
@@ -144,6 +208,40 @@ private:
     bool AcquireSlot(const std::function<bool()>& should_cancel, SubAgentResult* result);
     void ReleaseSlot();
 
+    // 一次派发的运行身份：agent_id / 工具事件前缀 / 子上下文 id 由同一个递增序号
+    // 派生，前台后台共用（编号全局唯一）。
+    struct RunIdentity {
+        std::string agent_id;        // explorer#7
+        std::string tool_prefix;     // sub7:
+        std::string child_context;   // <parent session>#explorer#7
+    };
+
+    // 结果表记录：只存在于 .cpp，对外只暴露 BackgroundTaskSnapshot。
+    struct BackgroundTask;
+
+    // 请求的静态校验（开关/定义/深度/提示词/装配）。通过时 *definition 指向
+    // definitions_ 中的定义（生命周期内稳定）；否则返回拒绝原因。
+    std::optional<std::string> ValidateRequest(const SubAgentRequest& request, int depth,
+                                               const AgentDefinition** definition) const;
+
+    RunIdentity MakeRunIdentity(const AgentDefinition& definition,
+                                const SubAgentRequest& request);
+
+    // 校验通过后的实际运行；身份由调用方给定（前台 = Run，后台 = RunBackground）。
+    SubAgentResult RunWithIdentity(const SubAgentRequest& request, int depth,
+                                   const AgentDefinition& definition,
+                                   const RunIdentity& identity);
+
+    // 结果表（background_mutex_ 保护）。
+    const BackgroundTask* FindBackgroundLocked(const std::string& id) const;
+    BackgroundTaskSnapshot SnapshotLocked(const BackgroundTask& task) const;
+
+    // 后台任务收敛：写结果与终态、置 delivered（ShutdownBackground 的有界等待以它
+    // 为准）、detach 自己的线程句柄（记录被回收时不能再持有可 join 句柄）、
+    // 按完成顺序回收超限的已完成记录。
+    void ConvergeBackground(const std::shared_ptr<BackgroundTask>& task,
+                            const SubAgentResult& result);
+
     AgentsConfig settings_;
     std::vector<AgentDefinition> definitions_;
     ChildRuntimeFactory runtime_factory_;
@@ -157,6 +255,17 @@ private:
     SubAgentStats stats_;
 
     std::atomic<unsigned long long> run_counter_{0};
+
+    mutable std::mutex background_mutex_;
+    std::condition_variable background_cv_;
+    std::map<std::string, std::shared_ptr<BackgroundTask>> background_tasks_;
+    std::deque<std::string> background_completion_order_;  // 回收顺序（最旧在前）
+    // 关闭标志：RunBackground 据此拒绝新任务；在跑任务把它并入取消谓词。
+    // shared_ptr 让 worker 无需持锁即可读到（与 Manager 生命周期解耦）。
+    std::shared_ptr<std::atomic<bool>> background_shutdown_ =
+            std::make_shared<std::atomic<bool>>(false);
+    std::size_t background_running_ = 0;  // 已派发未收敛（含等槽位）的后台任务数
+    std::atomic<unsigned long long> background_counter_{0};
 };
 
 // 定义装载结果：可用定义 + 因缺提示词被跳过的内置定义名。

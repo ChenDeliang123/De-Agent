@@ -82,6 +82,9 @@ enabled = true
 max_depth = 1
 ; 同时运行的子 Agent 上限（含一次批量扇出）。
 max_concurrent = 3
+; 后台任务的并发上限（0 = 关闭 task(background=true)）。后台任务与前台共享
+; max_concurrent 总闸门，这里限制"已受理但未收敛"的数量，超限直接拒绝、不排队。
+max_background = 2
 ; 单个子 Agent 的硬超时（秒）；task 参数 timeout_s 可逐次覆盖。
 ; 实测：默认给太大时粒度过粗的子任务会漫游到接近上限（300s 批次实测 280s 返回），
 ; 所以默认收紧到 120。
