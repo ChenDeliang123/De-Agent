@@ -213,6 +213,21 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
     auto timed_out = std::make_shared<std::atomic<bool>>(false);
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
     auto tool_calls = std::make_shared<std::atomic<int>>(0);
+    // 用量归集：子 Agent 的模型请求全部经由 on_usage sink 累加到这里。
+    struct UsageTotals {
+        std::mutex mutex;
+        long long prompt = 0;
+        long long completion = 0;
+        long long cache_hit = 0;
+
+        void Add(const llm::ChatUsage& usage) {
+            std::lock_guard<std::mutex> lock(mutex);
+            prompt += usage.prompt_tokens;
+            completion += usage.completion_tokens;
+            cache_hit += usage.prompt_cache_hit_tokens;
+        }
+    };
+    auto usage_totals = std::make_shared<UsageTotals>();
     const auto should_cancel = [timed_out, cancelled, deadline,
                                 base = request.should_cancel]() {
         if (base && base()) {
@@ -240,6 +255,9 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
     spec.max_tool_rounds = settings_.max_rounds;
     // BuildChildTools 只有在 depth+1 < max_depth 时才给子 Agent 挂 task 工具。
     spec.delegation_enabled = depth + 1 < settings_.max_depth;
+    spec.on_usage = [usage_totals](const llm::ChatUsage& usage) {
+        usage_totals->Add(usage);
+    };
 
     result.agent_id = agent_id;
     aiagent::DefaultLogger().Log(
@@ -314,6 +332,12 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
                                  std::chrono::steady_clock::now() - started)
                                  .count();
     result.tool_calls = tool_calls->load();
+    {
+        std::lock_guard<std::mutex> lock(usage_totals->mutex);
+        result.prompt_tokens = usage_totals->prompt;
+        result.completion_tokens = usage_totals->completion;
+        result.cache_hit_tokens = usage_totals->cache_hit;
+    }
     if (forward_events) {
         AgentEvent end_event;
         end_event.kind = AgentEventKind::kSubAgentEnd;
@@ -322,6 +346,9 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
         end_event.ok = result.ok;
         end_event.duration_ms = static_cast<int>(result.duration_ms);
         end_event.tool_calls = result.tool_calls;
+        end_event.prompt_tokens = result.prompt_tokens;
+        end_event.completion_tokens = result.completion_tokens;
+        end_event.cache_hit_tokens = result.cache_hit_tokens;
         end_event.text = result.ok ? std::string() : result.error;
         emit(end_event);
     }
@@ -329,6 +356,9 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.runs += 1;
         stats_.total_ms += result.duration_ms;
+        stats_.prompt_tokens += result.prompt_tokens;
+        stats_.completion_tokens += result.completion_tokens;
+        stats_.cache_hit_tokens += result.cache_hit_tokens;
         if (!result.ok) {
             stats_.failures += 1;
         }
@@ -343,6 +373,9 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
                     " timed_out=" + (result.timed_out ? "true" : "false") +
                     " duration_ms=" + std::to_string(result.duration_ms) +
                     " tool_calls=" + std::to_string(result.tool_calls) +
+                    " prompt_tokens=" + std::to_string(result.prompt_tokens) +
+                    " completion_tokens=" + std::to_string(result.completion_tokens) +
+                    " cache_hit_tokens=" + std::to_string(result.cache_hit_tokens) +
                     " text_bytes=" + std::to_string(result.text.size()));
     return result;
 }

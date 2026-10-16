@@ -505,8 +505,17 @@ export class TranscriptRenderer {
     const calls = Number(data?.tool_calls);
     const count = Number.isFinite(calls) && calls > 0 ? calls : 0;
     const head = `${agent} done${duration ? ` in ${duration}` : ""}`;
-    const tail = `${count} tool call${count === 1 ? "" : "s"}`;
-    this.#writeClipped(t.dim(`  ${this.#sym.subagent} ${head} ${this.#sym.dot} ${tail}`));
+    const parts = [`${count} tool call${count === 1 ? "" : "s"}`];
+    // 用量归集（M3）：后端 subagent_end 帧带 prompt/completion token，有则补一段。
+    const prompt = Number(data?.prompt_tokens);
+    const completion = Number(data?.completion_tokens);
+    const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
+    if (total > 0) {
+      parts.push(total < 1000 ? `${total} tokens` : `${(total / 1000).toFixed(1)}k tokens`);
+    }
+    this.#writeClipped(
+      t.dim(`  ${this.#sym.subagent} ${head} ${this.#sym.dot} ${parts.join(` ${this.#sym.dot} `)}`),
+    );
   }
 
   #ensureAssistantLabel() {

@@ -65,6 +65,10 @@ struct SubAgentSnapshot {
     std::size_t failures = 0;
     std::size_t cancelled = 0;
     long total_ms = 0;
+    // 累计 token 用量（所有子 Agent 之和；cache_hit 是 prompt 的子集）。
+    long long prompt_tokens = 0;
+    long long completion_tokens = 0;
+    long long cache_hit_tokens = 0;
     std::vector<SubAgentInfo> definitions;
 };
 

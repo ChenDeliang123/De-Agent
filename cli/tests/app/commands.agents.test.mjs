@@ -19,7 +19,15 @@ const ENABLED = {
   enabled: true,
   max_depth: 1,
   max_concurrent: 3,
-  stats: { runs: 3, failures: 1, cancelled: 0, total_ms: 12345 },
+  stats: {
+    runs: 3,
+    failures: 1,
+    cancelled: 0,
+    total_ms: 12345,
+    prompt_tokens: 30000,
+    completion_tokens: 3000,
+    cache_hit_tokens: 12000,
+  },
   definitions: [
     { name: "general", description: "General-purpose helper", model: "", tools: [] },
     {
@@ -68,6 +76,13 @@ test("/agents prints settings, definitions, and stats", async () => {
     assert.ok(
       printed.includes("stats: runs=3 failures=1 cancelled=0 total_ms=12345"),
       `missing stats line: ${text}`,
+    );
+    // 用量归集（M3）：stats 带 token 时补一行 tokens（含每次均值）。
+    assert.ok(
+      printed.includes(
+        "tokens: prompt=30000 completion=3000 cache_hit=12000 total=33000 (avg 11000/run)",
+      ),
+      `missing tokens line: ${text}`,
     );
     assert.ok(printed.includes("definitions:"), `missing definitions header: ${text}`);
     const general = printed.find((line) => line.includes("general"));

@@ -41,6 +41,17 @@ export const agentCommands = [
       ctx.print(
         `stats: runs=${runs} failures=${failures} cancelled=${cancelled} total_ms=${totalMs}`,
       );
+      // 用量归集（M3）：子 Agent 的 token 之和，与父会话 usage 同一口径。
+      const prompt = Number(stats.prompt_tokens ?? 0);
+      const completion = Number(stats.completion_tokens ?? 0);
+      const cacheHit = Number(stats.cache_hit_tokens ?? 0);
+      const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
+      if (total > 0) {
+        const avg = runs > 0 ? Math.round(total / runs) : total;
+        ctx.print(
+          `tokens: prompt=${prompt} completion=${completion} cache_hit=${cacheHit} total=${total} (avg ${avg}/run)`,
+        );
+      }
       const definitions = Array.isArray(info.definitions) ? info.definitions : [];
       if (definitions.length === 0) {
         ctx.print("definitions: (none)");

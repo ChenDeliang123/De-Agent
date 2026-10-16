@@ -271,6 +271,9 @@ int main() {
                     end.ok = true;
                     end.duration_ms = 1234;
                     end.tool_calls = 3;
+                    end.prompt_tokens = 4000;
+                    end.completion_tokens = 400;
+                    end.cache_hit_tokens = 1000;
                     on_event(end);
                 });
         std::string agents_body;
@@ -303,6 +306,10 @@ int main() {
                            end_frame->data.value("tool_calls", 0) == 3 &&
                            end_frame->data.value("agent_id", std::string()) == "explorer#1",
                    "subagent_end should carry ok, duration, tool calls and the agent id");
+            Expect(end_frame->data.value("prompt_tokens", 0LL) == 4000 &&
+                           end_frame->data.value("completion_tokens", 0LL) == 400 &&
+                           end_frame->data.value("cache_hit_tokens", 0LL) == 1000,
+                   "subagent_end should carry the child token usage");
         }
         if (child_tool_frame != nullptr) {
             Expect(child_tool_frame->data.value("name", std::string()) == "grep" &&
@@ -333,6 +340,9 @@ int main() {
             snapshot.failures = 1;
             snapshot.cancelled = 0;
             snapshot.total_ms = 4200;
+            snapshot.prompt_tokens = 30000;
+            snapshot.completion_tokens = 3000;
+            snapshot.cache_hit_tokens = 12000;
             snapshot.definitions.push_back(
                     aiagent::web::SubAgentInfo{"explorer", "read-only exploration", "",
                                                {"read", "grep", "glob", "ls"}});
@@ -350,6 +360,10 @@ int main() {
                        agents_json["stats"].value("failures", 0) == 1 &&
                        agents_json["stats"].value("total_ms", 0) == 4200,
                "agents endpoint should report the run statistics");
+        Expect(agents_json["stats"].value("prompt_tokens", 0LL) == 30000 &&
+                       agents_json["stats"].value("completion_tokens", 0LL) == 3000 &&
+                       agents_json["stats"].value("cache_hit_tokens", 0LL) == 12000,
+               "agents endpoint should report the aggregated token usage");
         Expect(agents_json["definitions"].size() == 1 &&
                        agents_json["definitions"][0].value("name", std::string()) ==
                                "explorer",

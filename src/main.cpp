@@ -43,6 +43,7 @@
 #include "aiagent/app_paths.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/llm/usage_tracking_model.hpp"
 #include "aiagent/log.hpp"
 #include "aiagent/mcp/mcp_client_bridge.hpp"
 #include "aiagent/permissions/bash_policy.hpp"
@@ -692,9 +693,16 @@ int main(int argc, char** argv) {
                         if (!spec.model.empty()) {
                             child_config.model = spec.model;
                         }
+                        std::shared_ptr<aiagent::llm::IModelClient> child_model =
+                                std::make_shared<aiagent::llm::DeepSeekClient>(child_config);
+                        // 用量归集：子 Agent 的 token 用量经 sink 汇总到 Manager 统计与日志
+                        // （与父会话 usage 同一口径）。
+                        if (spec.on_usage) {
+                            child_model = std::make_shared<aiagent::llm::UsageTrackingModel>(
+                                    child_model, spec.on_usage);
+                        }
                         auto child_runtime = std::make_shared<aiagent::agent::AgentRuntime>(
-                                std::make_shared<aiagent::llm::DeepSeekClient>(child_config),
-                                spec.system_prompt);
+                                child_model, spec.system_prompt);
                         child_runtime->SetToolProvider(spec.tools);
                         child_runtime->SetMaxToolRounds(spec.max_tool_rounds);
                         child_runtime->SetDelegationEnabled(spec.delegation_enabled);
@@ -789,6 +797,9 @@ int main(int argc, char** argv) {
                 snapshot.failures = stats.failures;
                 snapshot.cancelled = stats.cancelled;
                 snapshot.total_ms = stats.total_ms;
+                snapshot.prompt_tokens = stats.prompt_tokens;
+                snapshot.completion_tokens = stats.completion_tokens;
+                snapshot.cache_hit_tokens = stats.cache_hit_tokens;
             }
             return snapshot;
         });

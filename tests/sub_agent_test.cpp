@@ -27,6 +27,7 @@
 #include "aiagent/agent/sub_agent.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/llm/usage_tracking_model.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/filtered_tool_provider.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
@@ -123,6 +124,12 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
         }
         harness_->Leave();
+        aiagent::llm::StreamEvent usage_event;
+        usage_event.usage.prompt_tokens = 400;
+        usage_event.usage.completion_tokens = 40;
+        usage_event.usage.total_tokens = 440;
+        usage_event.usage.prompt_cache_hit_tokens = 100;
+        on_event(usage_event);
         EmitText(on_event, report_);
     }
 
@@ -310,6 +317,16 @@ std::vector<aiagent::agent::AgentDefinition> Definitions() {
     };
 }
 
+// 与 main 的装配一致：子模型客户端套上用量归集装饰器（sink 来自 spec）。
+std::shared_ptr<aiagent::llm::IModelClient> MakeTrackedModel(
+        std::shared_ptr<aiagent::llm::IModelClient> model,
+        const aiagent::agent::SubAgentManager::ChildRuntimeSpec& spec) {
+    if (!spec.on_usage) {
+        return model;
+    }
+    return std::make_shared<aiagent::llm::UsageTrackingModel>(model, spec.on_usage);
+}
+
 struct CapturedSpecs {
     std::mutex mutex;
     std::vector<aiagent::agent::SubAgentManager::ChildRuntimeSpec> specs;
@@ -335,7 +352,8 @@ aiagent::agent::SubAgentManager::ChildRuntimeFactory MakeFactory(
             captured->child_tool_names.push_back(names);
         }
         auto runtime =
-                std::make_shared<aiagent::agent::AgentRuntime>(make_model(spec), spec.system_prompt);
+                std::make_shared<aiagent::agent::AgentRuntime>(MakeTrackedModel(make_model(spec), spec),
+                                                              spec.system_prompt);
         runtime->SetToolProvider(spec.tools);
         runtime->SetMaxToolRounds(spec.max_tool_rounds);
         runtime->SetFallbackWorkingDirectory("/tmp");
@@ -457,6 +475,15 @@ void TestManagerRun() {
     Expect(result.text == "REPORT-CONTENT", "result text should be the child report");
     Expect(result.agent_id == "explorer#1", "agent id should be <type>#<index>");
     Expect(result.tool_calls == 0, "plain report should not record tool calls");
+    Expect(result.prompt_tokens == 400 && result.completion_tokens == 40 &&
+                   result.cache_hit_tokens == 100,
+           "child usage should be collected through the tracking sink");
+
+    const aiagent::agent::SubAgentStats stats = manager->Stats();
+    Expect(stats.runs == 1 && stats.failures == 0, "stats should count the run");
+    Expect(stats.prompt_tokens == 400 && stats.completion_tokens == 40 &&
+                   stats.cache_hit_tokens == 100,
+           "stats should aggregate the child usage");
 
     {
         std::lock_guard<std::mutex> lock(captured->mutex);
@@ -485,9 +512,6 @@ void TestManagerRun() {
         Expect(calls[0][1].role == "user" && calls[0][1].content == "explore the widget",
                "child user message should be the delegated prompt");
     }
-
-    const aiagent::agent::SubAgentStats stats = manager->Stats();
-    Expect(stats.runs == 1 && stats.failures == 0, "stats should count the run");
 }
 
 void TestDepthControl() {

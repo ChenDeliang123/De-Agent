@@ -196,6 +196,9 @@ void WriteAgentEventFrame(
             emit_frame("subagent_end", {{"ok", event.ok},
                                         {"duration_ms", event.duration_ms},
                                         {"tool_calls", event.tool_calls},
+                                        {"prompt_tokens", event.prompt_tokens},
+                                        {"completion_tokens", event.completion_tokens},
+                                        {"cache_hit_tokens", event.cache_hit_tokens},
                                         {"text", event.text}});
             break;
     }
@@ -719,7 +722,10 @@ private:
                                         {{"runs", snapshot.runs},
                                          {"failures", snapshot.failures},
                                          {"cancelled", snapshot.cancelled},
-                                         {"total_ms", snapshot.total_ms}}}};
+                                         {"total_ms", snapshot.total_ms},
+                                         {"prompt_tokens", snapshot.prompt_tokens},
+                                         {"completion_tokens", snapshot.completion_tokens},
+                                         {"cache_hit_tokens", snapshot.cache_hit_tokens}}}};
                             nlohmann::json definitions = nlohmann::json::array();
                             for (const auto& definition : snapshot.definitions) {
                                 definitions.push_back({{"name", definition.name},

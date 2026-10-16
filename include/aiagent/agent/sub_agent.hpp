@@ -54,6 +54,11 @@ struct SubAgentResult {
     std::string error;
     long duration_ms = 0;
     int tool_calls = 0;
+    // 用量归集（口径与 deepseek 客户端的 request_end 日志一致）：
+    // cache_hit_tokens 是 prompt_tokens 的子集。
+    long long prompt_tokens = 0;
+    long long completion_tokens = 0;
+    long long cache_hit_tokens = 0;
 };
 
 // 运行统计（/agents 与日志用）。
@@ -62,6 +67,10 @@ struct SubAgentStats {
     std::size_t failures = 0;
     std::size_t cancelled = 0;
     long total_ms = 0;
+    // 累计用量（所有子 Agent 之和）。
+    long long prompt_tokens = 0;
+    long long completion_tokens = 0;
+    long long cache_hit_tokens = 0;
 };
 
 // 多 Agent 协同的核心：定义装载、并发闸门、深度控制、超时/取消、结果截断、
@@ -86,6 +95,9 @@ public:
         int max_tool_rounds = 0;
         // 该子 Agent 是否也拿到了 task 工具（depth+1 < max_depth）；决定是否注入派发准则。
         bool delegation_enabled = false;
+        // 用量归集 sink：装配方创建子模型客户端时套 UsageTrackingModel 并转发到这里。
+        // 与「会话 usage」同一口径（prompt/completion/cache_hit），用于统计与日志。
+        std::function<void(const llm::ChatUsage&)> on_usage;
     };
     using ChildRuntimeFactory =
             std::function<std::shared_ptr<AgentRuntime>(const ChildRuntimeSpec& spec)>;

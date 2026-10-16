@@ -288,8 +288,28 @@ test("renderer prints sub-agent lifecycle lines", () => {
     tool_calls: 1,
     text: "timed out",
   });
+  // 用量归集（M3）：帧里带 token 时在生命周期行补一段；不带则保持原样。
+  renderer.subagentEnd({
+    agent_id: "explorer#2",
+    ok: true,
+    duration_ms: 24000,
+    tool_calls: 15,
+    prompt_tokens: 4000,
+    completion_tokens: 400,
+    cache_hit_tokens: 1000,
+  });
+  renderer.subagentEnd({
+    agent_id: "explorer#3",
+    ok: true,
+    duration_ms: 2000,
+    tool_calls: 2,
+    prompt_tokens: 400,
+    completion_tokens: 40,
+  });
   const text = out.text();
   assert.ok(text.includes("  ↳ explorer#1 started"), text);
+  assert.ok(text.includes("  ↳ explorer#2 done in 24.0s · 15 tool calls · 4.4k tokens"), text);
+  assert.ok(text.includes("  ↳ explorer#3 done in 2.0s · 2 tool calls · 440 tokens"), text);
   assert.ok(text.includes("  ↳ general#2 started"), text);
   assert.ok(text.includes("  ↳ explorer#1 done in 3.9s · 3 tool calls"), text);
   assert.ok(text.includes("  ↳ explorer#1 done in 1m 4s · 1 tool call"), text);

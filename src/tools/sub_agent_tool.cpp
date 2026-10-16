@@ -40,7 +40,7 @@ bool ParseTaskItem(const nlohmann::json& item, const std::string& location,
     return true;
 }
 
-// 结果文本：标题行携带元数据（状态/耗时/工具调用数），正文为子 Agent 报告。
+// 结果文本：标题行携带元数据（状态/耗时/工具调用数/token 用量），正文为子 Agent 报告。
 std::string FormatResults(const std::vector<agent::SubAgentResult>& results) {
     std::string text;
     for (const auto& result : results) {
@@ -51,6 +51,17 @@ std::string FormatResults(const std::vector<agent::SubAgentResult>& results) {
         if (result.ok) {
             text += "done in " + FormatSeconds(result.duration_ms) + ", " +
                     std::to_string(result.tool_calls) + " tool calls";
+            const long long total_tokens = result.prompt_tokens + result.completion_tokens;
+            if (total_tokens > 0) {
+                if (total_tokens < 1000) {
+                    text += ", " + std::to_string(total_tokens) + " tokens";
+                } else {
+                    char buffer[32];
+                    std::snprintf(buffer, sizeof(buffer), ", %.1fk tokens",
+                                  static_cast<double>(total_tokens) / 1000.0);
+                    text += buffer;
+                }
+            }
         } else if (result.timed_out) {
             text += "failed: " + result.error;
         } else if (result.cancelled) {

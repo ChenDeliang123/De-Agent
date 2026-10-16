@@ -47,6 +47,10 @@ struct AgentEvent {
     // kSubAgentEnd
     int duration_ms = 0;   // 子 Agent 运行耗时
     int tool_calls = 0;    // 子 Agent 内部的工具调用次数
+    // kSubAgentEnd：子 Agent 的 token 用量（口径同 deepseek 客户端 request_end 日志）。
+    long long prompt_tokens = 0;
+    long long completion_tokens = 0;
+    long long cache_hit_tokens = 0;
 
     // kApprovalRequest
     std::string approval_reason;
