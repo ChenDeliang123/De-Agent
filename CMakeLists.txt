@@ -216,6 +216,20 @@ if(AIAGENT_BUILD_TESTS)
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/de_script_test.sh
             ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
+  # CPack DEB 冒烟测试（仅当本机同时有 cpack 与 dpkg-deb）。
+  find_program(AIAGENT_CPACK_EXECUTABLE cpack)
+  find_program(AIAGENT_DPKG_DEB_EXECUTABLE dpkg-deb)
+  if(AIAGENT_CPACK_EXECUTABLE AND AIAGENT_DPKG_DEB_EXECUTABLE)
+    add_test(
+      NAME aiagent_cpack_deb
+      COMMAND
+        ${CMAKE_COMMAND} -DAIAGENT_BUILD_DIR=${CMAKE_BINARY_DIR}
+        -DAIAGENT_CPACK_STAGE=${CMAKE_BINARY_DIR}/cpack-stage
+        -DAIAGENT_CPACK=${AIAGENT_CPACK_EXECUTABLE}
+        -DAIAGENT_DPKG_DEB=${AIAGENT_DPKG_DEB_EXECUTABLE} -P
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
+  endif()
+
   add_executable(logging_test tests/logging_test.cpp)
   target_link_libraries(logging_test PRIVATE aiagent_log aiagent_llm Threads::Threads)
   add_test(NAME aiagent_logging COMMAND logging_test)
@@ -331,3 +345,10 @@ install(FILES
           "${CMAKE_CURRENT_SOURCE_DIR}/conf/cli.ini.example"
         DESTINATION ${CMAKE_INSTALL_DATADIR}/de/conf
         COMPONENT deagent)
+
+# ---------------------------------------------------------------------------
+# CPack 打包（deb / rpm）；仅在顶层工程时启用。
+# ---------------------------------------------------------------------------
+if(PROJECT_IS_TOP_LEVEL)
+  include(cmake/Packaging.cmake)
+endif()

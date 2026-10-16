@@ -165,6 +165,39 @@ tar xzf de-agent-mcp-<version>-linux-<arch>.tar.gz \
 > Python 插件需要目标机器有 `python3`；`native` / `shell` 等插件不需要。
 > 也可在你的 `conf/conf.ini` 的 `[mcp]` 段显式指定 `binary` / `plugins` 覆盖默认发现。
 
+### 系统包（deb / rpm）
+
+想交给系统包管理器安装（自动带依赖、可卸载）：
+
+```bash
+scripts/package-deb-rpm.sh
+# → dist/de-agent_<version>_amd64.deb
+# → dist/de-agent-<version>-<release>.<arch>.rpm   （需构建机装 rpm-build）
+```
+
+安装 / 卸载：
+
+```bash
+# Debian / Ubuntu
+sudo apt install ./de-agent_0.1.0_amd64.deb   # 自动带 libcurl4 / nodejs(>=18) / curl
+sudo apt remove  de-agent
+
+# RHEL / Fedora / openSUSE
+sudo dnf install ./de-agent-0.1.0-1.x86_64.rpm
+sudo dnf remove  de-agent
+```
+
+安装后：可执行文件在 `/usr/bin/de` 与 `/usr/bin/aiagent_app`，脚本资源在
+`/usr/lib/de/cli`，配置模板在 `/usr/share/de/conf`；**数据仍在 `~/.de`**。
+首次使用 `de init` 生成配置，然后直接 `de`。
+
+- 依赖：后端需 `libcurl4`（由 `dpkg-shlibdeps` 自动分析并与显式依赖合并）；
+  终端客户端需 `nodejs (>= 18)` 与 `curl`；`Recommends: python3`（MCP Python 插件）。
+- 出 rpm 需构建机有 `rpm-build`（Debian/Ubuntu：`sudo apt install rpm`）。
+- **发布不需要服务器**：把 `.deb`/`.rpm` 传到 Gitee/GitHub Releases 即可，
+  用户 `apt install ./xxx.deb` 下载安装；想要 `apt upgrade` 自动升级再把它们
+  放进一个静态 APT/YUM 源（Gitee Pages 等免费静态托管即可）。
+
 ## 使用
 
 安装完成后，在**任意目录**运行 `de` 即可：需要时它会自动拉起后端守护进程，
