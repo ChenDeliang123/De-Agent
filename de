@@ -123,6 +123,7 @@ commands:
   logs [target]    tail log: backend (default) | cli
   init             create user config from examples (non-destructive)
   doctor           check runtime environment and resolved paths
+  purge            delete user data dir (sessions/permissions/logs/conf), asks to confirm
   help             show this help
 
 options:
@@ -206,6 +207,41 @@ port_in_use() {
   else
     (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null
   fi
+}
+
+# 删除用户数据目录（会话库、权限、策略、信任、日志与 conf.ini）。
+# 系统包卸载**不会**自动删这些，故提供显式命令；需输入 yes，或用 --yes 跳过确认。
+purge_data() {
+  local assume_yes=0
+  if [ "${#CLI_ARGS[@]}" -gt 0 ] && [ "${CLI_ARGS[0]}" = "--yes" ]; then
+    assume_yes=1
+  fi
+  if [ -z "${DATA_DIR:-}" ]; then
+    echo "data dir is empty; nothing to purge"
+    return 0
+  fi
+  echo "purge will remove user data:"
+  echo "  ${DATA_DIR}"
+  echo "  (sessions, permissions, bash policy, trust, logs, conf.ini with api key)"
+  if [ "${assume_yes}" -ne 1 ]; then
+    printf "type 'yes' to confirm: "
+    local answer=""
+    read -r answer || true
+    if [ "${answer}" != "yes" ]; then
+      echo "aborted"
+      return 1
+    fi
+  fi
+  rm -rf "${DATA_DIR}"
+  echo "removed ${DATA_DIR}"
+  case "${RUNTIME_DIR:-}" in
+    "${DATA_DIR}"/*) ;;
+    *)
+      if [ -n "${RUNTIME_DIR:-}" ] && [ -d "${RUNTIME_DIR}" ]; then
+        echo "note: runtime dir is outside data dir and was kept: ${RUNTIME_DIR}"
+      fi
+      ;;
+  esac
 }
 
 DOCTOR_FAILURES=0
@@ -404,6 +440,10 @@ while [ "$#" -gt 0 ]; do
       ACTION="doctor"
       shift
       ;;
+    purge)
+      ACTION="purge"
+      shift
+      ;;
     help|--help|-h)
       ACTION="help"
       shift
@@ -476,6 +516,9 @@ case "${ACTION}" in
     ;;
   doctor)
     doctor
+    ;;
+  purge)
+    purge_data
     ;;
   logs)
     ensure_runtime_dir

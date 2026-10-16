@@ -66,4 +66,11 @@ case "${out}" in
   *) fail "doctor did not resolve DE_HOME data dir" ;;
 esac
 
+# purge --yes 应删除用户数据目录（卸载包不会自动删，故提供显式命令）。
+if ! out="$("${DE}" purge --yes 2>&1)"; then
+  echo "${out}"
+  fail "de purge --yes"
+fi
+[ ! -e "${DE_HOME}" ] || fail "purge did not remove data dir ${DE_HOME}"
+
 echo "de script test passed"

@@ -49,6 +49,9 @@ set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 # （或发行版 nodejs 太旧时）不会因为硬 Depends 而直接拒绝安装。
 set(CPACK_DEBIAN_DEAGENT_PACKAGE_RECOMMENDS
     "nodejs (>= 18), curl, python3")
+# 卸载时提示：用户数据（~/.de）按规范不删除，postrm 只打印清理方法。
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postrm")
 
 # ---------------------------------------------------------------------------
 # RPM（需目标机器安装 rpmbuild；本仓库脚本会在缺失时自动跳过）
@@ -61,6 +64,8 @@ set(CPACK_RPM_PACKAGE_GROUP "Development/Tools")
 set(CPACK_RPM_PACKAGE_LICENSE "Proprietary")
 # 共享库依赖交给 rpm 自动分析（libcurl.so.4 等）；node/curl/python3 放 Recommends。
 set(CPACK_RPM_PACKAGE_RECOMMENDS "nodejs >= 18, curl, python3")
+set(CPACK_RPM_POST_UNINSTALL_SCRIPT_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postrm")
 set(CPACK_RPM_PACKAGE_SUMMARY
     "de agent - C++ coding agent runtime with a zero-dependency terminal client")
 

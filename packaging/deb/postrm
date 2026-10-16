@@ -1,0 +1,13 @@
+#!/bin/sh
+# de-agent postrm（DEB）
+#
+# 用户数据（会话库、权限、日志、conf.ini）默认在 ~/.de（或 $DE_HOME），
+# 按 Debian 规范**不随卸载删除**。这里只提示位置与清理方式。
+case "$1" in
+  remove|purge)
+    echo "de-agent: user data was NOT removed (it lives in your home directory)."
+    echo "de-agent: default location: ~/.de   (override: \$DE_HOME)"
+    echo "de-agent: to remove it completely:  rm -rf ~/.de"
+    ;;
+esac
+exit 0

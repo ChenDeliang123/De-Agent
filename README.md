@@ -198,6 +198,14 @@ sudo dnf remove  de-agent
 - **发布不需要服务器**：把 `.deb`/`.rpm` 传到 Gitee/GitHub Releases 即可，
   用户 `apt install ./xxx.deb` 下载安装；想要 `apt upgrade` 自动升级再把它们
   放进一个静态 APT/YUM 源（Gitee Pages 等免费静态托管即可）。
+- **卸载与清理**：`apt remove` / `dnf remove` 只删 `/usr` 下的程序文件，
+  **用户数据会保留在 `~/.de`**（会话历史、权限、日志，以及含 API key 的
+  `conf.ini`）——这是有意为之，重装/升级不会丢会话。彻底清理：
+  ```bash
+  de purge          # 二次确认后删除 $DE_HOME；de purge --yes 跳过确认
+  # 或直接：rm -rf ~/.de
+  ```
+  deb 卸载时也会打印数据位置与清理提示。
 
 ## 使用
 
