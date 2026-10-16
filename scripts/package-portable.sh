@@ -105,6 +105,8 @@ tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
   cd "${DIST_DIR}"
   sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
 )
+# 清掉解开的 staging 目录，dist/ 只留产物（tar.gz + sha256）。
+rm -rf "${PKG_DIR}"
 
 echo
 echo "artifact: ${DIST_DIR}/${PACKAGE_NAME}.tar.gz"
