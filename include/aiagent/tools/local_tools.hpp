@@ -7,9 +7,9 @@
 
 namespace aiagent::tools {
 
-// 后端内置 coding 工具：read / write / edit / bash。
+// 后端内置 coding 工具：read / write / edit / bash / ls / glob / grep。
 // 直接操作本地文件系统、执行本地命令（以后端进程权限运行），
-// 是终端 coding 客户端的安全边界。
+// 是终端 coding 客户端的安全边界。ls / glob / grep 为只读检索工具。
 //
 // 相对路径以 ToolContext.working_directory 为基准；是否允许越出工作目录由
 // 该请求的权限策略（policy.allow_outside）决定，extra_roots 是额外放行的根目录

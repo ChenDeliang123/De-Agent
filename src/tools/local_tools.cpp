@@ -3,8 +3,11 @@
 #include <json.hpp>
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -21,6 +24,26 @@ namespace fs = std::filesystem;
 
 constexpr size_t kReadMaxBytes = 50 * 1024;
 constexpr int kReadMaxLines = 2000;
+
+// 只读检索工具（ls / glob / grep）的上限：输出字节、被搜索文件大小、
+// 二进制嗅探长度、grep 单行长度。
+constexpr size_t kSearchMaxBytes = 50 * 1024;
+constexpr std::uintmax_t kSearchMaxFileBytes = 1024 * 1024;
+constexpr size_t kSearchSniffBytes = 8192;
+constexpr size_t kGrepMaxLineBytes = 500;
+
+// 从头按字节截断，且不劈开 UTF-8 序列（read / glob / grep 共用）。
+void TruncateUtf8Head(std::string* text, size_t max_bytes, bool* truncated) {
+    if (text->size() <= max_bytes) {
+        return;
+    }
+    size_t cut = max_bytes;
+    while (cut > 0 && (static_cast<unsigned char>((*text)[cut]) & 0xC0) == 0x80) {
+        --cut;
+    }
+    text->resize(cut);
+    *truncated = true;
+}
 
 // 读取文本并按 offset/limit 切片，再按行/字节截断（头部保留）。
 std::string ReadSliced(const std::string& content, const nlohmann::json& arguments,
@@ -69,14 +92,7 @@ std::string ReadSliced(const std::string& content, const nlohmann::json& argumen
     }
 
     std::string text = out.str();
-    if (text.size() > kReadMaxBytes) {
-        size_t cut = kReadMaxBytes;
-        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
-            --cut;
-        }
-        text = text.substr(0, cut);
-        *truncated = true;
-    }
+    TruncateUtf8Head(&text, kReadMaxBytes, truncated);
     return text;
 }
 
@@ -117,6 +133,392 @@ fs::path CanonicalOrNormal(const fs::path& path) {
         return path.lexically_normal();
     }
     return canonical;
+}
+
+// ---------- 只读检索工具（ls / glob / grep）的公共实现 ----------
+
+// 把 glob（`*` / `?` / `**`，以 '/' 分隔）编译成锚定的 ECMAScript 正则源：
+// `**` 匹配任意多段（含 0 段），`*` / `?` 只在单个路径段内匹配。
+std::string GlobToRegexSource(const std::string& pattern) {
+    constexpr char kRegexSpecials[] = ".^$|()[]{}+\\*?";
+
+    std::string out = "^";
+    size_t i = 0;
+    while (i < pattern.size()) {
+        const char c = pattern[i];
+        if (c == '*') {
+            if (i + 1 < pattern.size() && pattern[i + 1] == '*') {
+                while (i < pattern.size() && pattern[i] == '*') {
+                    ++i;
+                }
+                if (i < pattern.size() && pattern[i] == '/') {
+                    ++i;
+                    out += "(?:[^/]+/)*";
+                } else {
+                    out += ".*";
+                }
+            } else {
+                ++i;
+                out += "[^/]*";
+            }
+        } else if (c == '?') {
+            ++i;
+            out += "[^/]";
+        } else {
+            ++i;
+            if (std::strchr(kRegexSpecials, c) != nullptr) {
+                out += '\\';
+            }
+            out += c;
+        }
+    }
+    out += '$';
+    return out;
+}
+
+// 递归遍历目录（DFS，同层按文件名字典序、目录与文件混排）。
+// 跳过所有以 '.' 开头的条目（隐藏文件与目录），不进入符号链接目录。
+// visit(abs, relative, is_dir, is_file) 返回 false 时提前结束遍历；
+// is_dir 只对真实目录为真，is_file 跟随文件符号链接（目录符号链接两者皆为假）。
+// max_depth <= 0 表示不限深度。
+template <typename Visit>
+bool WalkTree(const fs::path& dir, const fs::path& relative, int depth, int max_depth,
+              const Visit& visit) {
+    std::error_code iterator_error;
+    const fs::directory_iterator iterator(
+            dir, fs::directory_options::skip_permission_denied, iterator_error);
+    if (iterator_error) {
+        return true;  // 打不开的目录直接跳过
+    }
+
+    std::vector<fs::directory_entry> children;
+    for (const fs::directory_entry& entry : iterator) {
+        const std::string name = entry.path().filename().string();
+        if (!name.empty() && name[0] == '.') {
+            continue;
+        }
+        children.push_back(entry);
+    }
+    std::sort(children.begin(), children.end(),
+              [](const fs::directory_entry& a, const fs::directory_entry& b) {
+                  return a.path().filename().string() < b.path().filename().string();
+              });
+
+    for (const fs::directory_entry& child : children) {
+        std::error_code status_error;
+        const fs::file_status link_status = child.symlink_status(status_error);
+        const bool is_dir = !status_error && fs::is_directory(link_status);
+        bool is_file = false;
+        if (!is_dir) {
+            std::error_code file_error;
+            is_file = fs::is_regular_file(child.status(file_error));
+        }
+        const fs::path child_relative = relative / child.path().filename();
+        if (!visit(child.path(), child_relative, is_dir, is_file)) {
+            return false;
+        }
+        if (is_dir && (max_depth <= 0 || depth + 1 < max_depth)) {
+            if (!WalkTree(child.path(), child_relative, depth + 1, max_depth, visit)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// 检索根必须存在且是目录。
+bool CheckSearchRoot(const std::string& path, std::string* error) {
+    std::error_code status_error;
+    const fs::file_status status = fs::status(path, status_error);
+    if (status_error || !fs::exists(status)) {
+        *error = "path does not exist: " + path;
+        return false;
+    }
+    if (!fs::is_directory(status)) {
+        *error = "not a directory: " + path;
+        return false;
+    }
+    return true;
+}
+
+long IntArgument(const nlohmann::json& arguments, const char* name, long fallback) {
+    const auto it = arguments.find(name);
+    if (it != arguments.end() && it->is_number_integer()) {
+        return it->get<long>();
+    }
+    return fallback;
+}
+
+bool FlagArgument(const nlohmann::json& arguments, const char* name, bool fallback) {
+    const auto it = arguments.find(name);
+    if (it != arguments.end() && it->is_boolean()) {
+        return it->get<bool>();
+    }
+    return fallback;
+}
+
+std::string JoinLines(const std::vector<std::string>& lines, size_t count) {
+    std::ostringstream out;
+    for (size_t i = 0; i < count; ++i) {
+        if (i > 0) {
+            out << '\n';
+        }
+        out << lines[i];
+    }
+    return out.str();
+}
+
+std::string ToLowerAscii(std::string text) {
+    for (char& c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return text;
+}
+
+// ls：递归列出目录树，目录条目带结尾 '/'，路径相对根、每层字典序。
+ToolExecutionResult RunLs(const std::string& root, const nlohmann::json& arguments) {
+    ToolExecutionResult result;
+    std::string error;
+    if (!CheckSearchRoot(root, &error)) {
+        result.error = error;
+        return result;
+    }
+
+    long depth = IntArgument(arguments, "depth", 2);
+    depth = std::max<long>(1, std::min<long>(4, depth));
+    long limit = IntArgument(arguments, "limit", 200);
+    limit = std::max<long>(1, limit);
+
+    std::vector<std::string> lines;
+    bool truncated = false;
+    WalkTree(root, fs::path(), 0, static_cast<int>(depth),
+             [&](const fs::path&, const fs::path& relative, bool is_dir, bool) {
+                 std::string line = relative.generic_string();
+                 if (is_dir) {
+                     line += '/';
+                 }
+                 lines.push_back(std::move(line));
+                 if (lines.size() > static_cast<size_t>(limit)) {
+                     truncated = true;
+                     return false;
+                 }
+                 return true;
+             });
+    if (truncated) {
+        lines.resize(static_cast<size_t>(limit));
+    }
+
+    result.ok = true;
+    result.text = lines.empty() ? "(empty)" : JoinLines(lines, lines.size());
+    if (truncated) {
+        result.text += "\n... (truncated)";
+    }
+    return result;
+}
+
+// glob：按 glob 模式匹配搜索根下的文件（只返回文件）。
+ToolExecutionResult RunGlob(const std::string& root, const std::string& pattern,
+                            const nlohmann::json& arguments) {
+    ToolExecutionResult result;
+    if (pattern.empty()) {
+        result.error = "glob requires a non-empty pattern";
+        return result;
+    }
+
+    std::regex expression;
+    try {
+        expression.assign(GlobToRegexSource(pattern), std::regex_constants::ECMAScript);
+    } catch (const std::regex_error& regex_error) {
+        result.error = "invalid glob pattern: " + pattern + " (" + regex_error.what() + ")";
+        return result;
+    }
+
+    std::string error;
+    if (!CheckSearchRoot(root, &error)) {
+        result.error = error;
+        return result;
+    }
+
+    long limit = IntArgument(arguments, "limit", 200);
+    limit = std::max<long>(1, limit);
+
+    std::vector<std::string> matches;
+    bool truncated = false;
+    WalkTree(root, fs::path(), 0, 0,
+             [&](const fs::path&, const fs::path& relative, bool, bool is_file) {
+                 if (!is_file) {
+                     return true;
+                 }
+                 const std::string relative_text = relative.generic_string();
+                 if (!std::regex_search(relative_text, expression)) {
+                     return true;
+                 }
+                 matches.push_back(relative_text);
+                 if (matches.size() > static_cast<size_t>(limit)) {
+                     truncated = true;
+                     return false;
+                 }
+                 return true;
+             });
+    if (truncated) {
+        matches.resize(static_cast<size_t>(limit));
+    }
+    if (matches.empty()) {
+        result.ok = true;
+        result.text = "no matches";
+        return result;
+    }
+
+    std::sort(matches.begin(), matches.end());
+    std::string text = JoinLines(matches, matches.size());
+    bool bytes_truncated = false;
+    TruncateUtf8Head(&text, kSearchMaxBytes, &bytes_truncated);
+    if (truncated || bytes_truncated) {
+        text += "\n... (truncated)";
+    }
+    result.ok = true;
+    result.text = std::move(text);
+    return result;
+}
+
+// grep：逐行搜索目录下的文本文件，输出 `相对路径:行号: 行内容`。
+ToolExecutionResult RunGrep(const std::string& root, const std::string& pattern,
+                            const nlohmann::json& arguments) {
+    ToolExecutionResult result;
+    if (pattern.empty()) {
+        result.error = "grep requires a non-empty pattern";
+        return result;
+    }
+
+    const bool ignore_case = FlagArgument(arguments, "ignore_case", false);
+    const bool literal = FlagArgument(arguments, "literal", false);
+    long max_results = IntArgument(arguments, "max_results", 100);
+    max_results = std::max<long>(1, max_results);
+
+    std::regex expression;
+    if (!literal) {
+        try {
+            std::regex::flag_type flags = std::regex_constants::ECMAScript;
+            if (ignore_case) {
+                flags |= std::regex_constants::icase;
+            }
+            expression.assign(pattern, flags);
+        } catch (const std::regex_error& regex_error) {
+            result.error = "invalid pattern: " + pattern + " (" + regex_error.what() + ")";
+            return result;
+        }
+    }
+    const std::string folded_pattern =
+            literal && ignore_case ? ToLowerAscii(pattern) : std::string();
+
+    // include：不含 '/' 时按文件名匹配，否则按相对路径匹配。
+    const std::string include = arguments.value("include", std::string());
+    bool include_on_basename = false;
+    std::regex include_expression;
+    if (!include.empty()) {
+        include_on_basename = include.find('/') == std::string::npos;
+        try {
+            include_expression.assign(GlobToRegexSource(include),
+                                      std::regex_constants::ECMAScript);
+        } catch (const std::regex_error& regex_error) {
+            result.error =
+                    "invalid include pattern: " + include + " (" + regex_error.what() + ")";
+            return result;
+        }
+    }
+
+    std::string error;
+    if (!CheckSearchRoot(root, &error)) {
+        result.error = error;
+        return result;
+    }
+
+    std::vector<std::string> matches;
+    bool truncated = false;
+    WalkTree(root, fs::path(), 0, 0,
+             [&](const fs::path& absolute, const fs::path& relative, bool, bool is_file) {
+                 if (!is_file) {
+                     return true;
+                 }
+                 const std::string relative_text = relative.generic_string();
+                 if (!include.empty()) {
+                     const std::string target = include_on_basename
+                                                        ? relative.filename().generic_string()
+                                                        : relative_text;
+                     if (!std::regex_search(target, include_expression)) {
+                         return true;
+                     }
+                 }
+
+                 std::error_code size_error;
+                 const std::uintmax_t size = fs::file_size(absolute, size_error);
+                 if (size_error || size > kSearchMaxFileBytes) {
+                     return true;  // 拿不到大小或超过 1MiB 的文件跳过
+                 }
+                 std::ifstream input(absolute, std::ios::binary);
+                 if (!input) {
+                     return true;
+                 }
+                 std::ostringstream buffer;
+                 buffer << input.rdbuf();
+                 const std::string content = buffer.str();
+
+                 const size_t nul = content.find('\0');
+                 if (nul != std::string::npos && nul < kSearchSniffBytes) {
+                     return true;  // 二进制文件跳过
+                 }
+
+                 long line_number = 0;
+                 std::istringstream lines(content);
+                 std::string line;
+                 while (std::getline(lines, line)) {
+                     ++line_number;
+                     line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+                     bool matched = false;
+                     if (literal) {
+                         matched = ignore_case ? ToLowerAscii(line).find(folded_pattern) !=
+                                                          std::string::npos
+                                               : line.find(pattern) != std::string::npos;
+                     } else {
+                         matched = std::regex_search(line, expression);
+                     }
+                     if (!matched) {
+                         continue;
+                     }
+                     bool line_truncated = false;
+                     TruncateUtf8Head(&line, kGrepMaxLineBytes, &line_truncated);
+                     if (line_truncated) {
+                         line += "...";
+                     }
+                     matches.push_back(relative_text + ":" + std::to_string(line_number) +
+                                       ": " + line);
+                     if (matches.size() > static_cast<size_t>(max_results)) {
+                         truncated = true;
+                         return false;
+                     }
+                 }
+                 return true;
+             });
+    if (truncated) {
+        matches.resize(static_cast<size_t>(max_results));
+    }
+    if (matches.empty()) {
+        result.ok = true;
+        result.text = "no matches";
+        return result;
+    }
+
+    std::string text = JoinLines(matches, matches.size());
+    bool bytes_truncated = false;
+    TruncateUtf8Head(&text, kSearchMaxBytes, &bytes_truncated);
+    if (truncated || bytes_truncated) {
+        text += "\n... (truncated)";
+    }
+    result.ok = true;
+    result.text = std::move(text);
+    return result;
 }
 
 }  // namespace
@@ -258,7 +660,70 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
                                       {"description", "Timeout in seconds (optional, default 60)"}}}}},
                        {"required", json::array({"command"})}};
 
-    return {read, write, edit, bash};
+    llm::ToolSpec ls;
+    ls.name = "ls";
+    ls.description =
+            "List a directory tree. Entries are paths relative to the listed root (directories "
+            "end with '/'), sorted by name within each level. Hidden files and directories "
+            "(names starting with '.') are skipped. Depth is clamped to 1..4 (default 2) and at "
+            "most 200 entries are returned (default).";
+    ls.parameters = {{"type", "object"},
+                     {"properties",
+                      {{"path", {{"type", "string"},
+                                 {"description", "Directory to list (relative or absolute, "
+                                                 "defaults to the working directory)"}}},
+                       {"depth", {{"type", "integer"},
+                                  {"description", "Recursion depth, clamped to 1..4 (default 2)"}}},
+                       {"limit", {{"type", "integer"},
+                                  {"description", "Maximum number of entries (default 200)"}}}}},
+                     {"required", json::array()}};
+
+    llm::ToolSpec glob;
+    glob.name = "glob";
+    glob.description =
+            "Find files by glob pattern ('*', '?' and '**' are supported; '**' also matches zero "
+            "path segments). Only files are returned, as sorted paths relative to the search "
+            "root. Hidden files and directories (names starting with '.') are skipped. At most "
+            "200 matches (default) are returned and output is truncated to 50KB.";
+    glob.parameters = {{"type", "object"},
+                       {"properties",
+                        {{"pattern", {{"type", "string"},
+                                      {"description", "Glob pattern to match, e.g. '**/*.cpp'"}}},
+                         {"path", {{"type", "string"},
+                                   {"description", "Directory to search (relative or absolute, "
+                                                   "defaults to the working directory)"}}},
+                         {"limit", {{"type", "integer"},
+                                    {"description", "Maximum number of matches (default 200)"}}}}},
+                       {"required", json::array({"pattern"})}};
+
+    llm::ToolSpec grep;
+    grep.name = "grep";
+    grep.description =
+            "Search file contents line by line under a directory. By default pattern is an "
+            "ECMAScript regular expression; set literal=true for plain substring matching. "
+            "Hidden files and directories (names starting with '.') are skipped, as are binary "
+            "files and files larger than 1MB. Results are reported as 'path:line: content' "
+            "(content truncated to 500 characters); at most 100 results (default) are returned "
+            "and output is truncated to 50KB.";
+    grep.parameters = {
+            {"type", "object"},
+            {"properties",
+             {{"pattern", {{"type", "string"},
+                           {"description", "Text or regular expression to search for"}}},
+              {"path", {{"type", "string"},
+                        {"description", "Directory to search (relative or absolute, defaults to "
+                                        "the working directory)"}}},
+              {"include", {{"type", "string"},
+                           {"description", "Glob filter on file paths, e.g. '*.cpp'"}}},
+              {"max_results", {{"type", "integer"},
+                               {"description", "Maximum number of matching lines (default 100)"}}},
+              {"ignore_case", {{"type", "boolean"}, {"description", "Case-insensitive match"}}},
+              {"literal", {{"type", "boolean"},
+                           {"description", "Treat pattern as a literal substring instead of a "
+                                           "regular expression"}}}}},
+            {"required", json::array({"pattern"})}};
+
+    return {read, write, edit, bash, ls, glob, grep};
 }
 
 ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
@@ -476,6 +941,40 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
         result.text = command_result.output;
         result.error = command_result.error;
         return result;
+    }
+
+    if (name == "ls" || name == "glob" || name == "grep") {
+        // path 省略（或为空）时以 working_directory（空则 cwd_）为搜索根。
+        std::string raw_path = arguments.value("path", std::string());
+        if (raw_path.empty()) {
+            raw_path = working_directory.empty() ? cwd_ : working_directory;
+        }
+        std::string path;
+        std::string resolve_error;
+        if (!ResolvePath(raw_path, working_directory, context.policy, &path,
+                         &resolve_error)) {
+            result.error = resolve_error;
+            return result;
+        }
+        aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "tools",
+                                     "tool=" + name + " path=" + path + " event=start");
+        ToolExecutionResult search_result;
+        if (name == "ls") {
+            search_result = RunLs(path, arguments);
+        } else if (name == "glob") {
+            search_result =
+                    RunGlob(path, arguments.value("pattern", std::string()), arguments);
+        } else {
+            search_result =
+                    RunGrep(path, arguments.value("pattern", std::string()), arguments);
+        }
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "tools",
+                "tool=" + name + " path=" + path +
+                        " event=end ok=" + (search_result.ok ? std::string("true")
+                                                            : std::string("false")) +
+                        " bytes=" + std::to_string(search_result.text.size()));
+        return search_result;
     }
 
     result.error = "unknown tool: " + name;

@@ -29,7 +29,8 @@ int main() {
     // 1) 身份与工具清单：自我认知与可用工具必须写清楚。
     ExpectContains(prompt, aiagent::kAgentName, "prompt should name the agent");
     ExpectContains(prompt, aiagent::kAgentAuthor, "prompt should name the author");
-    ExpectContains(prompt, "read, write, edit, bash", "prompt should list the local tools");
+    ExpectContains(prompt, "read, write, edit, bash, ls, glob, grep",
+                   "prompt should list the local tools");
 
     // 2) 交付纪律：不许只给计划（历史事故：只输出计划就收工）。
     ExpectContains(prompt, "Do NOT stop after presenting a plan",
