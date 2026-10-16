@@ -1,23 +1,57 @@
-// 启动 logo：把「de agent」的启动界面从一行纯文本升级为带品牌感的欢迎块。
+// 启动 logo：CLI 首屏的欢迎块（品牌大字 + 元信息 + 键位提示）。
 //
-// 设计（借鉴 pi 的克制风格：一行品牌标题 + 元信息 + 键位提示）：
-//   - 标题「de agent vX.Y.Z」逐字符做品牌渐变（accent → cyan → blue）；
-//     「agent」与版本号保持 dim，突出品牌词但不喧哗；
-//   - 下一行元信息：后端地址 · 工作目录；
-//   - 再一行 dim 快捷键提示。
+// 设计（对齐 pi 的启动头量级）：
+//   - 宽终端（>= 64 列）：4 行块字拼出「de」，逐行做品牌渐变
+//     （accent → cyan → blue），下方一行品牌名+版本；
+//   - 窄终端：退化成一行「de agent vX.Y.Z」文字标题（块字放不下会折行错位）；
+//   - 再往下是元信息行（后端地址 · 工作目录）与 dim 键位提示。
 //
-// 为什么不用块字符拼字（█▄▀）：这些码位在 Unicode 里是 East Asian Ambiguous，
-// 中文终端常按 2 列渲染，块画会当场错位撕裂；纯文本 + 渐变在任何字体/宽度设置
-// 下都稳定。全部内容用可见宽度（含 ANSI 感知）计算居中，CJK 也对齐。
+// 块字符选型：`█`（U+2588）在 Unicode 里属 East Asian Ambiguous，部分中文终端
+// 按 2 列渲染；这正是 pi 的 logo 用的字符，主流终端（含本机实测）按 1 列渲染。
+// 为保证「即使被按 2 列渲染也不撕裂」，全部按可见宽度居中，且窄屏直接不用块字。
 //
 // 降级规则（与 theme.mjs 的能力检测一致）：
 //   - 颜色 none（非 TTY / NO_COLOR / TERM=dumb）→ 纯文本，无任何 ANSI；
-//   - 窄终端 → 只保留标题与短信息，超宽行按可见宽度裁剪补省略号；
+//   - 超宽行按可见宽度裁剪补省略号；
 //   - 非 TTY 时调用方不应调用本模块（启动横幅类输出只给交互终端看）。
 
 import { clipToWidth, visibleWidth } from "./text.mjs";
 
-// 品牌渐变：accent → cyan → blue，按字符位置插值。
+// 品牌像素字：'#'=实心像素。每个像素横向渲染 2 列块字符，
+// 宽高由构造保证（d/e 各 5/4 像素宽 × 5 像素高，字形间 2 像素间隔），
+// 行宽严格相等 —— 这是此前手画块字撕裂的根因。
+const PIXEL_D = [
+  "##.#",
+  "#..#",
+  "#..#",
+  "#..#",
+  "###.",
+];
+const PIXEL_E = [
+  "####",
+  "#...",
+  "###.",
+  "#...",
+  "####",
+];
+
+// 由像素网格生成块字行（像素 → 2 列块字符，字形间留 2 像素空档）。
+function buildWordmark() {
+  const cells = (row, empty) => (row === "#" ? "██" : empty);
+  return PIXEL_D.map(
+    (row, index) =>
+      [...row].map((cell) => cells(cell, "  ")).join("") +
+      "    " +
+      [...PIXEL_E[index]].map((cell) => cells(cell, "  ")).join(""),
+  );
+}
+
+const WORDMARK = buildWordmark();
+
+// 块字模式的终端宽度下限（低于此值退化成一行文字标题）。
+const WORDMARK_MIN_COLUMNS = 64;
+
+// 品牌渐变：accent → cyan → blue，按位置插值。
 function gradientRgb(palette, ratio) {
   const stops = [
     palette.accent ?? [138, 190, 183],
@@ -39,7 +73,7 @@ function gradientRgb(palette, ratio) {
 // 按 styler.mode 生成 RGB 前景上色函数（truecolor / 256 / none）。
 function rgbPainter(styler) {
   const mode = styler.mode;
-  const colorize = (rgb, text) => {
+  return (rgb, text) => {
     if (mode === "none" || text === "") {
       return text;
     }
@@ -59,7 +93,6 @@ function rgbPainter(styler) {
     }
     return `\x1b[38;5;${index}m${text}\x1b[0m`;
   };
-  return colorize;
 }
 
 // 逐字符渐变：把纯文本按可见位置映射到品牌渐变。
@@ -80,13 +113,10 @@ function gradientText(text, palette, styler, ratioStart = 0, ratioEnd = 1) {
 
 // 生成启动 logo 的完整文本块（首尾各留一个空行），返回字符串。
 //
-// 标题块由 titleLines 逐行给出：首行是品牌词（渐变加粗），其余行保持 dim
-// （用于版本号等），窄终端自动退化成单行。每行都保证不超过终端宽度。
-//
 // 参数：
 //   styler     共享主题 styler（可运行时换主题；本模块不修改它）
-//   columns    终端列数（用于居中与裁剪）
-//   titleLines 标题行数组，如 ["de agent", "v0.1.0"]；空数组则不打印标题
+//   columns    终端列数（决定大字/文字标题与裁剪）
+//   titleLines 文字标题行（大字模式下只用第一行做品牌名，其余作副标题）
 //   info       元信息行内容数组，如 ["backend=...", "~/proj (main)"]，以 · 连接
 //   hint       底部快捷键提示（dim），可为空
 export function renderStartupLogo(
@@ -96,25 +126,23 @@ export function renderStartupLogo(
   const t = styler;
   const width = Math.max(20, Number(columns) || 80);
   const brand = "de agent";
-  const narrow = width < 44;
+  const bigArt = width >= WORDMARK_MIN_COLUMNS;
 
-  // ---- 第一遍：整理内容（只算宽度，不裁剪） --------------------------------
-  const titleRows = (narrow ? titleLines.slice(0, 1) : titleLines)
+  const titleRows = titleLines
     .map((row) => String(row ?? ""))
     .filter((row) => row !== "");
-  const bodyRows = [];
   const parts = info.filter((part) => part && String(part).trim() !== "");
+  const bodyRows = [];
   if (parts.length > 0) {
-    bodyRows.push((narrow ? parts.slice(0, 1) : parts).join(" · "));
+    // 窄屏只保第一条元信息，避免折行。
+    bodyRows.push((bigArt ? parts : parts.slice(0, 1)).join(" · "));
   }
   if (hint) {
-    // 最窄的终端上只保留「/help」，避免裁完只剩省略号。
-    bodyRows.push(narrow && visibleWidth(hint) > width ? "/help" : hint);
+    bodyRows.push(width < WORDMARK_MIN_COLUMNS && visibleWidth(hint) > width ? "/help" : hint);
   }
 
-  // ---- 第二遍：逐行裁剪到终端宽度、上色、按终端宽度居中 --------------------
   const lines = [""];
-  const pushLine = (plain, style) => {
+  const pushCentered = (plain, style) => {
     const clipped =
       visibleWidth(plain) <= width ? plain : clipToWidth(plain, Math.max(1, width - 1));
     const w = visibleWidth(clipped);
@@ -122,18 +150,30 @@ export function renderStartupLogo(
     lines.push(pad + style(clipped));
   };
 
-  titleRows.forEach((row, index) => {
-    pushLine(row, (text) => {
-      if (index === 0 && text.startsWith(brand)) {
-        return (
-          t.bold(gradientText(brand, t.palette ?? {}, t)) +
-          t.dim(text.slice(brand.length))
-        );
-      }
-      return t.dim(text);
+  if (bigArt) {
+    // 大字模式：逐行渐变上色，块字整体居中。
+    const paint = rgbPainter(t);
+    const artWidth = Math.max(...WORDMARK.map((line) => visibleWidth(line)));
+    const artPad = Math.floor((width - artWidth) / 2);
+    const rows = WORDMARK.length;
+    WORDMARK.forEach((line, index) => {
+      const rgb = gradientRgb(t.palette ?? {}, index / (rows - 1));
+      lines.push(" ".repeat(artPad) + paint(rgb, line));
     });
-  });
-  bodyRows.forEach((row) => pushLine(row, (text) => t.dim(text)));
+    // 大字下方一行品牌名 + 版本（标题首行是品牌名，其余行是版本等副标题）。
+    const subtitle = [titleRows[0] ?? brand, ...titleRows.slice(1)].join(" ");
+    pushCentered(subtitle, (text) => t.dim(text));
+  } else {
+    // 文字模式：品牌词渐变加粗 + 版本 dim。
+    const first = titleRows[0] ?? brand;
+    const rest = titleRows.slice(1);
+    const styled =
+      t.bold(gradientText(first, t.palette ?? {}, t)) +
+      (rest.length ? ` ${t.dim(rest.join(" "))}` : "");
+    pushCentered(first + (rest.length ? ` ${rest.join(" ")}` : ""), () => styled);
+  }
+
+  bodyRows.forEach((row) => pushCentered(row, (text) => t.dim(text)));
   lines.push("");
   return `${lines.join("\n")}\n`;
 }

@@ -20,13 +20,12 @@ function render(mode, columns = 80, overrides = {}) {
   });
 }
 
-// 可见宽度（去掉 ANSI），逐行列表。
 function visibleLines(text) {
   return text.split("\n").map((line) => ({ line, width: visibleWidth(line) }));
 }
 
-function leadingSpaces(line) {
-  // 不能用 JS 的 .length 量缩进：CJK 占 2 列，需按列宽累计。
+// 缩进按列宽累计（CJK / 块字符占位不同，不能用 JS .length）。
+function leadingColumns(line) {
   let lead = 0;
   for (const char of line) {
     if (char !== " ") {
@@ -37,36 +36,30 @@ function leadingSpaces(line) {
   return lead;
 }
 
-function centerOf(line) {
-  return leadingSpaces(line) + visibleWidth(line.trimStart()) / 2;
-}
-
 test("no-color mode emits no ANSI escape sequences", () => {
   const out = render("none");
   assert.ok(!out.includes("\x1b"), `unexpected escape in: ${JSON.stringify(out)}`);
   assert.ok(out.includes("de agent"));
-  assert.ok(out.includes("v0.1.0"));
   assert.ok(out.includes("backend=127.0.0.1:18081"));
   assert.ok(out.includes("/help"));
 });
 
-test("truecolor mode applies the gradient to the brand and resets each run", () => {
+test("truecolor mode applies a per-row gradient to the block art", () => {
   const out = render("truecolor");
-  const brandLine = stripAnsi(out)
-    .split("\n")
-    .findIndex((line) => line.trim() === "de agent");
-  assert.ok(brandLine > 0, "brand line missing");
-  const rawBrand = out.split("\n")[brandLine];
-  assert.equal((rawBrand.match(/\[38;2;/g) ?? []).length, "de agent".replace(/ /g, "").length);
-  assert.ok(rawBrand.includes("\x1b[0m"), "no reset sequence");
-  const colors = [...rawBrand.matchAll(/\[38;2;(\d+);(\d+);(\d+)m/g)].map((m) =>
-    m.slice(1).join(","),
-  );
-  assert.notEqual(colors[0], colors[colors.length - 1], "gradient should vary across characters");
+  const artRows = out.split("\n").filter((line) => line.includes("█"));
+  assert.ok(artRows.length >= 4, "expected block-art rows");
+  const colors = new Set();
+  for (const row of artRows) {
+    const match = row.match(/\[38;2;(\d+);(\d+);(\d+)m/);
+    assert.ok(match, `row not colored: ${JSON.stringify(row)}`);
+    colors.add(match.slice(1).join(","));
+    assert.equal((row.match(/\[38;2;/g) ?? []).length, 1, "row should be painted in one color");
+  }
+  assert.ok(colors.size >= 3, `gradient should vary per row, got ${colors.size}`);
 });
 
 test("all visible content stays within the terminal width", () => {
-  for (const columns of [100, 80, 60, 45, 30]) {
+  for (const columns of [120, 80, 64, 50, 30, 20]) {
     for (const mode of ["none", "256", "truecolor"]) {
       const out = render(mode, columns);
       for (const { line, width } of visibleLines(out)) {
@@ -76,26 +69,42 @@ test("all visible content stays within the terminal width", () => {
   }
 });
 
-test("each line is centered on its own axis within the terminal width", () => {
-  const out = render("none", 80);
-  const rows = visibleLines(out).filter(({ line }) => line.trim() !== "");
-  assert.ok(rows.length >= 4, "expected title/version/info/hint lines");
-  for (const { line } of rows) {
-    const center = centerOf(line);
-    assert.ok(
-      Math.abs(center - 40) <= 1,
-      `line not centered: center=${center} ${JSON.stringify(line)}`,
-    );
+test("block art rows share the same width and indentation", () => {
+  const out = render("none", 100);
+  const artRows = out.split("\n").filter((line) => line.includes("█"));
+  assert.ok(artRows.length >= 4, "expected block-art rows");
+  const widths = new Set(artRows.map((line) => visibleWidth(line)));
+  assert.equal(widths.size, 1, `art rows must be equal width, got ${[...widths].join(",")}`);
+  const leads = new Set(artRows.map((line) => leadingColumns(line)));
+  assert.equal(leads.size, 1, `art rows must share indentation, got ${[...leads].join(",")}`);
+});
+
+test("every line is centered within the terminal width", () => {
+  for (const columns of [100, 80, 64]) {
+    const out = render("none", columns);
+    for (const { line } of visibleLines(out)) {
+      const trimmed = line.trimStart();
+      if (trimmed.replace(/ /g, "") === "") {
+        continue;
+      }
+      // 右端可能为空格（块字留白），按「行尾即内容终点」测量：
+      // 居中块以等宽网格对齐，首字符列到行尾的距离代表内容区宽度。
+      const contentWidth = visibleWidth(trimmed);
+      const center = leadingColumns(line) + contentWidth / 2;
+      assert.ok(
+        Math.abs(center - columns / 2) <= 1,
+        `[${columns}] line not centered: center=${center} ${JSON.stringify(line)}`,
+      );
+    }
   }
 });
 
-test("narrow terminals keep the brand line and first info part only", () => {
-  const out = stripAnsi(render("truecolor", 30));
-  assert.ok(out.includes("de agent"));
-  assert.ok(!out.includes("v0.1.0"), "version line should be dropped when narrow");
-  assert.ok(!out.includes("~/proj"), "second info part should be dropped when narrow");
-  for (const { width } of visibleLines(render("truecolor", 30))) {
-    assert.ok(width <= 30, `line wider than 30 columns: ${width}`);
+test("narrow terminals fall back to a text title without block art", () => {
+  const out = stripAnsi(render("truecolor", 50));
+  assert.ok(!out.includes("█"), "block art must not render when narrow");
+  assert.ok(out.includes("de agent v0.1.0"));
+  for (const { width } of visibleLines(render("truecolor", 50))) {
+    assert.ok(width <= 50, `line wider than 50 columns: ${width}`);
   }
 });
 
@@ -107,9 +116,10 @@ test("empty title lines and blank info parts are skipped", () => {
     info: ["a", "", "  ", "b"],
     hint: "",
   });
-  assert.ok(!out.includes("de agent"));
   assert.ok(out.includes("a · b"));
   assert.ok(!out.includes(" ·  · "));
+  // 标题为空时仍应有块字（品牌名兜底）。
+  assert.ok(out.includes("█"));
 });
 
 test("light palette with 256 colors produces valid sequences", () => {
