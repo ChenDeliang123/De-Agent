@@ -18,7 +18,8 @@ import {
   streamChat,
 } from "./src/app/session.mjs";
 import { LineEditor, renderHotkeys } from "./src/ui/editor.mjs";
-import { loadCliConfig, updateCliUiConfig } from "./src/app/config.mjs";
+import { renderStartupLogo } from "./src/ui/logo.mjs";
+import { loadCliConfig, readCliVersion, updateCliUiConfig } from "./src/app/config.mjs";
 import { PALETTES, detectColorMode, makeStyler, pickSymbols } from "./src/ui/theme.mjs";
 import { resolveEditorCommand } from "./src/ui/external-editor.mjs";
 import {
@@ -28,7 +29,7 @@ import {
   restoreSessionCwd,
   runCommand,
 } from "./src/app/commands/index.mjs";
-import { PROMPT_LABEL, formatStatusLine, gitBranch } from "./src/ui/statusbar.mjs";
+import { PROMPT_LABEL, formatStatusLine, gitBranch, shortCwd } from "./src/ui/statusbar.mjs";
 import { askUser, askYesNo } from "./src/ui/prompt.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
@@ -320,7 +321,6 @@ async function main() {
   }
 
   const backend = options.backend.replace(/\/+$/, "");
-  console.log(`de agent  backend=${backend}`);
   log("info", "cli", `event=cli_start backend=${backend}`);
 
   const state = {
@@ -339,6 +339,25 @@ async function main() {
       ? cliConfig.theme
       : "dark";
   uiStyler.setPalette(PALETTES[initialTheme]);
+
+  // 启动欢迎块（logo + 元信息 + 快捷键提示）：只在交互终端打印。
+  // 放在 BottomRegion 首次渲染（refreshPromptState → setFooter）之前，
+  // 此时区域尚未绘制，直接写 stdout 不会踩到底部状态行。
+  if (output.isTTY === true) {
+    const version = readCliVersion();
+    output.write(
+      renderStartupLogo(uiStyler, {
+        columns: output.columns ?? 80,
+        titleLines: version ? ["de agent", `v${version}`] : ["de agent"],
+        info: [
+          `backend=${backend.replace(/^https?:\/\//, "")}`,
+          shortCwd(state.cwd),
+        ],
+        hint: "/help 查看命令 · Esc 中断当前回复 · Ctrl+D 退出",
+      }),
+    );
+  }
+
   const symbolEnv = { ...process.env };
   if (cliConfig.nerdFont) {
     symbolEnv.DE_NERD_FONT = "1";

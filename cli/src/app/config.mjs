@@ -18,6 +18,17 @@ import { fileURLToPath } from "node:url";
 // 本文件位于 cli/src/app/：CLI 包根目录是它的上两级。
 const CLI_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+// CLI 版本号：读包根 package.json（与后端 CMakeLists 的 VERSION 同步维护）。
+// 读取失败时返回 null，调用方自行省略版本展示。
+export function readCliVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(CLI_DIR, "package.json"), "utf8"));
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
 // 与后端 ResolveAppPaths 保持一致的用户数据目录解析。
 // 无法确定时返回 null，调用方自行回退。
 export function resolveDataDir(env = process.env) {
