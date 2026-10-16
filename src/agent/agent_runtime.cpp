@@ -571,7 +571,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
                     " event=request_start messages=" + std::to_string(history.size()));
 
-    const tools::ToolContext tool_context = BuildToolContext({}, /*interactive=*/false);
+    tools::ToolContext tool_context = BuildToolContext({}, /*interactive=*/false);
+    tool_context.session_id = context_id;
 
     std::vector<llm::ChatMessage> chat_messages;
 
@@ -678,6 +679,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         }
 
         for (const auto& call : choice.tool_calls) {
+            tool_context.tool_call_id = call.id;
             const auto tool_started = std::chrono::steady_clock::now();
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kInfo, "agent_runtime",
@@ -777,7 +779,12 @@ std::string AgentRuntime::RunStreaming(
                     " event=request_start streaming=true messages=" +
                     std::to_string(history.size()));
 
-    const tools::ToolContext tool_context = BuildToolContext(working_directory);
+    // 运行通道：事件回传、取消、会话与调用归属。工具（如 task/子 Agent 派发）
+    // 依赖它们把进度事件写回父会话流，并在取消时尽快返回。
+    tools::ToolContext tool_context = BuildToolContext(working_directory);
+    tool_context.session_id = context_id;
+    tool_context.emit = on_event;
+    tool_context.should_cancel = should_cancel;
     std::vector<llm::ChatMessage> chat_messages;
     chat_messages.push_back(BuildSystemMessage(working_directory));
 
@@ -915,6 +922,7 @@ std::string AgentRuntime::RunStreaming(
             if (should_cancel && should_cancel()) {
                 throw std::runtime_error("task interrupted");
             }
+            tool_context.tool_call_id = call.id;
             const auto tool_started = std::chrono::steady_clock::now();
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kInfo, "agent_runtime",

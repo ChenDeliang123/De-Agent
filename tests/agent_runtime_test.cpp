@@ -199,6 +199,44 @@ public:
     }
 };
 
+// 记录工具上下文里的运行通道（会话/调用归属、事件回传、取消），并回传一个事件。
+class ContextCapturingToolProvider final : public aiagent::tools::IToolProvider {
+public:
+    std::string session_id;
+    std::string tool_call_id;
+    bool has_emit = false;
+    bool has_cancel = false;
+    int executions = 0;
+
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        aiagent::llm::ToolSpec tool;
+        tool.name = "ok_tool";
+        return {tool};
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string&,
+            const nlohmann::json&,
+            const aiagent::tools::ToolContext& context) override {
+        ++executions;
+        session_id = context.session_id;
+        tool_call_id = context.tool_call_id;
+        has_emit = static_cast<bool>(context.emit);
+        has_cancel = static_cast<bool>(context.should_cancel);
+        if (context.emit) {
+            aiagent::agent::AgentEvent event;
+            event.kind = aiagent::agent::AgentEventKind::kToolOutput;
+            event.tool_call_id = context.tool_call_id;
+            event.content = "from-tool";
+            context.emit(event);
+        }
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = true;
+        result.text = "ok";
+        return result;
+    }
+};
+
 // 一轮里发出两个工具调用，下一轮给出最终答复。
 class DoubleToolModel final : public aiagent::llm::IModelClient {
 public:
@@ -899,6 +937,42 @@ int main() {
                "runtime should report reaching max tool rounds instead of silent stop");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime max round test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        auto model = std::make_shared<OneShotToolModel>("ok_tool");
+        auto tools = std::make_shared<ContextCapturingToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+
+        std::vector<aiagent::agent::AgentEvent> events;
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "channel task", "text/plain");
+        runtime.HandleMessageStreamingEvents(
+                user, {user}, "ctx-channels",
+                [&](const aiagent::agent::AgentEvent& event) { events.push_back(event); },
+                "/tmp", []() { return false; });
+
+        Expect(tools->executions == 1, "tool should execute once");
+        Expect(tools->session_id == "ctx-channels",
+               "tool context should carry the session id");
+        Expect(tools->tool_call_id == "call-1",
+               "tool context should carry the current tool call id");
+        Expect(tools->has_emit, "tool context should expose the event callback");
+        Expect(tools->has_cancel, "tool context should expose the cancel callback");
+
+        bool tool_output_seen = false;
+        for (const auto& event : events) {
+            if (event.kind == aiagent::agent::AgentEventKind::kToolOutput &&
+                event.tool_call_id == "call-1" && event.content == "from-tool") {
+                tool_output_seen = true;
+            }
+        }
+        Expect(tool_output_seen,
+               "events emitted from a tool should reach the run's event stream");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime tool channel test failed: " << e.what() << '\n';
         return 1;
     }
 

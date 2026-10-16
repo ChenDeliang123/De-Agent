@@ -21,6 +21,11 @@ struct AgentEvent {
     // kToken / kToolOutput
     std::string content;
 
+    // 归属：空 = 根 Agent 自身的事件；子 Agent 的事件由 SubAgentManager 填写
+    // （agent_id 形如 explorer#1，parent_tool_call_id 为父侧 task 工具调用 id）。
+    std::string agent_id;
+    std::string parent_tool_call_id;
+
     // kToolStart / kToolOutput / kToolEnd
     std::string tool_call_id;
 
