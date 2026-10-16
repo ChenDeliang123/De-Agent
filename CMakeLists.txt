@@ -113,6 +113,7 @@ add_library(aiagent_agent STATIC
   src/agent/background_delivery.cpp
   src/agent/compaction.cpp
   src/agent/history_cache.cpp
+  src/agent/message_inbox.cpp
   src/agent/project_instructions.cpp
   src/agent/session_history.cpp
   src/agent/session_meta_store.cpp
@@ -307,6 +308,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(background_delivery_test tests/background_delivery_test.cpp)
   target_link_libraries(background_delivery_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_background_delivery COMMAND background_delivery_test)
+
+  add_executable(message_inbox_test tests/message_inbox_test.cpp)
+  target_link_libraries(message_inbox_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_message_inbox COMMAND message_inbox_test)
 
   add_executable(fake_mcp_server tests/fake_mcp_server.cpp)
   target_link_libraries(fake_mcp_server PRIVATE aiagent_llm a2a::a2a)

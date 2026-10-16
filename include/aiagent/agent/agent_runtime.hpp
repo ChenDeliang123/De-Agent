@@ -13,6 +13,7 @@
 #include "a2a/models/operations.hpp"
 #include "a2a/models/requests.hpp"
 
+#include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/approval_broker.hpp"
 #include "aiagent/agent/compaction.hpp"
@@ -117,10 +118,13 @@ public:
 
     // history 应包含本次用户消息（续聊时由调用方从 TaskStore 取回）。
     // 返回一个已完成 Task，其 history 追加了 assistant 回复。
+    // inbox 非空时启用 steer（M5a）：每轮模型调用前把收件箱里待投递的消息作为
+    // user 消息追加进上下文；运行结束（含异常/取消）时关闭收件箱。
     a2a::models::SendMessageResponse HandleMessage(
             const a2a::models::Message& incoming,
             const std::vector<a2a::models::Message>& history,
-            const std::string& context_id = {});
+            const std::string& context_id = {},
+            std::shared_ptr<MessageInbox> inbox = nullptr);
 
     // 流式版本：逐 token 回调，支持工具调用循环；返回最终回复文本。
     std::string HandleMessageStreaming(
@@ -136,7 +140,8 @@ public:
             const std::string& context_id,
             const AgentEventCallback& on_event,
             const std::string& working_directory = {},
-            const CancelCallback& should_cancel = {});
+            const CancelCallback& should_cancel = {},
+            std::shared_ptr<MessageInbox> inbox = nullptr);
 
 private:
     // 流式主循环的公共实现：产出 AgentEvent 事件流，返回最终回复文本。
@@ -145,7 +150,15 @@ private:
                              const std::string& context_id,
                              const AgentEventCallback& on_event,
                              const std::string& working_directory,
-                             const CancelCallback& should_cancel);
+                             const CancelCallback& should_cancel,
+                             std::shared_ptr<MessageInbox> inbox);
+
+    // steer 投递（M5a）：把收件箱里待投递的消息按序包装成 user 消息追加进上下文，
+    // 返回投递条数。只在回合边界调用——取消与 max_rounds 先判，steer 不能续命。
+    std::size_t DeliverSteers(const std::shared_ptr<MessageInbox>& inbox,
+                              std::vector<llm::ChatMessage>& chat_messages,
+                              const std::string& run_id, const std::string& context_id,
+                              int round);
 
     // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录 + 权限模式。
     llm::ChatMessage BuildSystemMessage(

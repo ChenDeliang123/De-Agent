@@ -15,6 +15,38 @@ namespace {
 // 旧实现用 usage.total_tokens，一次大写入（例如 24KB file content ≈ 7K completion）
 // 会把估算顶过阈值、提前触发压缩；实测 28 次压缩里 13 次"压完反而更大"。
 // 兼容只报 total 的实现：用 total - completion 反推。
+// 运行结束时关闭收件箱（含异常/取消路径）：之后到达的 steer 一律被拒（kClosed），
+// 残留未投递的消息在这里记一条日志，便于核算"steer 没生效"的原因。
+class InboxCloseGuard {
+public:
+    InboxCloseGuard(std::shared_ptr<MessageInbox> inbox, std::string run_id,
+                    std::string context_id)
+        : inbox_(std::move(inbox)), run_id_(std::move(run_id)),
+          context_id_(std::move(context_id)) {}
+
+    ~InboxCloseGuard() {
+        if (inbox_ == nullptr) {
+            return;
+        }
+        inbox_->Close();
+        const std::size_t pending = inbox_->Pending();
+        if (pending > 0) {
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "agent_runtime",
+                    "run=" + run_id_ + " session=" + (context_id_.empty() ? "-" : context_id_) +
+                            " event=steer_undelivered count=" + std::to_string(pending));
+        }
+    }
+
+    InboxCloseGuard(const InboxCloseGuard&) = delete;
+    InboxCloseGuard& operator=(const InboxCloseGuard&) = delete;
+
+private:
+    std::shared_ptr<MessageInbox> inbox_;
+    std::string run_id_;
+    std::string context_id_;
+};
+
 int UsageContextTokens(const llm::ChatUsage& usage) {
     if (usage.prompt_tokens > 0) {
         return usage.prompt_tokens;
@@ -596,8 +628,9 @@ bool AgentRuntime::CompactHistory(
 a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
-        const std::string& context_id) {
+        const std::string& context_id, std::shared_ptr<MessageInbox> inbox) {
     const std::string run_id = std::string(a2a::core::NewUuid());
+    const InboxCloseGuard inbox_guard(inbox, run_id, context_id);
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "agent_runtime",
             "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
@@ -650,6 +683,8 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
             reached_max_rounds = true;
             break;
         }
+        // steer（M5a）：回合边界投递（同步路径与流式同一语义）。
+        DeliverSteers(inbox, chat_messages, run_id, context_id, round);
         MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
                                last_usage_message_count, last_compacted_size,
                                gain_retry_at_tokens, run_id, context_id);
@@ -798,14 +833,42 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     return response;
 }
 
+std::size_t AgentRuntime::DeliverSteers(const std::shared_ptr<MessageInbox>& inbox,
+                                        std::vector<llm::ChatMessage>& chat_messages,
+                                        const std::string& run_id,
+                                        const std::string& context_id, int round) {
+    if (inbox == nullptr) {
+        return 0;
+    }
+    std::vector<std::string> messages = inbox->Drain();
+    if (messages.empty()) {
+        return 0;
+    }
+    std::size_t bytes = 0;
+    for (const auto& text : messages) {
+        llm::ChatMessage steer;
+        steer.role = "user";
+        steer.content = FormatSteerMessage(text);
+        chat_messages.push_back(std::move(steer));
+        bytes += text.size();
+    }
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "agent_runtime",
+            "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
+                    " event=steer_delivered count=" + std::to_string(messages.size()) +
+                    " round=" + std::to_string(round) + " bytes=" + std::to_string(bytes));
+    return messages.size();
+}
+
 std::string AgentRuntime::RunStreaming(
         const a2a::models::Message& incoming,
         const std::vector<a2a::models::Message>& history,
         const std::string& context_id,
         const AgentEventCallback& on_event,
         const std::string& working_directory,
-        const CancelCallback& should_cancel) {
+        const CancelCallback& should_cancel, std::shared_ptr<MessageInbox> inbox) {
     const std::string run_id = std::string(a2a::core::NewUuid());
+    const InboxCloseGuard inbox_guard(inbox, run_id, context_id);
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "agent_runtime",
             "run=" + run_id + " session=" + (context_id.empty() ? "-" : context_id) +
@@ -857,6 +920,9 @@ std::string AgentRuntime::RunStreaming(
             reached_max_rounds = true;
             break;
         }
+        // steer（M5a）：回合边界投递。取消与回合上限先判——steer 不续命；
+        // 投递后本轮照常压缩/组装工具表/调模型。
+        DeliverSteers(inbox, chat_messages, run_id, context_id, round);
         if (const auto record = MaybeCompactBeforeCall(
                     chat_messages, last_usage_tokens, last_usage_message_count,
                     last_compacted_size, gain_retry_at_tokens, run_id, context_id);
@@ -1051,7 +1117,7 @@ std::string AgentRuntime::HandleMessageStreaming(
                                 on_token(event.content);
                             }
                         },
-                        {}, {});
+                        {}, {}, nullptr);
 }
 
 std::string AgentRuntime::HandleMessageStreamingEvents(
@@ -1060,9 +1126,9 @@ std::string AgentRuntime::HandleMessageStreamingEvents(
         const std::string& context_id,
         const AgentEventCallback& on_event,
         const std::string& working_directory,
-        const CancelCallback& should_cancel) {
+        const CancelCallback& should_cancel, std::shared_ptr<MessageInbox> inbox) {
     return RunStreaming(incoming, history, context_id, on_event, working_directory,
-                        should_cancel);
+                        should_cancel, std::move(inbox));
 }
 
 }  // namespace aiagent::agent

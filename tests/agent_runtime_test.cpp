@@ -1,9 +1,15 @@
+#include <atomic>
+#include <cstdio>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 #include "a2a/core/version.hpp"
 #include "a2a/models/agent_card.hpp"
@@ -13,7 +19,9 @@
 #include "a2a/server/agent_server.hpp"
 
 #include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
+#include "aiagent/log.hpp"
 
 namespace {
 
@@ -159,6 +167,97 @@ public:
         event.finish_reason = "stop";
         on_event(event);
     }
+};
+
+// M5a：steer 投递模型。第 push_on_call 次调用时把 steer 塞进收件箱（模拟外部线程
+// 在任务运行中补一句），前 tool_rounds 次调用回工具调用、之后回最终文本；
+// 每次调用的入参都记录下来，供断言"哪一轮看到了 [steer]"。
+class SteerModel final : public aiagent::llm::IModelClient {
+public:
+    SteerModel(std::shared_ptr<aiagent::agent::MessageInbox> inbox, std::string steer_text,
+               int tool_rounds, int push_on_call = 1)
+        : inbox_(std::move(inbox)), steer_text_(std::move(steer_text)),
+          tool_rounds_(tool_rounds), push_on_call_(push_on_call) {}
+
+    int Calls() const { return calls_.load(); }
+
+    bool SawSteerOnCall(int call_index) const {
+        return !SteerContentOnCall(call_index).empty();
+    }
+
+    // 第 call_index 次模型调用（1 起）看到的 steer 文本；没看到返回空串。
+    std::string SteerContentOnCall(int call_index) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (call_index <= 0 || static_cast<std::size_t>(call_index) > seen_.size()) {
+            return {};
+        }
+        for (const auto& message : seen_[call_index - 1]) {
+            if (message.role == "user" &&
+                message.content.rfind(aiagent::agent::kSteerMarker, 0) == 0) {
+                return message.content;
+            }
+        }
+        return {};
+    }
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>& messages,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        const int index = BeginCall(messages);
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        if (index <= tool_rounds_) {
+            choice.tool_calls.push_back(aiagent::llm::ToolCall{
+                    "steer-tool-" + std::to_string(index), "ok_tool", "{}"});
+        } else {
+            choice.content = "final-after-" + std::to_string(index);
+            choice.finish_reason = "stop";
+        }
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>& messages,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        const int index = BeginCall(messages);
+        aiagent::llm::StreamEvent event;
+        if (index <= tool_rounds_) {
+            event.tool_calls.push_back(aiagent::llm::ToolCall{
+                    "steer-tool-" + std::to_string(index), "ok_tool", "{}"});
+            event.finish_reason = "tool_calls";
+        } else {
+            event.content = "final-after-" + std::to_string(index);
+            event.finish_reason = "stop";
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+
+private:
+    int BeginCall(const std::vector<aiagent::llm::ChatMessage>& messages) {
+        const int index = calls_.fetch_add(1) + 1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            seen_.push_back(messages);
+        }
+        if (index == push_on_call_ && inbox_ != nullptr) {
+            inbox_->Push(steer_text_);
+        }
+        return index;
+    }
+
+    std::shared_ptr<aiagent::agent::MessageInbox> inbox_;
+    std::string steer_text_;
+    int tool_rounds_ = 0;
+    int push_on_call_ = 1;
+    std::atomic<int> calls_{0};
+    mutable std::mutex mutex_;
+    std::vector<std::vector<aiagent::llm::ChatMessage>> seen_;
 };
 
 class OkToolProvider final : public aiagent::tools::IToolProvider {
@@ -1563,6 +1662,128 @@ int main() {
             Expect(provider->write_calls == 0,
                    "project config can tighten workspace to confirm (write denied)");
         }
+        // M5a：运行中 steer（收件箱 → 回合边界投递）。
+        {
+            auto inbox = std::make_shared<aiagent::agent::MessageInbox>();
+            auto model = std::make_shared<SteerModel>(inbox, "只看 include/ 目录",
+                                                      /*tool_rounds=*/1);
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(std::make_shared<CountingToolProvider>());
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "scan the repo", "text/plain");
+
+            const std::string reply = runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-steer", nullptr, {}, {}, inbox);
+
+            Expect(reply == "final-after-2",
+                   "steer should not disturb the loop, got: " + reply);
+            Expect(model->Calls() == 2, "steer itself must not add a round, got " +
+                                                std::to_string(model->Calls()));
+            Expect(!model->SawSteerOnCall(1),
+                   "the call in flight must not see a steer pushed during it");
+            Expect(model->SawSteerOnCall(2), "the next round must see the steer message");
+            Expect(model->SteerContentOnCall(2).find("只看 include/ 目录") !=
+                           std::string::npos &&
+                           model->SteerContentOnCall(2).find("do not restart") !=
+                                   std::string::npos,
+                   "steer message should carry the text and the 'not a new task' note, got: " +
+                           model->SteerContentOnCall(2));
+            Expect(inbox->Closed() && inbox->Pending() == 0,
+                   "the run should close the inbox and leave nothing undelivered");
+        }
+        // M5a：steer 不重置/不追加 max_rounds（闸门不放松）。
+        {
+            auto inbox = std::make_shared<aiagent::agent::MessageInbox>();
+            auto model = std::make_shared<SteerModel>(inbox, "继续，但收敛一点",
+                                                      /*tool_rounds=*/99);
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(std::make_shared<CountingToolProvider>());
+            runtime.SetMaxToolRounds(3);
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "long scan", "text/plain");
+            bool max_rounds_thrown = false;
+            try {
+                runtime.HandleMessageStreamingEvents(user, {user}, "ctx-steer-max", nullptr, {},
+                                                     {}, inbox);
+            } catch (const std::exception& e) {
+                max_rounds_thrown =
+                        std::string(e.what()).find("max tool rounds") != std::string::npos;
+            }
+            Expect(max_rounds_thrown, "hitting max rounds should still fail the run");
+            Expect(model->Calls() == 3,
+                   "steer must not extend max_rounds, got " + std::to_string(model->Calls()));
+            Expect(model->SawSteerOnCall(2),
+                   "steer should still be delivered inside the allowed rounds");
+            Expect(inbox->Closed(), "the inbox should be closed even when the run fails");
+        }
+        // M5a：回合收尾后到达的 steer 记为未投递（日志可查），且之后 Push 被拒。
+        {
+            const std::string log_path =
+                    "/tmp/aiagent_steer_test_" + std::to_string(::getpid()) + ".log";
+            std::remove(log_path.c_str());
+            aiagent::ConfigureDefaultLogger("info", log_path);
+            auto inbox = std::make_shared<aiagent::agent::MessageInbox>();
+            auto model = std::make_shared<SteerModel>(inbox, "来晚了",
+                                                      /*tool_rounds=*/0);
+            aiagent::agent::AgentRuntime runtime(model);
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "one round only", "text/plain");
+            const std::string reply = runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-steer-late", nullptr, {}, {}, inbox);
+            Expect(reply == "final-after-1", "single-round run should finish normally");
+            Expect(inbox->Closed() && inbox->Pending() == 1,
+                   "a steer that arrives during the last round stays undelivered");
+            Expect(inbox->Push("再来一条") ==
+                           aiagent::agent::MessageInbox::PushResult::kClosed,
+                   "pushes after the run should be rejected");
+            std::ifstream log_input(log_path);
+            std::ostringstream log_buffer;
+            log_buffer << log_input.rdbuf();
+            const std::string logs = log_buffer.str();
+            Expect(logs.find("event=steer_undelivered count=1") != std::string::npos,
+                   "undelivered steers should be logged with their count, log: " + logs);
+            std::remove(log_path.c_str());
+        }
+        // M5a：取消优先于投递（steer 不能救活被取消的任务），且在跑的那条留给未投递统计。
+        {
+            auto inbox = std::make_shared<aiagent::agent::MessageInbox>();
+            auto model = std::make_shared<SteerModel>(inbox, "不该被投递",
+                                                      /*tool_rounds=*/5);
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(std::make_shared<CountingToolProvider>());
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "cancel me", "text/plain");
+            bool interrupted = false;
+            try {
+                runtime.HandleMessageStreamingEvents(
+                        user, {user}, "ctx-steer-cancel", nullptr, {},
+                        [&model]() { return model->Calls() >= 1; }, inbox);
+            } catch (const std::exception& e) {
+                interrupted = std::string(e.what()) == "task interrupted";
+            }
+            Expect(interrupted, "cancellation must still abort the run");
+            Expect(model->Calls() == 1, "the run should stop right after the cancel point");
+            Expect(inbox->Closed() && inbox->Pending() == 1,
+                   "a cancelled run leaves the steer undelivered");
+        }
+        // M5a：同步路径（HandleMessage）同样在回合边界投递 steer。
+        {
+            auto inbox = std::make_shared<aiagent::agent::MessageInbox>();
+            auto model = std::make_shared<SteerModel>(inbox, "同步路径也要收到",
+                                                      /*tool_rounds=*/1);
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(std::make_shared<CountingToolProvider>());
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "sync scan", "text/plain");
+            runtime.HandleMessage(user, {user}, "ctx-steer-sync", inbox);
+            Expect(model->Calls() == 2 &&
+                           model->SawSteerOnCall(2) &&
+                           model->SteerContentOnCall(2).find("同步路径也要收到") !=
+                                   std::string::npos,
+                   "the non-streaming path should deliver steer at the same checkpoint");
+            Expect(inbox->Closed(), "the sync path should close the inbox too");
+        }
+
     } catch (const std::exception& e) {
         std::cerr << "agent runtime permission test failed: " << e.what() << '\n';
         return 1;
