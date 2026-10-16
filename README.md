@@ -273,6 +273,7 @@ de
 /cwd [dir]        查看/切换工具工作目录
 /permissions      查看/切换权限模式（confirm|workspace|full）
 /tools            查看可用工具（coding + MCP）
+/agents           查看子 Agent 开关、定义与运行统计
 /status           后端健康 + 当前会话
 /quit             退出
 ```
@@ -407,6 +408,7 @@ de logs      # 查看后端日志
 /compact          把当前会话历史压缩为结构化摘要
 /status           查看后端健康状态与当前会话
 /tools            列出 Agent 可用工具（coding + MCP）
+/agents           查看子 Agent 开关、定义与运行统计（/api/v1/agents）
 /cwd [dir]        查看/切换工具工作目录
 /permissions [m]  查看/切换当前工作路径的权限模式（confirm|workspace|full|list|reset|show）
 /clear            清屏
@@ -484,6 +486,7 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | `GET` | `/api/v1/sessions` | 会话列表（`id` + `title` + `updated_at`，按最近使用排序） |
 | `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
 | `GET` | `/api/v1/tools` | 可用工具清单（coding + MCP） |
+| `GET` | `/api/v1/agents` | 子 Agent 开关/定义/运行统计（关闭时返回 `{"enabled":false}`） |
 | `GET` | `/api/v1/permissions` | 权限配置列表（默认模式 + 显式路径） |
 | `GET` | `/api/v1/permissions/effective?path=<abs>` | 查询某路径的有效权限模式 |
 | `PUT` | `/api/v1/permissions` | 设置某路径的权限模式 `{path, mode}` |

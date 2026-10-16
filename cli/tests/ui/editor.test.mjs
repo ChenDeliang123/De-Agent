@@ -333,8 +333,9 @@ test("LineEditor scrolls candidates so the selection stays visible", async () =>
   }
   assert.match(selectedLine(), /❯ \/status/);
 
-  // 继续按到最后一个候选 /quit，再按一次应回到第一个 /new。
-  for (let i = 0; i < 8; i += 1) {
+  // 继续按到最后一个候选 /quit（候选数量由注册表决定，含 /agents），
+  // 再按一次应回到第一个 /new。
+  for (let index = 8; index < complete("").length - 1; index += 1) {
     input.emit("keypress", "", key("down"));
   }
   assert.match(selectedLine(), /❯ \/quit/);

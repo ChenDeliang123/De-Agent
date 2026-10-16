@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { BottomRegion } from "../../src/ui/bottom.mjs";
-import { TranscriptRenderer } from "../../src/ui/renderer.mjs";
+import { TranscriptRenderer, displayWidth } from "../../src/ui/renderer.mjs";
 import { captureOutput } from "../helpers/virtual-terminal.mjs";
 
 const SPINNER_RE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
@@ -189,4 +189,133 @@ test("renderer without a region keeps writing directly (non-TTY / pipe)", () => 
   const text = out.text();
   assert.ok(text.includes("hello"));
   assert.ok(!text.includes("\x1b[48;"), "no background block without colour support");
+});
+
+test("renderer labels a sub-agent text block once, at its first line", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.startReply();
+  renderer.content("Hi", "explorer#1");
+  renderer.content(" there\n", "explorer#1");
+  renderer.content("next line\n", "explorer#1");
+  const text = out.text();
+  assert.ok(
+    text.includes("  [explorer#1] Hi there"),
+    `first line of the block should carry the agent label: ${JSON.stringify(text)}`,
+  );
+  assert.ok(text.includes("  next line"), "continuation lines keep the plain indent");
+  assert.equal(
+    (text.match(/\[explorer#1\]/g) ?? []).length,
+    1,
+    "consecutive tokens from the same agent share one label",
+  );
+
+  // 工具调用打断文本块：同一 Agent 的下一段文本重新标注。
+  renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
+  renderer.toolEnd(true, "", "explorer#1");
+  renderer.content("after the tool\n", "explorer#1");
+  const second = out.text();
+  assert.ok(second.includes("  [explorer#1] after the tool"), "a new block is labelled again");
+  assert.equal((second.match(/\[explorer#1\]/g) ?? []).length, 4, "block + tool + tool + block");
+  renderer.endReply();
+});
+
+test("renderer keeps root-agent content and tools unchanged", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.startReply();
+  renderer.content("plain\n");
+  renderer.toolStart("call-1", "bash", { command: "ls" });
+  renderer.toolOutput("file.txt");
+  renderer.toolEnd(true, "done");
+  const text = out.text();
+  assert.ok(text.includes("  plain"), "root content keeps the 2-space indent");
+  assert.ok(text.includes("  ┏ bash (call-1)"), "root tool header is unchanged");
+  assert.ok(text.includes("  ┃ file.txt"), "root tool output is unchanged");
+  assert.ok(text.includes("  ┗ ✔ ok"), "root tool footer is unchanged");
+  assert.ok(!text.includes("[explorer"), "root frames carry no agent label");
+  assert.ok(!/^ {2}\[/m.test(text), "no bracketed label on root lines");
+  renderer.endReply();
+});
+
+test("renderer marks sub-agent tool blocks with a label and extra indent", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.startReply();
+  renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
+  renderer.toolOutput("cli/cli.mjs", "explorer#1");
+  renderer.toolEnd(true, "1 file", "explorer#1");
+  const text = out.text();
+  assert.ok(
+    text.includes("  [explorer#1] ┏ glob (sub1:c1)"),
+    `sub-agent header carries the label: ${JSON.stringify(text)}`,
+  );
+  assert.ok(text.includes("    ┃ cli"), "sub-agent arguments are indented two more spaces");
+  assert.ok(text.includes("    ┃ cli/cli.mjs"), "sub-agent output is indented two more spaces");
+  assert.ok(text.includes("    ┃ 1 file"), "sub-agent end payload keeps the indent");
+  assert.ok(text.includes("  [explorer#1] ┗ ✔ ok"), "sub-agent footer keeps the label");
+  renderer.endReply();
+});
+
+test("renderer prints sub-agent lifecycle lines", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.subagentStart("explorer#1");
+  // 整帧 data 与裸 agent id 都接受。
+  renderer.subagentStart({ agent_id: "general#2", parent_tool_call_id: "c9" });
+  renderer.subagentEnd({
+    agent_id: "explorer#1",
+    ok: true,
+    duration_ms: 3900,
+    tool_calls: 3,
+    text: "",
+  });
+  renderer.subagentEnd({
+    agent_id: "explorer#1",
+    ok: true,
+    duration_ms: 64000,
+    tool_calls: 1,
+    text: "",
+  });
+  renderer.subagentEnd({
+    agent_id: "explorer#1",
+    ok: false,
+    duration_ms: 1200,
+    tool_calls: 1,
+    text: "timed out",
+  });
+  const text = out.text();
+  assert.ok(text.includes("  ↳ explorer#1 started"), text);
+  assert.ok(text.includes("  ↳ general#2 started"), text);
+  assert.ok(text.includes("  ↳ explorer#1 done in 3.9s · 3 tool calls"), text);
+  assert.ok(text.includes("  ↳ explorer#1 done in 1m 4s · 1 tool call"), text);
+  assert.ok(text.includes("  ↳ explorer#1 failed: timed out"), text);
+});
+
+test("renderer clips sub-agent lines to the terminal width", () => {
+  const out = fakeOut(false);
+  out.columns = 26;
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.subagentStart("explorer#1");
+  renderer.subagentEnd({
+    agent_id: "explorer#1",
+    ok: false,
+    duration_ms: 1200,
+    tool_calls: 1,
+    text: "boom ".repeat(20),
+  });
+  renderer.toolStart("sub1:c1", "bash", { command: "x".repeat(120) }, "explorer#1");
+  renderer.toolOutput("y".repeat(120), "explorer#1");
+  renderer.toolEnd(true, "z".repeat(120), "explorer#1");
+  for (const line of out.text().split("\n")) {
+    if (line !== "") {
+      assert.ok(displayWidth(line) <= 26, `line overflows the terminal: ${JSON.stringify(line)}`);
+    }
+  }
+  assert.ok(out.text().includes("…"), "overlong sub-agent lines are clipped with an ellipsis");
 });

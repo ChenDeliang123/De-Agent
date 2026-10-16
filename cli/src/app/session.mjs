@@ -98,6 +98,14 @@ export async function listTools(backendUrl) {
   return response.json();
 }
 
+export async function getAgents(backendUrl) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/agents`);
+  if (!response.ok) {
+    throw new Error(`failed to load agents: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function health(backendUrl) {
   const response = await fetch(`${normalizeBackendUrl(backendUrl)}/health`);
   if (!response.ok) {

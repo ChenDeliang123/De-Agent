@@ -1,4 +1,10 @@
-import { clipToWidth, displayWidth, visibleWidth, wrapVisible } from "./text.mjs";
+import {
+  clipToWidth,
+  clipVisible,
+  displayWidth,
+  visibleWidth,
+  wrapVisible,
+} from "./text.mjs";
 import { createMarkdownRenderer } from "./markdown.mjs";
 import { detectColorMode, hyperlink, makeStyler, pickSymbols } from "./theme.mjs";
 
@@ -15,6 +21,20 @@ function truncate(text) {
     return text;
   }
   return `${text.slice(0, MaxDisplayText)}\n… (truncated ${text.length - MaxDisplayText} chars)`;
+}
+
+// 子 Agent 耗时：1 分钟内用一位小数秒（3.9s），更长用 m/s。
+function formatDuration(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value < 0) {
+    return "";
+  }
+  if (value < 60_000) {
+    return `${(value / 1000).toFixed(1)}s`;
+  }
+  const minutes = Math.floor(value / 60_000);
+  const seconds = Math.round((value % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
 }
 
 function normalizeArguments(rawArguments) {
@@ -164,6 +184,9 @@ export class TranscriptRenderer {
   #turnLabelPrinted = false;
   #mdBuffer = "";
   #cwd = "";
+  // 文本块归属：子 Agent 的块只在首行加一次 [agent] 标注。
+  #contentAgent = "";
+  #pendingAgentPrefix = "";
 
   constructor(out = process.stdout, options = {}) {
     this.#out = out;
@@ -204,6 +227,45 @@ export class TranscriptRenderer {
     return Math.max(20, Number.isFinite(columns) && columns > 0 ? columns : 80);
   }
 
+  // 子 Agent 的行（带标注/缩进）：写之前按可见宽度裁剪，避免越界。
+  #writeClipped(text) {
+    const width = this.#width();
+    if (visibleWidth(text) <= width) {
+      this.#write(`${text}\n`);
+      return;
+    }
+    // clipVisible 的省略号额外占一列，所以按 width - 1 裁剪，整行不越界。
+    this.#write(`${clipVisible(text, width - 1)}\n`);
+  }
+
+  // 按事件归属写一行：子 Agent 走裁剪路径，根 Agent（agent 为空）保持原有输出。
+  #writeRow(agent, text) {
+    if (agent) {
+      this.#writeClipped(text);
+      return;
+    }
+    this.#write(`${text}\n`);
+  }
+
+  // 子 Agent 的 dim 标注，形如 `[explorer#1] `。
+  #agentTag(agent) {
+    return this.#t.dim(`[${agent}] `);
+  }
+
+  // 取 agent 名：接受 id 字符串，也接受带 agent_id 的整帧 data。
+  #agentName(value) {
+    if (value && typeof value === "object") {
+      return String(value.agent_id ?? "");
+    }
+    return String(value ?? "");
+  }
+
+  // 块边界（用户消息、工具调用、回合结束等）：下一段文本重新输出 Agent 标注。
+  #endContentBlock() {
+    this.#contentAgent = "";
+    this.#pendingAgentPrefix = "";
+  }
+
   user(text) {
     this.#beginOutput();
     this.#flushMdBuffer();
@@ -237,12 +299,14 @@ export class TranscriptRenderer {
     this.#resumeAssistant = false;
     this.#turnLabelPrinted = false;
     this.#md.reset();
+    this.#endContentBlock();
   }
 
   startReply() {
     this.#beginOutput();
     this.#flushMdBuffer();
     this.#md.reset();
+    this.#endContentBlock();
     this.#write("\n");
     this.#ensureAssistantLabel();
     this.#assistantActive = true;
@@ -251,12 +315,18 @@ export class TranscriptRenderer {
     this.#spinner.start("thinking", "accent");
   }
 
-  content(token) {
+  content(token, agentId = "") {
     if (!this.#assistantActive) {
       this.#beginOutput();
       this.#write("\n");
       this.#ensureAssistantLabel();
       this.#assistantActive = true;
+    }
+    const agent = String(agentId ?? "");
+    if (agent !== this.#contentAgent) {
+      this.#contentAgent = agent;
+      // 子 Agent 的文本块只在首行标注一次；根 Agent（空）沿用原有缩进。
+      this.#pendingAgentPrefix = agent;
     }
     this.#assistantWroteText = true;
     this.#resumeAssistant = false;
@@ -270,16 +340,21 @@ export class TranscriptRenderer {
     }
   }
 
-  toolStart(id, name, rawArguments) {
+  toolStart(id, name, rawArguments, agentId = "") {
     this.#beginOutput();
     this.#flushMdBuffer();
     const t = this.#t;
+    const agent = String(agentId ?? "");
     this.#write("\n");
     const label = `${t.bold(name)}${id ? ` ${t.dim(`(${id.slice(0, 8)})`)}` : ""}`;
-    this.#write(`  ${t.fg("borderMuted", this.#sym.top)} ${label}\n`);
+    // 子 Agent 的工具块：`  [explorer#1] ┏ glob` + 内容行再缩进两格。
+    const tag = agent ? this.#agentTag(agent) : "";
+    const indent = agent ? "    " : "  ";
+    this.#writeRow(agent, `  ${tag}${t.fg("borderMuted", this.#sym.top)} ${label}`);
     for (const line of this.#toolCallLines(name, normalizeArguments(rawArguments))) {
-      this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${line}\n`);
+      this.#writeRow(agent, `${indent}${t.fg("borderMuted", this.#sym.bar)} ${line}`);
     }
+    this.#endContentBlock();
     this.#assistantActive = false;
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
@@ -287,30 +362,39 @@ export class TranscriptRenderer {
     this.#spinner.start(`${name} running`, "cyan");
   }
 
-  toolOutput(text) {
+  toolOutput(text, agentId = "") {
     this.#beginOutput();
+    const agent = String(agentId ?? "");
+    const indent = agent ? "    " : "  ";
     for (const line of this.#previewLines(text)) {
-      this.#write(`  ${this.#t.fg("borderMuted", this.#sym.bar)} ${this.#t.dim(line)}\n`);
+      this.#writeRow(
+        agent,
+        `${indent}${this.#t.fg("borderMuted", this.#sym.bar)} ${this.#t.dim(line)}`,
+      );
     }
     if (this.#currentTool) {
       this.#spinner.start(`${this.#currentTool} running`, "cyan");
     }
   }
 
-  toolEnd(ok, text) {
+  toolEnd(ok, text, agentId = "") {
     this.#beginOutput();
     const t = this.#t;
+    const agent = String(agentId ?? "");
     const colorName = ok ? "success" : "error";
     const body = String(text ?? "");
+    const indent = agent ? "    " : "  ";
     if (body) {
       for (const line of this.#previewLines(body)) {
-        this.#write(`  ${t.fg("borderMuted", this.#sym.bar)} ${t.dim(line)}\n`);
+        this.#writeRow(agent, `${indent}${t.fg("borderMuted", this.#sym.bar)} ${t.dim(line)}`);
       }
     }
     const status = ok
       ? `${t.fg(colorName, this.#sym.ok)} ok`
       : `${t.fg(colorName, this.#sym.fail)} failed`;
-    this.#write(`  ${t.fg(colorName, this.#sym.bottom)} ${status}\n`);
+    // 子 Agent 的块在末行再带一次 [agent] 标记，闭合视觉边界。
+    const tag = agent ? this.#agentTag(agent) : "";
+    this.#writeRow(agent, `  ${tag}${t.fg(colorName, this.#sym.bottom)} ${status}`);
     this.#resumeAssistant = true;
     this.#currentTool = "";
     this.#spinner.start("thinking", "accent");
@@ -319,6 +403,7 @@ export class TranscriptRenderer {
   endReply() {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#endContentBlock();
     this.#write("\n");
     this.#assistantActive = false;
     this.#assistantWroteText = false;
@@ -337,6 +422,7 @@ export class TranscriptRenderer {
   interrupted() {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#endContentBlock();
     const t = this.#t;
     this.#write(`\n${t.fg("warning", `${this.#sym.interrupted} interrupted`)}\n`);
     this.#assistantActive = false;
@@ -347,6 +433,7 @@ export class TranscriptRenderer {
   approvalRequest(data) {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#endContentBlock();
     const t = this.#t;
     const name = data?.name ?? "tool";
     const reason = data?.reason ?? "requires approval";
@@ -363,6 +450,7 @@ export class TranscriptRenderer {
 
   approvalResolved(decision) {
     this.#beginOutput();
+    this.#endContentBlock();
     const t = this.#t;
     const label =
       decision === "allow_once"
@@ -378,6 +466,7 @@ export class TranscriptRenderer {
   compaction(data) {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#endContentBlock();
     const t = this.#t;
     const before = data?.tokens_before ?? "?";
     const after = data?.tokens_after ?? "?";
@@ -389,6 +478,35 @@ export class TranscriptRenderer {
     this.#assistantWroteText = false;
     this.#resumeAssistant = true;
     this.#spinner.start("thinking", "accent");
+  }
+
+  // 子 Agent 开始：dim 单行，如 `  ↳ explorer#1 started`。
+  // 参数既可以是 agent id 字符串，也可以是整帧 data（取其中的 agent_id）。
+  subagentStart(agentOrData) {
+    this.#beginOutput();
+    this.#flushMdBuffer();
+    const agent = this.#agentName(agentOrData) || "subagent";
+    this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} ${agent} started`));
+  }
+
+  // 子 Agent 结束：成功 `  ↳ explorer#1 done in 3.9s · 3 tool calls`；
+  // 失败 `  ↳ explorer#1 failed: <text>`。
+  subagentEnd(data = {}) {
+    this.#beginOutput();
+    this.#flushMdBuffer();
+    const t = this.#t;
+    const agent = this.#agentName(data) || "subagent";
+    if (data?.ok === false) {
+      const reason = String(data?.text ?? "").trim() || "unknown error";
+      this.#writeClipped(t.dim(`  ${this.#sym.subagent} ${agent} failed: ${reason}`));
+      return;
+    }
+    const duration = formatDuration(data?.duration_ms);
+    const calls = Number(data?.tool_calls);
+    const count = Number.isFinite(calls) && calls > 0 ? calls : 0;
+    const head = `${agent} done${duration ? ` in ${duration}` : ""}`;
+    const tail = `${count} tool call${count === 1 ? "" : "s"}`;
+    this.#writeClipped(t.dim(`  ${this.#sym.subagent} ${head} ${this.#sym.dot} ${tail}`));
   }
 
   #ensureAssistantLabel() {
@@ -424,7 +542,14 @@ export class TranscriptRenderer {
 
   #writeMdLine(line) {
     for (const rendered of this.#md.renderLine(line)) {
-      this.#write(rendered.length ? `  ${rendered}\n` : "\n");
+      if (!rendered.length) {
+        this.#write("\n");
+        continue;
+      }
+      // 子 Agent 的文本块：首个非空行加一次 dim 标注，后续行沿用原有缩进。
+      const agent = this.#pendingAgentPrefix;
+      this.#pendingAgentPrefix = "";
+      this.#writeRow(agent, `  ${agent ? this.#agentTag(agent) : ""}${rendered}`);
     }
   }
 

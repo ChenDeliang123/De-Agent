@@ -135,6 +135,7 @@ export const SYMBOLS = {
   bullet: "▸",
   interrupted: "⏹",
   compact: "⤵",
+  subagent: "↳",
   dot: "·",
 };
 
@@ -150,6 +151,7 @@ export const ASCII_SYMBOLS = {
   bullet: ">",
   interrupted: "!",
   compact: "^",
+  subagent: "->",
   dot: "-",
 };
 

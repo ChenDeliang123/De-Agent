@@ -181,14 +181,25 @@ async function sendMessage(ctx, text) {
         if (!data) {
           return;
         }
+        // 帧上的 agent_id 标识事件归属：空串 = 根 Agent，非空 = 子 Agent。
+        const agentId = data.agent_id ?? "";
         if (event === "content") {
-          renderer.content(data.content ?? "");
+          renderer.content(data.content ?? "", agentId);
         } else if (event === "tool_start") {
-          renderer.toolStart(data.id ?? "", data.name ?? "tool", data.arguments ?? "");
+          renderer.toolStart(
+            data.id ?? "",
+            data.name ?? "tool",
+            data.arguments ?? "",
+            agentId,
+          );
         } else if (event === "tool_output") {
-          renderer.toolOutput(data.content ?? "");
+          renderer.toolOutput(data.content ?? "", agentId);
         } else if (event === "tool_end") {
-          renderer.toolEnd(Boolean(data.ok), data.text ?? "");
+          renderer.toolEnd(Boolean(data.ok), data.text ?? "", agentId);
+        } else if (event === "subagent_start") {
+          renderer.subagentStart(data);
+        } else if (event === "subagent_end") {
+          renderer.subagentEnd(data);
         } else if (event === "compaction") {
           renderer.compaction(data);
         } else if (event === "approval_request") {

@@ -20,6 +20,7 @@
 // 其中 state 至少包含 { sessionId, cwd, shouldExit, pendingName? }。
 
 import { renderHotkeys } from "../../ui/editor.mjs";
+import { agentCommands } from "./agents.mjs";
 import { contextCommands } from "./context.mjs";
 import { infoCommands } from "./info.mjs";
 import { clearCommand, quitCommand, themeCommand } from "./local.mjs";
@@ -56,6 +57,7 @@ export const commands = [
   ...sessionCommands,
   ...contextCommands,
   ...infoCommands, // /status /tools /cwd /permissions
+  ...agentCommands, // /agents
   themeCommand,
   ...helpCommands,
   clearCommand,
