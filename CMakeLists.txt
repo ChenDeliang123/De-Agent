@@ -114,6 +114,7 @@ add_library(aiagent_agent STATIC
   src/agent/history_cache.cpp
   src/agent/project_instructions.cpp
   src/agent/session_meta_store.cpp
+  src/agent/sub_agent.cpp
   src/agent/system_prompt.cpp
   src/permissions/bash_policy.cpp
   src/permissions/permission_policy.cpp
@@ -123,6 +124,8 @@ add_library(aiagent_agent STATIC
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
+  src/tools/filtered_tool_provider.cpp
+  src/tools/sub_agent_tool.cpp
 )
 target_include_directories(aiagent_agent PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aiagent_agent PUBLIC aiagent_llm a2a::a2a)
@@ -295,6 +298,10 @@ if(AIAGENT_BUILD_TESTS)
   target_link_libraries(local_tools_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_local_tools COMMAND local_tools_test)
 
+  add_executable(sub_agent_test tests/sub_agent_test.cpp)
+  target_link_libraries(sub_agent_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_sub_agent COMMAND sub_agent_test)
+
   add_executable(fake_mcp_server tests/fake_mcp_server.cpp)
   target_link_libraries(fake_mcp_server PRIVATE aiagent_llm a2a::a2a)
 
@@ -339,6 +346,10 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cli/"
         PATTERN "tests" EXCLUDE
         PATTERN ".runtime" EXCLUDE
         PATTERN "node_modules" EXCLUDE)
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/prompts/"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/de/prompts
+        COMPONENT deagent)
 
 install(FILES
           "${CMAKE_CURRENT_SOURCE_DIR}/conf/app.ini.example"

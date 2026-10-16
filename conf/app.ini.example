@@ -72,6 +72,40 @@ agents_md_max_depth = 16
 sandbox_enabled = true
 sandbox_roots =
 
+[agents]
+; 多 Agent 协同：父 Agent 可用 task 工具把自包含子任务派给子 Agent（独立上下文，
+; 只回传压缩后的结果）。规划与语义见 docs/多Agent协同规划.md。
+; 内置两个定义：general（继承父工具集）与 explorer（只读 read/grep/glob/ls）；
+; 提示词从 <share>/prompts 或源码树 prompts/ 读取，找不到会直接报错（不做静默降级）。
+enabled = true
+; 派生深度：0 = 关闭（不注册 task 工具）；1 = 子 Agent 不能再派生；最大 4。
+max_depth = 1
+; 同时运行的子 Agent 上限（含一次批量扇出）。
+max_concurrent = 3
+; 单个子 Agent 的硬超时（秒）；task 参数 timeout_s 可逐次覆盖。
+default_timeout_s = 300
+; 子 Agent 工具循环轮次上限（防跑飞）。
+max_rounds = 24
+; 单条结果回传父上下文的上限（字符，头尾保留式截断）。
+result_max_chars = 8000
+; 子 Agent 的事件是否实时进入父会话流（false = 只回传最终结果，更安静）。
+stream_events = true
+; 子 Agent 默认模型；留空 = 继承父模型（可填 deepseek-v4-flash 降本）。
+default_model =
+
+; 覆盖 / 追加单个定义（名字与内置定义同名时覆盖其字段）。
+; [agents.explorer]
+; description = Read-only codebase exploration.
+; system_prompt_file = prompts/explorer.md
+; tools = read,grep,glob,ls
+; model = deepseek-v4-flash
+
+; 可选示例：需要写权限的代码审查子 Agent（按需打开）。
+; [agents.reviewer]
+; description = Review a diff or patch and report concrete defects.
+; system_prompt_file = prompts/reviewer.md
+; tools = read,grep,glob,bash
+
 [storage]
 ; 用户级数据目录（权限等与用户相关的状态）。
 ; 留空时按 DE_HOME > XDG_DATA_HOME/de > ~/.de 解析；目录按需创建。

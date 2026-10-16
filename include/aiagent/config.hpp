@@ -78,6 +78,29 @@ struct PermissionsConfig {
     int approval_timeout_seconds = 120;
 };
 
+// 单个子 Agent 定义（[agents.<name>]）。
+struct AgentDefinitionConfig {
+    std::string name;
+    std::string description;
+    std::string system_prompt_file;  // 含 '/' 按显式路径；否则在提示词目录里查找
+    std::string model;               // 空 = [agents] default_model；再空 = 继承父模型
+    std::vector<std::string> tools;  // 白名单；空 = 继承父工具集
+};
+
+// 多 Agent 协同配置（[agents] 与 [agents.<name>]）。
+// 语义见 docs/多Agent协同规划.md §3.4。
+struct AgentsConfig {
+    bool enabled = true;
+    int max_depth = 1;        // 0=禁用派生；1=子 Agent 不可再派生
+    int max_concurrent = 3;   // 同时运行的子 Agent 上限
+    long default_timeout_s = 300;
+    int max_rounds = 24;      // 子 Agent 工具循环轮次上限
+    std::size_t result_max_chars = 8000;  // 单条结果回传父上下文的上限
+    bool stream_events = true;            // 子 Agent 事件是否实时进父 SSE 流
+    std::string default_model;            // 空 = 继承父模型
+    std::vector<AgentDefinitionConfig> agents;
+};
+
 // 终端 Agent 的项目指令（AGENTS.md）配置。
 struct InstructionsConfig {
     bool agents_md = true;
@@ -130,6 +153,14 @@ std::optional<ToolsConfig> LoadToolsConfigFile(const std::string& path,
 // 解析 INI 文本中的 [storage] 段；没有该段时返回默认值。
 std::optional<StorageConfig> ParseStorageConfig(const std::string& content,
                                                 std::string* error = nullptr);
+
+// 解析 INI 文本中的 [agents] 与 [agents.<name>] 段；没有该段时返回默认值
+// （enabled=true，内置 general/explorer 定义由 LoadAgentDefinitions 补齐）。
+std::optional<AgentsConfig> ParseAgentsConfig(const std::string& content,
+                                              std::string* error = nullptr);
+
+std::optional<AgentsConfig> LoadAgentsConfigFile(const std::string& path,
+                                                 std::string* error = nullptr);
 
 std::optional<StorageConfig> LoadStorageConfigFile(const std::string& path,
                                                    std::string* error = nullptr);

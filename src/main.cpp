@@ -38,6 +38,7 @@
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
+#include "aiagent/agent/sub_agent.hpp"
 #include "aiagent/agent/system_prompt.hpp"
 #include "aiagent/app_paths.hpp"
 #include "aiagent/config.hpp"
@@ -50,6 +51,7 @@
 #include "aiagent/permissions/trust_store.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
+#include "aiagent/tools/sub_agent_tool.hpp"
 #include "aiagent/version.hpp"
 #include "aiagent/web/web_gateway.hpp"
 
@@ -624,6 +626,101 @@ int main(int argc, char** argv) {
             mcp_info = "MCP disabled (binary not found)";
         }
 
+        // 多 Agent 协同（[agents]）：装载子 Agent 定义并注册 task 工具。
+        // 内置 general/explorer；提示词来自 <share>/prompts 或源码树 prompts/
+        // （见 docs/多Agent协同规划.md §3.4）。
+        aiagent::AgentsConfig agents_config;
+        std::string agents_error;
+        if (const auto parsed_agents = aiagent::LoadAgentsConfigFile(config_path, &agents_error);
+            parsed_agents.has_value()) {
+            agents_config = *parsed_agents;
+        } else if (!agents_error.empty()) {
+            std::cerr << "配置错误: " << agents_error << '\n';
+            return 1;
+        }
+        std::string agents_info = "agents off";
+        // 生命周期：task 工具只持有 Manager 的 weak_ptr，这里必须保留强引用到进程结束
+        // （否则子 Agent 能力在注册后立刻失效）。
+        std::shared_ptr<aiagent::agent::SubAgentManager> agent_manager;
+        if (agents_config.enabled) {
+            std::vector<std::string> prompt_dirs;
+            if (!share_dir.empty()) {
+                prompt_dirs.push_back(share_dir + "/prompts");
+            }
+            prompt_dirs.push_back("prompts");
+            std::vector<aiagent::agent::AgentDefinition> agent_definitions;
+            if (auto loaded = aiagent::agent::LoadAgentDefinitions(agents_config, prompt_dirs,
+                                                                   &agents_error);
+                loaded.has_value()) {
+                agent_definitions = std::move(*loaded);
+            } else {
+                std::cerr << "配置错误: " << agents_error << '\n';
+                return 1;
+            }
+
+            const aiagent::DeepSeekConfig parent_model_config = *config;
+            agent_manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                    agents_config, agent_definitions,
+                    [parent_model_config, permission_store, permission_settings, bash_policy,
+                     project_config_cache, trust_store, compaction_settings,
+                     fallback_working_directory, approval_broker,
+                     timeout = permissions_config.approval_timeout_seconds](
+                            const aiagent::agent::SubAgentManager::ChildRuntimeSpec& spec)
+                            -> std::shared_ptr<aiagent::agent::AgentRuntime> {
+                        aiagent::DeepSeekConfig child_config = parent_model_config;
+                        if (!spec.model.empty()) {
+                            child_config.model = spec.model;
+                        }
+                        auto child_runtime = std::make_shared<aiagent::agent::AgentRuntime>(
+                                std::make_shared<aiagent::llm::DeepSeekClient>(child_config),
+                                spec.system_prompt);
+                        child_runtime->SetToolProvider(spec.tools);
+                        child_runtime->SetMaxToolRounds(spec.max_tool_rounds);
+                        child_runtime->SetFallbackWorkingDirectory(fallback_working_directory);
+                        child_runtime->SetCompactionSettings(compaction_settings);
+                        // 权限与父会话同源：同一存储、同一设置、同一工作目录 ⇒ 同一档位
+                        // （子 Agent 只能靠工具白名单进一步收窄，不能提权）。
+                        child_runtime->SetPermissionStore(permission_store);
+                        child_runtime->SetPermissionSettings(permission_settings);
+                        child_runtime->SetBashPolicy(bash_policy);
+                        child_runtime->SetProjectConfigProvider(
+                                [project_config_cache](const std::string& cwd) {
+                                    return project_config_cache->Get(cwd);
+                                });
+                        child_runtime->SetTrustStore(trust_store);
+                        // 审批：改写成父会话的键（session = 父会话 id，tool_call_id 前缀化，
+                        // 与事件归属的前缀保持一致），CLI 弹窗与 /chat/approve 契约不变。
+                        child_runtime->SetApprovalHandler(
+                                [approval_broker, timeout,
+                                 parent_session = spec.parent_session_id,
+                                 prefix = spec.tool_id_prefix](
+                                        const aiagent::agent::ApprovalRequest& request) {
+                                    const std::string session =
+                                            parent_session.empty() ? request.context_id
+                                                                   : parent_session;
+                                    return approval_broker->Wait(
+                                            session, prefix + request.tool_call_id,
+                                            std::chrono::seconds(timeout));
+                                });
+                        return child_runtime;
+                    },
+                    tools);
+
+            agents_info = "agents:";
+            for (const auto& definition : agent_definitions) {
+                agents_info += " " + definition.name;
+            }
+            agents_info += " (depth=" + std::to_string(agents_config.max_depth) +
+                           ", concurrent=" + std::to_string(agents_config.max_concurrent) + ")";
+            if (agents_config.max_depth > 0 && agent_manager->Enabled()) {
+                tools->Add(aiagent::tools::MakeSubAgentToolProvider(agent_manager, 0));
+            } else if (agents_config.max_depth <= 0) {
+                agents_info += " [task tool disabled: max_depth=0]";
+            }
+            aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "main",
+                                         "sub-agents enabled: " + agents_info);
+        }
+
         a2a::server::AgentServer agent_server(BuildAgentCard(options.port), task_store);
 
         agent_server.task_manager().SetMessageHandler(
@@ -1043,9 +1140,13 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, OnSignal);
         std::signal(SIGTERM, OnSignal);
 
+        std::string banner_info = mcp_info;
+        if (!agents_info.empty() && agents_info != "agents off") {
+            banner_info += "  ·  " + agents_info;
+        }
         PrintStartupBanner(config->model, options.port, options.web_port,
                            db_path.string(), log_config.file, tools->ListTools().size(),
-                           mcp_info);
+                           banner_info);
 
         while (!g_stop_requested) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -1,10 +1,12 @@
 #include "aiagent/config.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace aiagent {
 namespace {
@@ -36,6 +38,28 @@ bool SetSection(const std::string& line, std::string& section) {
     }
     section = Trim(line.substr(1, line.size() - 2));
     return true;
+}
+
+// "a, b , c" -> {"a", "b", "c"}（逗号分隔，忽略空白与空项）。
+std::vector<std::string> SplitList(const std::string& value) {
+    std::vector<std::string> items;
+    std::string current;
+    for (const char c : value) {
+        if (c == ',') {
+            const std::string item = Trim(current);
+            if (!item.empty()) {
+                items.push_back(item);
+            }
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    const std::string item = Trim(current);
+    if (!item.empty()) {
+        items.push_back(item);
+    }
+    return items;
 }
 
 }  // namespace
@@ -752,6 +776,142 @@ std::optional<PermissionsConfig> LoadPermissionsConfigFile(const std::string& pa
     std::ostringstream content;
     content << input.rdbuf();
     return ParsePermissionsConfig(content.str(), error);
+}
+
+std::optional<AgentsConfig> ParseAgentsConfig(const std::string& content, std::string* error) {
+    AgentsConfig config;
+    bool in_agents = false;
+    AgentDefinitionConfig* current = nullptr;
+
+    auto parse_int = [error](const std::string& key, const std::string& value, long minimum,
+                            long maximum, long* output) {
+        try {
+            const long parsed = std::stol(value);
+            if (parsed < minimum || parsed > maximum) {
+                if (error != nullptr) {
+                    *error = key + " must be within [" + std::to_string(minimum) + ", " +
+                             std::to_string(maximum) + "]";
+                }
+                return false;
+            }
+            *output = parsed;
+            return true;
+        } catch (const std::exception&) {
+            if (error != nullptr) {
+                *error = "invalid " + key + ": " + value;
+            }
+            return false;
+        }
+    };
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_agents = (section == "agents");
+            current = nullptr;
+            constexpr const char* kPrefix = "agents.";
+            if (section.rfind(kPrefix, 0) == 0) {
+                const std::string name = Trim(section.substr(std::string(kPrefix).size()));
+                if (name.empty()) {
+                    if (error != nullptr) {
+                        *error = "[agents.<name>] requires a non-empty name";
+                    }
+                    return std::nullopt;
+                }
+                auto it = std::find_if(config.agents.begin(), config.agents.end(),
+                                       [&name](const AgentDefinitionConfig& definition) {
+                                           return definition.name == name;
+                                       });
+                if (it == config.agents.end()) {
+                    AgentDefinitionConfig definition;
+                    definition.name = name;
+                    config.agents.push_back(std::move(definition));
+                    current = &config.agents.back();
+                } else {
+                    current = &*it;
+                }
+                in_agents = true;
+            }
+            continue;
+        }
+        if (!in_agents) {
+            continue;
+        }
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (current != nullptr) {
+            if (key == "description") {
+                current->description = value;
+            } else if (key == "system_prompt_file" || key == "prompt_file") {
+                current->system_prompt_file = value;
+            } else if (key == "model") {
+                current->model = value;
+            } else if (key == "tools") {
+                current->tools = SplitList(value);
+            }
+            continue;
+        }
+
+        long parsed = 0;
+        if (key == "enabled") {
+            config.enabled = Lower(value) == "true" || value == "1";
+        } else if (key == "max_depth") {
+            if (!parse_int(key, value, 0, 4, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_depth = static_cast<int>(parsed);
+        } else if (key == "max_concurrent") {
+            if (!parse_int(key, value, 1, 16, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_concurrent = static_cast<int>(parsed);
+        } else if (key == "default_timeout_s") {
+            if (!parse_int(key, value, 1, 3600, &parsed)) {
+                return std::nullopt;
+            }
+            config.default_timeout_s = parsed;
+        } else if (key == "max_rounds") {
+            if (!parse_int(key, value, 1, 1000, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_rounds = static_cast<int>(parsed);
+        } else if (key == "result_max_chars") {
+            if (!parse_int(key, value, 100, 1000000, &parsed)) {
+                return std::nullopt;
+            }
+            config.result_max_chars = static_cast<std::size_t>(parsed);
+        } else if (key == "stream_events") {
+            config.stream_events = Lower(value) == "true" || value == "1";
+        } else if (key == "default_model") {
+            config.default_model = value;
+        }
+    }
+    return config;
+}
+
+std::optional<AgentsConfig> LoadAgentsConfigFile(const std::string& path, std::string* error) {
+    std::ifstream input(path);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseAgentsConfig(content.str(), error);
 }
 
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config) {
