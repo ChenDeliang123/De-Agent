@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -13,6 +14,12 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "a2a/core/version.hpp"
 #include "a2a/core/id.hpp"
@@ -223,6 +230,70 @@ a2a::models::AgentCard BuildAgentCard(int port) {
             .WithDefaultOutputModes({"text/plain"})
             .WithSkill(std::move(skill));
     return card;
+}
+
+// 交互终端上 stdout 才加 ANSI 颜色：重定向/管道时保持纯文本。
+bool StdoutSupportsColor() {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+// 启动横幅：终端上打印对齐的键值信息块，同时往日志里记一条 startup 汇总，
+// 方便事后按日志排查“这次到底以什么配置起的”。info 为附加状态行
+// （如 MCP 工具数/不可用原因），为空则不打印。
+void PrintStartupBanner(const std::string& model, int port, int web_port,
+                        const std::string& db_file, const std::string& log_file,
+                        std::size_t tool_count, const std::string& info) {
+    struct Row {
+        const char* key;
+        std::string value;
+    };
+    const std::string endpoints = "http://127.0.0.1:" + std::to_string(port) +
+                                  "  ·  web :" + std::to_string(web_port);
+    const Row rows[] = {
+            {"Model", model},
+            {"Endpoints", endpoints},
+            {"Task DB", db_file},
+            {"Log", log_file.empty() ? "(console only)" : log_file},
+            {"Tools", std::to_string(tool_count) + " available"},
+    };
+    std::size_t key_width = 0;
+    for (const Row& row : rows) {
+        key_width = std::max(key_width, std::string(row.key).size());
+    }
+    const std::string title =
+            std::string(aiagent::kAgentName) + " v" + aiagent::kVersion;
+    const bool color = StdoutSupportsColor();
+    const auto paint = [color](const char* code, const std::string& text) {
+        return color ? std::string(code) + text + "\033[0m" : text;
+    };
+
+    std::ostringstream out;
+    out << '\n' << paint("\033[1;36m", title) << '\n';
+    for (const Row& row : rows) {
+        const std::string label(row.key);
+        out << paint("\033[2m", "  " + label + std::string(key_width - label.size(), ' '))
+            << "  " << paint("\033[1m", row.value) << '\n';
+    }
+    if (!info.empty()) {
+        out << paint("\033[2m", "  " + info) << '\n';
+    }
+    out << paint("\033[2m", "\n  Press Ctrl+C to stop.") << "\n\n";
+    std::cout << out.str() << std::flush;
+
+    std::string summary = "startup agent=\"" + title + "\" model=" + model +
+                          " endpoints=\"" + endpoints + "\"";
+    if (!log_file.empty()) {
+        summary += " log=" + log_file;
+    }
+    summary += " tools=" + std::to_string(tool_count);
+    if (!info.empty()) {
+        summary += " mcp=\"" + info + "\"";
+    }
+    aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "main", summary);
 }
 
 }  // namespace
@@ -534,17 +605,23 @@ int main(int argc, char** argv) {
         }
 
         auto mcp_bridge = std::make_shared<aiagent::mcp::MCPClientBridge>();
+        // MCP 状态收进启动横幅打印，避免在 banner 之外散落控制台输出。
+        std::string mcp_info = "MCP off";
         if (mcp_config.enabled) {
             try {
                 mcp_bridge->Start(mcp_config);
                 tools->Add(mcp_bridge);
-                std::cout << "MCP tools loaded: " << mcp_bridge->ListTools().size() << '\n';
+                mcp_info = "MCP on, " +
+                           std::to_string(mcp_bridge->ListTools().size()) +
+                           " tools loaded";
             } catch (const std::exception& e) {
-                std::cerr << "MCP disabled: " << e.what() << '\n';
+                mcp_info = std::string("MCP disabled: ") + e.what();
+                aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "main",
+                                             "MCP disabled: " + std::string(e.what()));
                 mcp_bridge.reset();
             }
         } else {
-            std::cout << "MCP disabled (binary not found)\n";
+            mcp_info = "MCP disabled (binary not found)";
         }
 
         a2a::server::AgentServer agent_server(BuildAgentCard(options.port), task_store);
@@ -966,18 +1043,9 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, OnSignal);
         std::signal(SIGTERM, OnSignal);
 
-        std::cout << aiagent::kAgentName << " listening on http://127.0.0.1:"
-                  << options.port << "/\n";
-        std::cout << "Web Gateway: http://127.0.0.1:" << options.web_port << "/\n";
-        std::cout << "Agent Card: http://127.0.0.1:" << options.port
-                  << "/.well-known/agent-card.json\n";
-        std::cout << "Model: " << config->model << '\n';
-        std::cout << "Task DB: " << db_path.string() << '\n';
-        std::cout << "Press Ctrl+C to stop.\n";
-        aiagent::DefaultLogger().Log(
-                aiagent::LogLevel::kInfo, "main",
-                "listening on " + std::to_string(options.port) + " / web " +
-                        std::to_string(options.web_port));
+        PrintStartupBanner(config->model, options.port, options.web_port,
+                           db_path.string(), log_config.file, tools->ListTools().size(),
+                           mcp_info);
 
         while (!g_stop_requested) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));

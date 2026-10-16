@@ -9,6 +9,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <mutex>
 #include <poll.h>
 #include <sstream>
@@ -107,6 +108,13 @@ public:
             close(child_stdin[1]);
             close(child_stdout[0]);
             close(child_stdout[1]);
+            // MCP server 的启动横幅/告警走 stderr；stdio 模式下会污染宿主终端，
+            // 丢弃之（其自身日志仍写入 --log-dir）。
+            const int dev_null = open("/dev/null", O_WRONLY);
+            if (dev_null >= 0) {
+                dup2(dev_null, STDERR_FILENO);
+                close(dev_null);
+            }
 
             const std::string python_lib_dir = config_.plugins_dir + "/python";
             if (!config_.plugins_dir.empty() && access(python_lib_dir.c_str(), F_OK) == 0) {
