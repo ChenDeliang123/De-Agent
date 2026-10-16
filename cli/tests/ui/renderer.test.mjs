@@ -475,3 +475,26 @@ test("renderer clips sub-agent steering lines to the terminal width", () => {
     }
   }
 });
+
+test("renderer prints and clips the root-agent steer notice", () => {
+  const out = fakeOut(false);
+  out.columns = 40;
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.steerNotice("  ");
+  assert.ok(out.text().includes("  ↳ steered: <text 缺失>"), out.text());
+
+  renderer.steerNotice("只看 include/ 目录");
+  assert.ok(out.text().includes("  ↳ steered: 只看 include/ 目录"), out.text());
+
+  renderer.steerNotice("长文本 ".repeat(40));
+  for (const line of out.text().split("\n")) {
+    if (line !== "") {
+      assert.ok(
+        visibleWidth(line) <= 40,
+        `steer notice overflows the terminal: ${JSON.stringify(line)}`,
+      );
+    }
+  }
+  assert.ok(out.text().includes("…"), "overlong steer notices are clipped with an ellipsis");
+});

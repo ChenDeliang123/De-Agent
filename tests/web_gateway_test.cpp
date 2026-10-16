@@ -11,15 +11,18 @@
 #include <httplib.h>
 #include <json.hpp>
 
+#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <string>
 #include <vector>
 
 #include "aiagent/agent/agent_runtime.hpp"
+#include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/permissions/permission_store.hpp"
@@ -208,7 +211,8 @@ int main() {
         gateway.SetStreamEventHandler(
                 [](const std::string&, const std::string&, const std::string&,
                    const aiagent::agent::AgentEventCallback& on_event,
-                   const aiagent::web::WebGateway::CancelCallback&) {
+                   const aiagent::web::WebGateway::CancelCallback&,
+                   const std::shared_ptr<aiagent::agent::MessageInbox>&) {
                     aiagent::agent::AgentEvent approval;
                     approval.kind = aiagent::agent::AgentEventKind::kApprovalRequest;
                     approval.tool_call_id = "call-1";
@@ -241,7 +245,8 @@ int main() {
         gateway.SetStreamEventHandler(
                 [](const std::string&, const std::string&, const std::string&,
                    const aiagent::agent::AgentEventCallback& on_event,
-                   const aiagent::web::WebGateway::CancelCallback&) {
+                   const aiagent::web::WebGateway::CancelCallback&,
+                   const std::shared_ptr<aiagent::agent::MessageInbox>&) {
                     aiagent::agent::AgentEvent root;
                     root.kind = aiagent::agent::AgentEventKind::kToolStart;
                     root.tool_call_id = "call_parent";
@@ -862,7 +867,8 @@ int main() {
                 [&gateway](const std::string& session_id, const std::string&,
                            const std::string&,
                            const aiagent::agent::AgentEventCallback& on_event,
-                           const aiagent::web::WebGateway::CancelCallback&) {
+                           const aiagent::web::WebGateway::CancelCallback&,
+                   const std::shared_ptr<aiagent::agent::MessageInbox>&) {
                     aiagent::agent::AgentEvent token;
                     token.kind = aiagent::agent::AgentEventKind::kToken;
                     token.content = "先";
@@ -895,6 +901,118 @@ int main() {
         gateway.PublishSessionEvent("sess-absent", "subagent_result", {{"task_id", "bg-404"}});
         Expect(http.Get(base + "/health").IsSuccess(),
                "publishing without an active stream should not break the gateway");
+
+        // 回合内纠偏（M5c）：POST /api/v1/chat/steer 打到"该会话活跃流的收件箱"。
+        {
+            const auto no_turn = http.Post(base + "/api/v1/chat/steer",
+                                          R"({"session_id":"sess-steer","message":"x"})",
+                                          "application/json");
+            Expect(no_turn.status_code == 409 &&
+                           nlohmann::json::parse(no_turn.body).value("error", std::string()) ==
+                                   "no running turn for this session",
+                   "steer without an active turn should return 409, got: " + no_turn.body);
+            const auto missing_session = http.Post(base + "/api/v1/chat/steer",
+                                                  R"({"message":"x"})", "application/json");
+            Expect(missing_session.status_code == 400,
+                   "steer without session_id should be 400, got: " + missing_session.body);
+
+            // 活跃流：handler 等主线程把 steer 打进来，再取走收件箱内容验证投递。
+            std::mutex turn_mutex;
+            std::condition_variable turn_cv;
+            bool handler_ready = false;
+            bool steer_sent = false;
+            std::vector<std::string> inbox_seen;
+            gateway.SetStreamEventHandler(
+                    [&](const std::string&, const std::string&, const std::string&,
+                        const aiagent::agent::AgentEventCallback&,
+                        const aiagent::web::WebGateway::CancelCallback&,
+                        const std::shared_ptr<aiagent::agent::MessageInbox>& inbox) {
+                        {
+                            std::lock_guard<std::mutex> lock(turn_mutex);
+                            handler_ready = true;
+                        }
+                        turn_cv.notify_all();
+                        std::unique_lock<std::mutex> lock(turn_mutex);
+                        // 真实场景里模型正在算；测试用事件代替等待，带超时避免挂死。
+                        turn_cv.wait_for(lock, std::chrono::seconds(10),
+                                         [&steer_sent]() { return steer_sent; });
+                        if (inbox != nullptr) {
+                            inbox_seen = inbox->Drain();
+                        }
+                    });
+            std::string stream_body;
+            std::thread turn_thread([&]() {
+                http.PostStream(base + "/api/v1/chat/stream",
+                                R"({"session_id":"sess-steer","message":"work"})",
+                                "application/json",
+                                [&stream_body](std::string_view chunk) {
+                                    stream_body.append(chunk.data(), chunk.size());
+                                });
+            });
+            {
+                std::unique_lock<std::mutex> lock(turn_mutex);
+                turn_cv.wait_for(lock, std::chrono::seconds(10),
+                                 [&handler_ready]() { return handler_ready; });
+            }
+            Expect(handler_ready, "the stream handler should start before steering");
+
+            const auto steer_ok = http.Post(
+                    base + "/api/v1/chat/steer",
+                    R"({"session_id":"sess-steer","message":"只看 include/"})",
+                    "application/json");
+            Expect(steer_ok.IsSuccess() &&
+                           nlohmann::json::parse(steer_ok.body).value("accepted", false),
+                   "steer during an active turn should be accepted, got: " + steer_ok.body);
+            const auto steer_empty = http.Post(
+                    base + "/api/v1/chat/steer",
+                    R"({"session_id":"sess-steer","message":"   "})", "application/json");
+            Expect(steer_empty.status_code == 400 &&
+                           nlohmann::json::parse(steer_empty.body).value("error", std::string()) ==
+                                   "steer message is required",
+                   "blank steer should be 400, got: " + steer_empty.body);
+            const auto steer_huge = http.Post(
+                    base + "/api/v1/chat/steer",
+                    nlohmann::json{{"session_id", "sess-steer"},
+                                   {"message", std::string(5000, 'x')}}
+                            .dump(),
+                    "application/json");
+            Expect(steer_huge.status_code == 400 &&
+                           nlohmann::json::parse(steer_huge.body)
+                                           .value("error", std::string())
+                                           .find("too long") != std::string::npos,
+                   "oversized steer should be 400, got: " + steer_huge.body);
+            // 收件箱上限 8：已有 1 条，再填 7 条后第 9 条被拒。
+            for (int i = 0; i < 7; ++i) {
+                http.Post(base + "/api/v1/chat/steer",
+                          nlohmann::json{{"session_id", "sess-steer"},
+                                         {"message", "fill " + std::to_string(i)}}
+                                  .dump(),
+                          "application/json");
+            }
+            const auto steer_full = http.Post(
+                    base + "/api/v1/chat/steer",
+                    R"({"session_id":"sess-steer","message":"one more"})", "application/json");
+            Expect(steer_full.status_code == 409 &&
+                           nlohmann::json::parse(steer_full.body)
+                                           .value("error", std::string())
+                                           .find("full") != std::string::npos,
+                   "a full turn inbox should return 409, got: " + steer_full.body);
+            {
+                std::lock_guard<std::mutex> lock(turn_mutex);
+                steer_sent = true;
+            }
+            turn_cv.notify_all();
+            turn_thread.join();
+            Expect(inbox_seen.size() == 8 && inbox_seen[0] == "只看 include/" &&
+                           inbox_seen[7] == "fill 6",
+                   "the turn inbox should receive every accepted steer in order, got " +
+                           std::to_string(inbox_seen.size()));
+            const auto after_turn = http.Post(base + "/api/v1/chat/steer",
+                                             R"({"session_id":"sess-steer","message":"x"})",
+                                             "application/json");
+            Expect(after_turn.status_code == 409,
+                   "steer after the turn should return 409, got: " + after_turn.body);
+        }
 
         gateway.Stop();
     } catch (const std::exception& e) {

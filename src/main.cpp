@@ -1349,7 +1349,8 @@ int main(int argc, char** argv) {
                     const std::string& content,
                     const std::string& cwd,
                     const aiagent::agent::AgentEventCallback& on_event,
-                    const aiagent::web::WebGateway::CancelCallback& should_cancel) {
+                    const aiagent::web::WebGateway::CancelCallback& should_cancel,
+                    const std::shared_ptr<aiagent::agent::MessageInbox>& inbox) {
                     if (!cwd.empty()) {
                         session_meta.SetCwd(session_id, cwd);
                     }
@@ -1363,8 +1364,16 @@ int main(int argc, char** argv) {
                             a2a::models::Role::kUser, content, "text/plain");
                     history.push_back(user);
 
+                    // 回合内纠偏（M5c）：收件箱由网关随流创建，交付给运行时投递；
+                    // 真正被投递的文本（模型实际看到的形态）按序记下来，回合末落库。
+                    std::vector<std::string> steered_texts;
+                    if (inbox != nullptr) {
+                        inbox->SetDeliveryCallback([&steered_texts](const std::string& text) {
+                            steered_texts.push_back(text);
+                        });
+                    }
                     const std::string reply = runtime.HandleMessageStreamingEvents(
-                            user, history, session_id, on_event, cwd, should_cancel);
+                            user, history, session_id, on_event, cwd, should_cancel, inbox);
 
                     a2a::models::Task task;
                     task.id = std::string(a2a::core::NewUuid());
@@ -1372,6 +1381,11 @@ int main(int argc, char** argv) {
                     task.status =
                             a2a::models::MakeTaskStatus(a2a::models::TaskState::kCompleted);
                     task.history = std::move(history);
+                    // 用户自己的纠偏输入不能丢在历史外：按投递顺序插在最终回复之前。
+                    for (const auto& steered : steered_texts) {
+                        task.history.push_back(a2a::models::MakeTextMessage(
+                                a2a::models::Role::kUser, steered, "text/plain"));
+                    }
                     task.history.push_back(a2a::models::MakeTextMessage(
                             a2a::models::Role::kAgent, reply, "text/plain"));
                     task_store->Put(task);

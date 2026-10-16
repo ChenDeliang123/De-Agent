@@ -534,7 +534,7 @@ export class TranscriptRenderer {
     this.#writeReportSummary(data?.text);
   }
 
-  // 纠偏消息投递（subagent_steer 帧）：`  ↳ steered explorer#7: 只看 include/ 目录`。
+  // 回合内纠偏消息投递（subagent_steer 帧）：`  ↳ steered explorer#7: 只看 include/ 目录`。
   // 多行文本只取首行；空文本给可读占位。
   subagentSteer(data = {}) {
     this.#beginOutput();
@@ -546,6 +546,16 @@ export class TranscriptRenderer {
       .trim();
     const label = first || "<text 缺失>";
     this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} steered ${agent}: ${label}`));
+  }
+
+  // 根 Agent 的回合内纠偏回执（M5c）：`  ↳ steered: 只看 include/ 目录`。
+  // 这是本地命令回显，不是后端帧；走同一条裁剪输出通道。
+  steerNotice(text) {
+    this.#beginOutput();
+    this.#flushMdBuffer();
+    this.#endContentBlock();
+    const label = String(text ?? "").trim() || "<text 缺失>";
+    this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} steered: ${label}`));
   }
 
   // 成功行：`  ↳ explorer#1 done in 3.9s · 3 tool calls · 4.4k tokens`。

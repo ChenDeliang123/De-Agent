@@ -17,12 +17,15 @@ import {
   loadHistory,
   renameSession,
   setTrust,
+  steerChat,
   streamChat,
 } from "./src/app/session.mjs";
+import { TurnInputAction, TurnInputBuffer } from "./src/app/turn-input.mjs";
 import { LineEditor, renderHotkeys } from "./src/ui/editor.mjs";
 import { renderStartupLogo } from "./src/ui/logo.mjs";
 import { loadCliConfig, readCliVersion, updateCliUiConfig } from "./src/app/config.mjs";
 import { PALETTES, detectColorMode, makeStyler, pickSymbols } from "./src/ui/theme.mjs";
+import { visibleWidth, wrapVisible } from "./src/ui/text.mjs";
 import { resolveEditorCommand } from "./src/ui/external-editor.mjs";
 import {
   commands,
@@ -46,15 +49,58 @@ let activeAbortController = null;
 let approvalPending = false;
 // 后台子 Agent 结果的回合内轮询间隔；回合外还会在每轮输入前与回合结束各补一次。
 const BACKGROUND_POLL_INTERVAL_MS = 4000;
+// 回合内纠偏（M5c）：回合进行中敲的字进这个单行缓冲，Enter 发到当前回合的收件箱。
+// { input: TurnInputBuffer, sessionId, ctx }；回合结束后置回 null。
+let turnSteer = null;
+
+// 把纠偏缓冲画进底部区域的输入框槽位（回合内 LineEditor 空闲，该槽位空闲；
+// 不占 spinner 的状态行、不占 appendOutput 的 pending 行）。空缓冲收起提示。
+function renderSteerPrompt() {
+  const turnInput = turnSteer?.input;
+  if (!turnInput || turnInput.isEmpty()) {
+    region.setEditor(null);
+    return;
+  }
+  const width = region.contentWidth;
+  // 超宽时只显示尾部（正在输入的地方），与终端的单行输入观感一致。
+  const rows = wrapVisible(`${uiStyler.dim("steer> ")}${turnInput.buffer()}`, width);
+  const line = rows[rows.length - 1] ?? "";
+  region.setEditor({ lines: [line], cursorRow: 0, cursorCol: visibleWidth(line) });
+}
+
+// 回合内纠偏：发送成功/失败都只打印一行，不改回合状态、不抛穿。
+async function submitTurnSteer(steer, message) {
+  const text = String(message ?? "").trim();
+  if (text === "") {
+    return;
+  }
+  try {
+    await steerChat(steer.ctx.backend, steer.sessionId, text);
+    renderer.steerNotice(text);
+  } catch (error) {
+    steer.ctx.print(`steer failed: ${error.message}`);
+  }
+}
 
 if (input.isTTY) {
-  input.on("keypress", (_text, key) => {
-    if (!activeAbortController || approvalPending) {
+  input.on("keypress", (text, key) => {
+    if (!activeAbortController || approvalPending || !turnSteer) {
       return;
     }
-    if (key?.name === "escape" || (key?.ctrl && key?.name === "c")) {
+    const result = turnSteer.input.handleKey(text, key);
+    if (result.action === TurnInputAction.Abort) {
       activeAbortController.abort();
       activeAbortController = null;
+      renderSteerPrompt();
+      return;
+    }
+    if (result.action === TurnInputAction.Submit) {
+      void submitTurnSteer(turnSteer, result.text);
+      renderSteerPrompt();
+      return;
+    }
+    if (result.action === TurnInputAction.Edit) {
+      renderSteerPrompt();
     }
   });
 }
@@ -173,6 +219,9 @@ async function sendMessage(ctx, text) {
   renderer.startReply();
   const controller = new AbortController();
   activeAbortController = controller;
+  // 回合内纠偏：新会话首回合时 state.sessionId 还是 null，必须用本次请求 id。
+  const steer = { input: new TurnInputBuffer(), sessionId: requestSessionId, ctx };
+  turnSteer = steer;
   // 回合内周期轮询后台任务：首回合 state.sessionId 还是 null，必须用本次请求 id。
   // 审批提示期间跳过（region 处于挂起态，补打会踩坏交互提示）。
   // unref：定时器不阻止进程退出；finally 里清理。
@@ -259,6 +308,11 @@ async function sendMessage(ctx, text) {
     return requestSessionId;
   } finally {
     clearInterval(backgroundTimer);
+    // 回合结束：纠偏缓冲作废，收起残余的 `steer> …` 提示（首个按键前可能没画过）。
+    if (turnSteer === steer) {
+      turnSteer = null;
+      renderSteerPrompt();
+    }
     if (activeAbortController === controller) {
       activeAbortController = null;
     }

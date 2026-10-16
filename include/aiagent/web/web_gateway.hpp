@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "aiagent/agent/agent_event.hpp"
+#include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/agent/compaction.hpp"
 
 namespace a2a::server {
@@ -115,12 +116,15 @@ public:
                                const TokenCallback& on_token)>;
 
     // 新：结构化事件版流式回调（token + tool_start/tool_output/tool_end）。
+    // inbox 是本回合的纠偏收件箱（M5c，随流注册）：装配方把它交给 AgentRuntime，
+    // `POST /api/v1/chat/steer` 往里投递；回合结束（运行时或流结束）即关闭。
     using StreamEventHandler = std::function<void(
             const std::string& session_id,
             const std::string& message,
             const std::string& cwd,
             const aiagent::agent::AgentEventCallback& on_event,
-            const CancelCallback& should_cancel)>;
+            const CancelCallback& should_cancel,
+            const std::shared_ptr<aiagent::agent::MessageInbox>& inbox)>;
 
     // 手动压缩某个会话（POST /api/v1/sessions/:id/compact）。
     // 返回 false 时写入 error。

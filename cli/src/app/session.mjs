@@ -171,6 +171,22 @@ export async function health(backendUrl) {
   return response.json();
 }
 
+// 回合内纠偏（M5c）：把消息送进当前回合的收件箱，只有该回合下一轮模型调用前能读到。
+// session_id 必须是本次回合的请求 id。200 返回 {accepted:true}；400/409 的
+// body.error（无进行中回合 / 收件箱满 / 消息为空或过长）原样抛出给调用方展示。
+export async function steerChat(backendUrl, sessionId, message) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/chat/steer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(JSON.stringify({ session_id: sessionId, message })),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `steer failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
 export async function cancelChat(backendUrl, sessionId) {  const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/chat/cancel`,
     {

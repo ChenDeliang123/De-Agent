@@ -14,6 +14,7 @@ import {
   loadHistory,
   setTrust,
   steerAgent,
+  steerChat,
   stopAgent,
   streamChat,
 } from "../../src/app/session.mjs";
@@ -471,6 +472,72 @@ test("cli session client steers a background agent", async () => {
     await assert.rejects(steerAgent(base, "bg-500", "hi"), /steer failed: HTTP 500/);
     assert.equal(requests.length, 7);
     assert.equal(requests[6].url, "/api/v1/agents/bg-500/steer");
+  } finally {
+    await close(backend);
+  }
+});
+
+test("cli session client steers the running turn", async () => {
+  const requests = [];
+  const backend = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ method: request.method, url: request.url, body });
+      const send = (status, payload) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(payload));
+      };
+      if (request.url !== "/api/v1/chat/steer" || request.method !== "POST") {
+        return send(500, { error: `unexpected ${request.method} ${request.url}` });
+      }
+      const message = JSON.parse(body || "{}").message ?? "";
+      if (message === "ok") {
+        return send(200, { accepted: true });
+      }
+      if (message === "required") {
+        return send(400, { error: "steer message is required" });
+      }
+      if (message === "long") {
+        return send(400, { error: "steer message is too long (4096 bytes max)" });
+      }
+      if (message === "norun") {
+        return send(409, { error: "no running turn for this session" });
+      }
+      if (message === "full") {
+        return send(409, { error: "steer inbox is full (8)" });
+      }
+      return send(500, {});
+    });
+  });
+
+  const port = await listen(backend);
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    const accepted = await steerChat(base, "s1", "ok");
+    assert.deepEqual(accepted, { accepted: true });
+    assert.equal(requests[0].method, "POST");
+    assert.equal(requests[0].url, "/api/v1/chat/steer");
+    assert.deepEqual(JSON.parse(requests[0].body), { session_id: "s1", message: "ok" });
+
+    // 中文正文按原样编码进 body（该消息不在假后端白名单里，故意让它 500 以便只断言 body）。
+    await steerChat(base, "s1", "只看 include/ 目录").catch(() => {});
+    assert.deepEqual(JSON.parse(requests[1].body), {
+      session_id: "s1",
+      message: "只看 include/ 目录",
+    });
+
+    // 400/409 的 body.error 原样透出；500 无 error 时退回状态码文案。
+    await assert.rejects(steerChat(base, "s1", "required"), /steer message is required/);
+    await assert.rejects(
+      steerChat(base, "s1", "long"),
+      /steer message is too long \(4096 bytes max\)/,
+    );
+    await assert.rejects(steerChat(base, "s1", "norun"), /no running turn for this session/);
+    await assert.rejects(steerChat(base, "s1", "full"), /steer inbox is full \(8\)/);
+    await assert.rejects(steerChat(base, "s1", "boom"), /steer failed: HTTP 500/);
+    assert.equal(requests.length, 7);
   } finally {
     await close(backend);
   }

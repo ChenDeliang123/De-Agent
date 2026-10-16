@@ -1232,6 +1232,85 @@ private:
                          }
                      });
 
+        // 回合内纠偏：POST /api/v1/chat/steer + {"session_id","message"}（M5c）。
+        // 目标接收者是"该会话当前活跃流的收件箱"，所以不需要装配方 handler。
+        server_.Post("/api/v1/chat/steer",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             const std::string session_id =
+                                     StringValue(body, "session_id");
+                             const std::string message = StringValue(body, "message");
+                             if (session_id.empty()) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         R"({"error":"session_id is required"})",
+                                         "application/json");
+                                 return;
+                             }
+                             std::shared_ptr<aiagent::agent::MessageInbox> inbox;
+                             {
+                                 std::lock_guard<std::mutex> lock(streams_mutex_);
+                                 const auto it = active_streams_.find(session_id);
+                                 if (it != active_streams_.end() && it->second != nullptr) {
+                                     inbox = it->second->inbox;
+                                 }
+                             }
+                             if (inbox == nullptr) {
+                                 response.status = 409;
+                                 response.set_content(
+                                         R"({"error":"no running turn for this session"})",
+                                         "application/json");
+                                 return;
+                             }
+                             switch (inbox->Push(message)) {
+                                 case aiagent::agent::MessageInbox::PushResult::kAccepted:
+                                     response.set_content(R"({"accepted":true})",
+                                                          "application/json");
+                                     return;
+                                 case aiagent::agent::MessageInbox::PushResult::kClosed:
+                                     response.status = 409;
+                                     response.set_content(
+                                             R"({"error":"no running turn for this session"})",
+                                             "application/json");
+                                     return;
+                                 case aiagent::agent::MessageInbox::PushResult::kFull:
+                                     response.status = 409;
+                                     response.set_content(
+                                             nlohmann::json{{"error",
+                                                             "steer inbox is full (" +
+                                                                     std::to_string(
+                                                                             inbox->LimitsSnapshot()
+                                                                                     .max_messages) +
+                                                                     ")"}}
+                                                     .dump(),
+                                             "application/json");
+                                     return;
+                                 case aiagent::agent::MessageInbox::PushResult::kTooLarge:
+                                     response.status = 400;
+                                     response.set_content(
+                                             nlohmann::json{{
+                                                     "error",
+                                                     aiagent::agent::IsSteerTextEmpty(message)
+                                                             ? std::string(
+                                                                       "steer message is required")
+                                                             : "steer message is too long (" +
+                                                                       std::to_string(
+                                                                               inbox->LimitsSnapshot()
+                                                                                       .max_text_bytes) +
+                                                                       " bytes max)"}}
+                                                     .dump(),
+                                             "application/json");
+                                     return;
+                             }
+                         } catch (const std::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", e.what()}}.dump(),
+                                     "application/json");
+                         }
+                     });
+
         server_.Post("/api/v1/chat/cancel",
                      [this](const httplib::Request& request, httplib::Response& response) {
                          try {
@@ -1313,15 +1392,23 @@ private:
                     const RequestIdGuard request_guard(std::string(a2a::core::NewUuid()));
                     auto stream = std::make_shared<ActiveStream>();
                     stream->cancel_flag = std::make_shared<std::atomic<bool>>(false);
+                    stream->inbox = std::make_shared<aiagent::agent::MessageInbox>();
                     {
                         std::lock_guard<std::mutex> lock(streams_mutex_);
                         active_streams_[session_id] = stream;
                     }
                     const auto unregister = [this, session_id, stream]() {
-                        std::lock_guard<std::mutex> lock(streams_mutex_);
-                        const auto it = active_streams_.find(session_id);
-                        if (it != active_streams_.end() && it->second == stream) {
-                            active_streams_.erase(it);
+                        {
+                            std::lock_guard<std::mutex> lock(streams_mutex_);
+                            const auto it = active_streams_.find(session_id);
+                            if (it != active_streams_.end() && it->second == stream) {
+                                active_streams_.erase(it);
+                            }
+                        }
+                        // 兜底关闭：回合已经结束时收件箱通常已被运行时关闭（幂等）；
+                        // 这里保证异常路径/旧调用方（未传 inbox）也不会留下"可投递"的假象。
+                        if (stream->inbox != nullptr) {
+                            stream->inbox->Close();
                         }
                     };
                     const auto write = [&sink](const std::string& event,
@@ -1355,7 +1442,8 @@ private:
                                         flush_queued();
                                         WriteAgentEventFrame(write, event);
                                     },
-                                    [stream] { return stream->cancel_flag->load(); });
+                                    [stream] { return stream->cancel_flag->load(); },
+                                    stream->inbox);
                         } else if (stream_handler_) {
                             stream_handler_(
                                     session_id,
@@ -1402,6 +1490,8 @@ private:
     // 队列由任意线程入队，只有流的写线程（provider 线程）排空，避免并发写 socket。
     struct ActiveStream {
         std::shared_ptr<std::atomic<bool>> cancel_flag;
+        // 本回合的纠偏收件箱（M5c）：POST /api/v1/chat/steer 找到它并入队。
+        std::shared_ptr<aiagent::agent::MessageInbox> inbox;
         std::mutex queue_mutex;
         std::vector<std::pair<std::string, nlohmann::json>> queued_frames;
     };
