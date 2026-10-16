@@ -207,6 +207,33 @@ sudo dnf remove  de-agent
   ```
   deb 卸载时也会打印数据位置与清理提示。
 
+### 升级到新版本
+
+**不用卸载重装，数据也不会丢。** 安装目录（`/usr/...` 或解包目录）里只有程序文件；
+你的数据（`~/.de`：含 API key 的 conf.ini、会话库、权限/信任、日志）与之分离，
+任何升级方式都不会触碰它。
+
+```bash
+# 1) 出/拿到新包（注意先把 CMakeLists.txt 的 VERSION 改掉再打包，deb 版本号来自它）
+scripts/package-deb-rpm.sh          # 或 scripts/package-portable.sh
+
+# 2) 覆盖安装（选一个）
+sudo apt install ./de-agent_新版本_amd64.deb     # deb：同路径直接覆盖
+tar xzf de-agent-新版本-linux-x86_64.tar.gz -C 旧包目录/   # 绿色包：解到同一目录覆盖
+
+# 3) 重启后端，让新二进制生效（老进程一直在内存里跑旧代码）
+de restart
+# 源码树开发：重新 cmake --build build -j 后同样 de restart 即可
+```
+
+注意：
+
+- `de init` 是幂等的，**不会**用 example 覆盖你已有的 `conf.ini`；新版本如果新增了
+  配置项，需要自己对照 `<share>/de/conf/app.ini.example` 补进现有 conf.ini。
+- 手动 `cp` 替换正在运行的后端二进制会报 `Text file busy`——先 `de stop` 再替换
+  （apt/tar 覆盖的是新文件、旧进程仍映射旧 inode，不受影响）。
+- 升级前后 `de status` / `de doctor` 各看一眼即可确认路径与健康状态。
+
 ## 使用
 
 安装完成后，在**任意目录**运行 `de` 即可：需要时它会自动拉起后端守护进程，
