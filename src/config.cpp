@@ -748,11 +748,17 @@ std::optional<PermissionsConfig> ParsePermissionsConfig(const std::string& conte
         } else if (key == "allow_full_access") {
             config.allow_full_access = Lower(value) == "true" || value == "1";
         } else if (key == "approval_timeout_seconds") {
+            // 与 [agents] 的数值键同款：越界/非法都直接报配置错误，不静默退回默认值
+            // （曾经 0 会被忽略而悄悄用 120s，headless 调用方会莫名等满超时）。
             try {
                 const int parsed = std::stoi(value);
-                if (parsed > 0) {
-                    config.approval_timeout_seconds = parsed;
+                if (parsed < 1 || parsed > 3600) {
+                    if (error != nullptr) {
+                        *error = "approval_timeout_seconds must be within [1, 3600]";
+                    }
+                    return std::nullopt;
                 }
+                config.approval_timeout_seconds = parsed;
             } catch (const std::exception&) {
                 if (error != nullptr) {
                     *error = "invalid approval_timeout_seconds: " + value;

@@ -492,6 +492,12 @@ int main(int argc, char** argv) {
                                                                   &permissions_error);
             parsed.has_value()) {
             permissions_config = *parsed;
+        } else if (!permissions_error.empty()) {
+            // 与 [deepseek]/[instructions]/[agents] 同款 fail-fast：[permissions] 有校验错误
+            // 时直接报错退出，不静默退回默认值（否则例如 approval_timeout_seconds 写错会
+            // 悄悄继续用 120s）。
+            std::cerr << "配置错误: " << permissions_error << '\n';
+            return 1;
         }
         aiagent::agent::PermissionSettings permission_settings;
         if (const auto mode = aiagent::permissions::ParseMode(permissions_config.default_mode);

@@ -133,5 +133,7 @@ max_mode = full
 non_interactive_max_mode = workspace
 ; 是否允许设置 full（false 时 full 会被夹到 workspace）。
 allow_full_access = true
-; 逐次确认的超时秒数；超时按拒绝处理。
+; 逐次确认的超时秒数（1..3600，越界直接报配置错误）；超时按拒绝处理。
+; 无审批人的调用方（脚本/CI）：同步接口 POST /api/v1/chat 走非交互路径、立即拒绝；
+; 流式接口会等满这里的秒数，必要时改用同步接口，或把该路径设为 workspace/full。
 approval_timeout_seconds = 120

@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 
+#include "aiagent/config.hpp"
 #include "aiagent/permissions/permission_policy.hpp"
 
 namespace {
@@ -86,11 +87,45 @@ void TestClampMode() {
 
 }  // namespace
 
+// [permissions] 的数值键：越界/非法必须报配置错误（不静默退回默认值）。
+void TestPermissionsConfigParsing() {
+    std::string error;
+    const auto defaults = aiagent::ParsePermissionsConfig("[permissions]\nenabled = true\n", &error);
+    Expect(defaults.has_value() && defaults->approval_timeout_seconds == 120,
+           "approval timeout should default to 120s");
+
+    error.clear();
+    const auto ok =
+            aiagent::ParsePermissionsConfig("[permissions]\napproval_timeout_seconds = 5\n", &error);
+    Expect(ok.has_value() && ok->approval_timeout_seconds == 5,
+           "in-range approval timeout should parse");
+
+    error.clear();
+    const auto zero =
+            aiagent::ParsePermissionsConfig("[permissions]\napproval_timeout_seconds = 0\n", &error);
+    Expect(!zero.has_value() && error.find("approval_timeout_seconds") != std::string::npos,
+           "zero approval timeout should be rejected with the key in the message, got: " + error);
+
+    error.clear();
+    const auto too_large =
+            aiagent::ParsePermissionsConfig("[permissions]\napproval_timeout_seconds = 99999\n", &error);
+    Expect(!too_large.has_value() &&
+                   error.find("[1, 3600]") != std::string::npos,
+           "out-of-range approval timeout should be rejected, got: " + error);
+
+    error.clear();
+    const auto garbage =
+            aiagent::ParsePermissionsConfig("[permissions]\napproval_timeout_seconds = abc\n", &error);
+    Expect(!garbage.has_value() && error.find("invalid approval_timeout_seconds") != std::string::npos,
+           "non-numeric approval timeout should be rejected, got: " + error);
+}
+
 int main() {
     TestPolicyMatrix();
     TestParseMode();
     TestNamesAndInheritance();
     TestClampMode();
+    TestPermissionsConfigParsing();
 
     if (g_failures != 0) {
         std::cerr << "permission policy test failed with " << g_failures
