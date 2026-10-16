@@ -47,6 +47,27 @@ struct ProjectPermissionInfo {
     bool trusted = false;
 };
 
+// 子 Agent 定义（GET /api/v1/agents 的 definitions 项）。
+struct SubAgentInfo {
+    std::string name;
+    std::string description;
+    std::string model;               // 空 = 继承父模型
+    std::vector<std::string> tools;  // 空 = 继承父工具集
+};
+
+// 子 Agent 运行时快照（GET /api/v1/agents）。
+struct SubAgentSnapshot {
+    bool enabled = false;
+    int max_depth = 0;
+    int max_concurrent = 0;
+    // 累计统计：运行次数 / 失败次数 / 取消次数 / 总耗时。
+    std::size_t runs = 0;
+    std::size_t failures = 0;
+    std::size_t cancelled = 0;
+    long total_ms = 0;
+    std::vector<SubAgentInfo> definitions;
+};
+
 // 会话最近一次加载的项目指令来源（只含路径/大小，不含指令正文）。
 struct InstructionSourceInfo {
     std::string path;
@@ -97,6 +118,9 @@ public:
 
     // 工具清单（GET /api/v1/tools）。
     using ToolsHandler = std::function<std::vector<ToolInfo>()>;
+
+    // 子 Agent 运行时快照（GET /api/v1/agents）。未设置时返回 enabled=false。
+    using AgentsInfoHandler = std::function<SubAgentSnapshot()>;
 
     // 权限清单（GET /api/v1/permissions）。
     using PermissionsListHandler = std::function<PermissionsSnapshot()>;
@@ -185,6 +209,9 @@ public:
 
     // 注入工具清单处理逻辑。未设置时 /tools 接口返回 501。
     void SetToolsHandler(ToolsHandler handler);
+
+    // 注入子 Agent 快照处理逻辑。未设置时 /agents 接口返回 enabled=false。
+    void SetAgentsInfoHandler(AgentsInfoHandler handler);
 
     // 注入权限相关处理逻辑。未设置时对应接口返回 501。
     void SetPermissionsListHandler(PermissionsListHandler handler);

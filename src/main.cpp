@@ -741,6 +741,30 @@ int main(int argc, char** argv) {
 
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
         web_gateway.SetHistoryCache(&history_cache);
+        // 子 Agent 快照（GET /api/v1/agents）：定义 + 累计统计；未启用时 enabled=false。
+        web_gateway.SetAgentsInfoHandler([agent_manager, agents_config]() {
+            aiagent::web::SubAgentSnapshot snapshot;
+            snapshot.enabled = agent_manager != nullptr && agent_manager->Enabled() &&
+                               agents_config.max_depth > 0;
+            snapshot.max_depth = agents_config.max_depth;
+            snapshot.max_concurrent = agents_config.max_concurrent;
+            if (agent_manager != nullptr) {
+                for (const auto& definition : agent_manager->Definitions()) {
+                    aiagent::web::SubAgentInfo info;
+                    info.name = definition.name;
+                    info.description = definition.description;
+                    info.model = definition.model;
+                    info.tools = definition.tools;
+                    snapshot.definitions.push_back(std::move(info));
+                }
+                const aiagent::agent::SubAgentStats stats = agent_manager->Stats();
+                snapshot.runs = stats.runs;
+                snapshot.failures = stats.failures;
+                snapshot.cancelled = stats.cancelled;
+                snapshot.total_ms = stats.total_ms;
+            }
+            return snapshot;
+        });
         // 手动压缩：压缩后把更短的历史作为新任务落库，并刷新缓存。
         web_gateway.SetCompactHandler(
                 [&](const std::string& session_id, const std::string& cwd,

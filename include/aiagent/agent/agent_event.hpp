@@ -13,6 +13,8 @@ enum class AgentEventKind {
     kToolEnd,          // 工具执行结束（tool_call_id / ok / text）
     kCompaction,       // 上下文压缩完成（compaction_tokens_before/after）
     kApprovalRequest,  // 工具需要人工确认（tool_call_id / tool_name / arguments / approval_reason）
+    kSubAgentStart,    // 子 Agent 开始运行（agent_id / parent_tool_call_id）
+    kSubAgentEnd,      // 子 Agent 结束（agent_id / ok / duration_ms / tool_calls / text）
 };
 
 struct AgentEvent {
@@ -41,6 +43,10 @@ struct AgentEvent {
     int compaction_tokens_before = 0;
     int compaction_tokens_after = 0;
     bool compaction_forced = false;  // overflow/length 触发的强制压缩
+
+    // kSubAgentEnd
+    int duration_ms = 0;   // 子 Agent 运行耗时
+    int tool_calls = 0;    // 子 Agent 内部的工具调用次数
 
     // kApprovalRequest
     std::string approval_reason;

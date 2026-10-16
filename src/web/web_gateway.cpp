@@ -126,13 +126,25 @@ std::string SessionTitleFromHistory(const std::vector<a2a::models::Message>& his
 
 // 将 AgentEvent 序列化为 SSE 帧（event + data）。arguments 原始 JSON 若能
 // 解析则作为对象嵌入，否则按字符串透传。
+// 归属：agent_id / parent_tool_call_id 非空时附加到任意帧（缺省 = 根 Agent），
+// 客户端据此把子 Agent 的输出折叠/加前缀。
 void WriteAgentEventFrame(
         const std::function<void(const std::string&, const nlohmann::json&)>& write,
         const aiagent::agent::AgentEvent& event) {
     using aiagent::agent::AgentEventKind;
+    const auto emit_frame = [&write, &event](const std::string& name,
+                                            nlohmann::json payload) {
+        if (!event.agent_id.empty()) {
+            payload["agent_id"] = event.agent_id;
+        }
+        if (!event.parent_tool_call_id.empty()) {
+            payload["parent_tool_call_id"] = event.parent_tool_call_id;
+        }
+        write(name, payload);
+    };
     switch (event.kind) {
         case AgentEventKind::kToken:
-            write("content", {{"content", event.content}});
+            emit_frame("content", {{"content", event.content}});
             break;
         case AgentEventKind::kToolStart: {
             nlohmann::json arguments = nlohmann::json::object();
@@ -143,24 +155,24 @@ void WriteAgentEventFrame(
                     arguments = event.arguments;
                 }
             }
-            write("tool_start", {{"id", event.tool_call_id},
-                                {"name", event.tool_name},
-                                {"arguments", arguments}});
+            emit_frame("tool_start", {{"id", event.tool_call_id},
+                                      {"name", event.tool_name},
+                                      {"arguments", arguments}});
             break;
         }
         case AgentEventKind::kToolOutput:
-            write("tool_output", {{"id", event.tool_call_id},
-                                  {"content", event.content}});
+            emit_frame("tool_output", {{"id", event.tool_call_id},
+                                       {"content", event.content}});
             break;
         case AgentEventKind::kToolEnd:
-            write("tool_end", {{"id", event.tool_call_id},
-                               {"ok", event.ok},
-                               {"text", event.text}});
+            emit_frame("tool_end", {{"id", event.tool_call_id},
+                                    {"ok", event.ok},
+                                    {"text", event.text}});
             break;
         case AgentEventKind::kCompaction:
-            write("compaction", {{"tokens_before", event.compaction_tokens_before},
-                                 {"tokens_after", event.compaction_tokens_after},
-                                 {"forced", event.compaction_forced}});
+            emit_frame("compaction", {{"tokens_before", event.compaction_tokens_before},
+                                      {"tokens_after", event.compaction_tokens_after},
+                                      {"forced", event.compaction_forced}});
             break;
         case AgentEventKind::kApprovalRequest: {
             nlohmann::json arguments = nlohmann::json::object();
@@ -171,12 +183,21 @@ void WriteAgentEventFrame(
                     arguments = event.arguments;
                 }
             }
-            write("approval_request", {{"id", event.tool_call_id},
-                                      {"name", event.tool_name},
-                                      {"arguments", arguments},
-                                      {"reason", event.approval_reason}});
+            emit_frame("approval_request", {{"id", event.tool_call_id},
+                                            {"name", event.tool_name},
+                                            {"arguments", arguments},
+                                            {"reason", event.approval_reason}});
             break;
         }
+        case AgentEventKind::kSubAgentStart:
+            emit_frame("subagent_start", nlohmann::json::object());
+            break;
+        case AgentEventKind::kSubAgentEnd:
+            emit_frame("subagent_end", {{"ok", event.ok},
+                                        {"duration_ms", event.duration_ms},
+                                        {"tool_calls", event.tool_calls},
+                                        {"text", event.text}});
+            break;
     }
 }
 
@@ -258,6 +279,10 @@ public:
 
     void SetToolsHandler(WebGateway::ToolsHandler handler) {
         tools_handler_ = std::move(handler);
+    }
+
+    void SetAgentsInfoHandler(WebGateway::AgentsInfoHandler handler) {
+        agents_handler_ = std::move(handler);
     }
 
     void SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {
@@ -676,6 +701,33 @@ private:
                         for (const auto& tool : tools_handler_()) {
                             payload.push_back({{"name", tool.name},
                                                {"description", tool.description}});
+                        }
+                        response.set_content(payload.dump(), "application/json");
+                    });
+
+        // 子 Agent 运行时快照（/agents）：定义清单 + 累计统计。
+        // 未注入 handler（未启用多 Agent）时返回 enabled=false（200）。
+        server_.Get("/api/v1/agents",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        nlohmann::json payload = {{"enabled", false}};
+                        if (agents_handler_) {
+                            const SubAgentSnapshot snapshot = agents_handler_();
+                            payload = {{"enabled", snapshot.enabled},
+                                       {"max_depth", snapshot.max_depth},
+                                       {"max_concurrent", snapshot.max_concurrent},
+                                       {"stats",
+                                        {{"runs", snapshot.runs},
+                                         {"failures", snapshot.failures},
+                                         {"cancelled", snapshot.cancelled},
+                                         {"total_ms", snapshot.total_ms}}}};
+                            nlohmann::json definitions = nlohmann::json::array();
+                            for (const auto& definition : snapshot.definitions) {
+                                definitions.push_back({{"name", definition.name},
+                                                       {"description", definition.description},
+                                                       {"model", definition.model},
+                                                       {"tools", definition.tools}});
+                            }
+                            payload["definitions"] = std::move(definitions);
                         }
                         response.set_content(payload.dump(), "application/json");
                     });
@@ -1187,6 +1239,7 @@ private:
     WebGateway::DeleteHandler delete_handler_;
     WebGateway::CloneHandler clone_handler_;
     WebGateway::ToolsHandler tools_handler_;
+    WebGateway::AgentsInfoHandler agents_handler_;
     WebGateway::PermissionsListHandler permissions_list_handler_;
     WebGateway::PermissionResolveHandler permission_resolve_handler_;
     WebGateway::PermissionSetHandler permission_set_handler_;
@@ -1242,6 +1295,10 @@ void WebGateway::SetCloneHandler(WebGateway::CloneHandler handler) {
 
 void WebGateway::SetToolsHandler(WebGateway::ToolsHandler handler) {
     impl_->SetToolsHandler(std::move(handler));
+}
+
+void WebGateway::SetAgentsInfoHandler(WebGateway::AgentsInfoHandler handler) {
+    impl_->SetAgentsInfoHandler(std::move(handler));
 }
 
 void WebGateway::SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {

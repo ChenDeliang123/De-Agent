@@ -639,6 +639,8 @@ void TestEventAttribution() {
     Expect(result.ok && result.tool_calls == 1, "child tool call should be counted");
 
     bool attributed = false;
+    bool start_seen = false;
+    bool end_seen = false;
     {
         std::lock_guard<std::mutex> lock(events_mutex);
         for (const auto& event : events) {
@@ -647,9 +649,21 @@ void TestEventAttribution() {
                 event.parent_tool_call_id == "call_parent") {
                 attributed = true;
             }
+            if (event.kind == aiagent::agent::AgentEventKind::kSubAgentStart &&
+                event.agent_id == "general#1" &&
+                event.parent_tool_call_id == "call_parent") {
+                start_seen = true;
+            }
+            if (event.kind == aiagent::agent::AgentEventKind::kSubAgentEnd &&
+                event.agent_id == "general#1" && event.ok && event.tool_calls == 1 &&
+                event.duration_ms >= 0 && event.text.empty()) {
+                end_seen = true;
+            }
         }
     }
     Expect(attributed, "child events should carry agent id, prefixed tool id and parent id");
+    Expect(start_seen, "sub-agent start event should be forwarded with attribution");
+    Expect(end_seen, "sub-agent end event should carry ok, duration and tool call count");
 
     // stream_events=false：仍统计工具调用，但不向父会话转发事件。
     auto quiet_harness = std::make_shared<Harness>();

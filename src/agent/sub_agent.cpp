@@ -270,6 +270,15 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
                 emit(outbound);
             };
 
+    // 子 Agent 生命周期事件（CLI 折叠展示与耗时统计用；受 stream_events 控制）。
+    if (forward_events) {
+        AgentEvent start_event;
+        start_event.kind = AgentEventKind::kSubAgentStart;
+        start_event.agent_id = agent_id;
+        start_event.parent_tool_call_id = request.parent_tool_call_id;
+        emit(start_event);
+    }
+
     try {
         std::shared_ptr<AgentRuntime> runtime = runtime_factory_(spec);
         if (runtime == nullptr) {
@@ -303,6 +312,17 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
                                  std::chrono::steady_clock::now() - started)
                                  .count();
     result.tool_calls = tool_calls->load();
+    if (forward_events) {
+        AgentEvent end_event;
+        end_event.kind = AgentEventKind::kSubAgentEnd;
+        end_event.agent_id = agent_id;
+        end_event.parent_tool_call_id = request.parent_tool_call_id;
+        end_event.ok = result.ok;
+        end_event.duration_ms = static_cast<int>(result.duration_ms);
+        end_event.tool_calls = result.tool_calls;
+        end_event.text = result.ok ? std::string() : result.error;
+        emit(end_event);
+    }
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.runs += 1;

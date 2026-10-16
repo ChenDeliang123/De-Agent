@@ -11,9 +11,11 @@
 #include <httplib.h>
 #include <json.hpp>
 
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -64,6 +66,57 @@ a2a::models::AgentCard BuildCard() {
     a2a::models::AgentCard card("web-test-agent", "Web gateway test", "0.1.0");
     card.WithDefaultInputModes({"text/plain"}).WithDefaultOutputModes({"text/plain"});
     return card;
+}
+
+// 解析 SSE 响应体为 (event, data) 帧，便于按帧断言（不依赖 JSON 键序）。
+struct SseFrame {
+    std::string event;
+    nlohmann::json data = nlohmann::json::object();
+};
+
+std::vector<SseFrame> ParseSseFrames(const std::string& body) {
+    std::vector<SseFrame> frames;
+    std::size_t pos = 0;
+    while (pos < body.size()) {
+        const std::size_t end = body.find("\n\n", pos);
+        const std::string block =
+                body.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        pos = (end == std::string::npos) ? body.size() : end + 2;
+        SseFrame frame;
+        std::istringstream lines(block);
+        std::string line;
+        while (std::getline(lines, line)) {
+            constexpr const char* kEventPrefix = "event: ";
+            constexpr const char* kDataPrefix = "data: ";
+            if (line.rfind(kEventPrefix, 0) == 0) {
+                frame.event = line.substr(std::strlen(kEventPrefix));
+            } else if (line.rfind(kDataPrefix, 0) == 0) {
+                try {
+                    frame.data = nlohmann::json::parse(line.substr(std::strlen(kDataPrefix)));
+                } catch (const nlohmann::json::exception&) {
+                    // 非 JSON data（如 done 帧的意外内容）保持空对象。
+                }
+            }
+        }
+        if (!frame.event.empty()) {
+            frames.push_back(std::move(frame));
+        }
+    }
+    return frames;
+}
+
+const SseFrame* FindFrame(const std::vector<SseFrame>& frames, const std::string& event,
+                          const std::string& id = {}) {
+    for (const auto& frame : frames) {
+        if (frame.event != event) {
+            continue;
+        }
+        if (!id.empty() && frame.data.value("id", std::string()) != id) {
+            continue;
+        }
+        return &frame;
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -182,6 +235,125 @@ int main() {
         Expect(approval_body.find("command execution needs approval") !=
                        std::string::npos,
                "approval request should carry the reason");
+
+        // 子 Agent 归属：任何帧都带 agent_id / parent_tool_call_id，且新增
+        // subagent_start / subagent_end 帧；根 Agent 的事件不带这两个字段。
+        gateway.SetStreamEventHandler(
+                [](const std::string&, const std::string&, const std::string&,
+                   const aiagent::agent::AgentEventCallback& on_event,
+                   const aiagent::web::WebGateway::CancelCallback&) {
+                    aiagent::agent::AgentEvent root;
+                    root.kind = aiagent::agent::AgentEventKind::kToolStart;
+                    root.tool_call_id = "call_parent";
+                    root.tool_name = "task";
+                    root.arguments = R"({"prompt":"explore"})";
+                    on_event(root);
+
+                    aiagent::agent::AgentEvent start;
+                    start.kind = aiagent::agent::AgentEventKind::kSubAgentStart;
+                    start.agent_id = "explorer#1";
+                    start.parent_tool_call_id = "call_parent";
+                    on_event(start);
+
+                    aiagent::agent::AgentEvent child_tool;
+                    child_tool.kind = aiagent::agent::AgentEventKind::kToolStart;
+                    child_tool.tool_call_id = "sub1:c1";
+                    child_tool.tool_name = "grep";
+                    child_tool.arguments = R"({"pattern":"x"})";
+                    child_tool.agent_id = "explorer#1";
+                    child_tool.parent_tool_call_id = "call_parent";
+                    on_event(child_tool);
+
+                    aiagent::agent::AgentEvent end;
+                    end.kind = aiagent::agent::AgentEventKind::kSubAgentEnd;
+                    end.agent_id = "explorer#1";
+                    end.parent_tool_call_id = "call_parent";
+                    end.ok = true;
+                    end.duration_ms = 1234;
+                    end.tool_calls = 3;
+                    on_event(end);
+                });
+        std::string agents_body;
+        const auto agents_stream = http.PostStream(
+                base + "/api/v1/chat/stream",
+                R"({"session_id":null,"message":"delegate"})",
+                "application/json",
+                [&agents_body](std::string_view chunk) {
+                    agents_body.append(chunk.data(), chunk.size());
+                });
+        Expect(agents_stream.IsSuccess(), "sub-agent stream should succeed");
+        const std::vector<SseFrame> agent_frames = ParseSseFrames(agents_body);
+        const SseFrame* start_frame = FindFrame(agent_frames, "subagent_start");
+        const SseFrame* end_frame = FindFrame(agent_frames, "subagent_end");
+        const SseFrame* child_tool_frame = FindFrame(agent_frames, "tool_start", "sub1:c1");
+        const SseFrame* root_tool_frame = FindFrame(agent_frames, "tool_start", "call_parent");
+        Expect(start_frame != nullptr, "stream should emit subagent_start");
+        Expect(end_frame != nullptr, "stream should emit subagent_end");
+        Expect(child_tool_frame != nullptr, "stream should forward the child tool_start");
+        Expect(root_tool_frame != nullptr, "stream should forward the root tool_start");
+        if (start_frame != nullptr) {
+            Expect(start_frame->data.value("agent_id", std::string()) == "explorer#1" &&
+                           start_frame->data.value("parent_tool_call_id", std::string()) ==
+                                   "call_parent",
+                   "subagent_start should carry agent id and parent tool call id");
+        }
+        if (end_frame != nullptr) {
+            Expect(end_frame->data.value("ok", false) == true &&
+                           end_frame->data.value("duration_ms", 0) == 1234 &&
+                           end_frame->data.value("tool_calls", 0) == 3 &&
+                           end_frame->data.value("agent_id", std::string()) == "explorer#1",
+                   "subagent_end should carry ok, duration, tool calls and the agent id");
+        }
+        if (child_tool_frame != nullptr) {
+            Expect(child_tool_frame->data.value("name", std::string()) == "grep" &&
+                           child_tool_frame->data.value("agent_id", std::string()) ==
+                                   "explorer#1" &&
+                           child_tool_frame->data.value("parent_tool_call_id",
+                                                        std::string()) == "call_parent",
+                   "child tool frames should be attributed to the sub-agent");
+        }
+        if (root_tool_frame != nullptr) {
+            Expect(!root_tool_frame->data.contains("agent_id") &&
+                           !root_tool_frame->data.contains("parent_tool_call_id"),
+                   "root frames should not carry attribution fields");
+        }
+
+        // /agents：未注入 handler 时 enabled=false；注入后返回定义与统计。
+        const auto agents_off = http.Get(base + "/api/v1/agents");
+        Expect(agents_off.IsSuccess(), "agents endpoint should succeed when disabled");
+        Expect(nlohmann::json::parse(agents_off.body).value("enabled", true) == false,
+               "agents endpoint should report enabled=false without a handler");
+
+        gateway.SetAgentsInfoHandler([]() {
+            aiagent::web::SubAgentSnapshot snapshot;
+            snapshot.enabled = true;
+            snapshot.max_depth = 1;
+            snapshot.max_concurrent = 3;
+            snapshot.runs = 2;
+            snapshot.failures = 1;
+            snapshot.cancelled = 0;
+            snapshot.total_ms = 4200;
+            snapshot.definitions.push_back(
+                    aiagent::web::SubAgentInfo{"explorer", "read-only exploration", "",
+                                               {"read", "grep", "glob", "ls"}});
+            return snapshot;
+        });
+        const auto agents_on = http.Get(base + "/api/v1/agents");
+        Expect(agents_on.IsSuccess(), "agents endpoint should succeed when enabled");
+        const auto agents_json = nlohmann::json::parse(agents_on.body);
+        Expect(agents_json.value("enabled", false) == true,
+               "agents endpoint should report enabled=true");
+        Expect(agents_json.value("max_depth", 0) == 1 &&
+                       agents_json.value("max_concurrent", 0) == 3,
+               "agents endpoint should report the depth and concurrency limits");
+        Expect(agents_json["stats"].value("runs", 0) == 2 &&
+                       agents_json["stats"].value("failures", 0) == 1 &&
+                       agents_json["stats"].value("total_ms", 0) == 4200,
+               "agents endpoint should report the run statistics");
+        Expect(agents_json["definitions"].size() == 1 &&
+                       agents_json["definitions"][0].value("name", std::string()) ==
+                               "explorer",
+               "agents endpoint should list the definitions");
 
         std::string compact_cwd;
         gateway.SetCompactHandler(
