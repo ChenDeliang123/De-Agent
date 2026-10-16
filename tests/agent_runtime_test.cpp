@@ -29,6 +29,7 @@ void Expect(bool condition, const std::string& message) {
 class FakeModel final : public aiagent::llm::IModelClient {
 public:
     std::string last_user_content;
+    std::string last_system_content;
     int call_count = 0;
 
     aiagent::llm::ChatResult Chat(
@@ -39,6 +40,9 @@ public:
         for (const auto& message : messages) {
             if (message.role == "user") {
                 last_user_content = message.content;
+            }
+            if (message.role == "system") {
+                last_system_content = message.content;
             }
         }
 
@@ -937,6 +941,37 @@ int main() {
                "runtime should report reaching max tool rounds instead of silent stop");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime max round test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        // 派发准则：默认不注入；显式开启（main 在注册 task 工具后调用）才注入，
+        // 且必须同时带正向（何时派）与反向（何时不派）约束。
+        auto model = std::make_shared<FakeModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "guidance", "text/plain");
+
+        runtime.HandleMessage(user, {user}, "ctx-guidance-off");
+        Expect(model->last_system_content.find("Delegation:") == std::string::npos,
+               "delegation guidance must stay out of the system message by default");
+
+        runtime.SetDelegationEnabled(true);
+        runtime.HandleMessage(user, {user}, "ctx-guidance-on");
+        const std::string& system = model->last_system_content;
+        Expect(system.find("Delegation:") != std::string::npos &&
+                       system.find("`task` tool is available") != std::string::npos,
+               "enabling delegation should inject the guideline");
+        Expect(system.find("Do NOT delegate single-file reads") != std::string::npos,
+               "guideline should include the negative constraint");
+        Expect(system.find("tasks[]") != std::string::npos,
+               "guideline should mention batch fan-out");
+        Expect(system.find("type `explorer`") != std::string::npos,
+               "guideline should steer read-only investigation to the explorer type");
+        Expect(system.find("self-contained brief") != std::string::npos,
+               "guideline should require a scoped subtask brief");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime delegation guidance test failed: " << e.what() << '\n';
         return 1;
     }
 

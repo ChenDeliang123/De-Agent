@@ -207,6 +207,10 @@ void AgentRuntime::SetApprovalHandler(ApprovalHandler handler) {
     approval_handler_ = std::move(handler);
 }
 
+void AgentRuntime::SetDelegationEnabled(bool enabled) {
+    delegation_enabled_ = enabled;
+}
+
 bool AgentRuntime::SessionAllows(const std::string& context_id,
                                  const std::string& tool_name) const {
     std::lock_guard<std::mutex> lock(session_allow_mutex_);
@@ -353,8 +357,36 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
     if (!working_directory.empty()) {
         system.content += "\n\nCurrent working directory: " + working_directory;
     }
+    AppendDelegationGuidance(system.content);
     AppendPermissionMode(system.content, ResolvePermissionMode(working_directory));
     return system;
+}
+
+void AgentRuntime::AppendDelegationGuidance(std::string& content) const {
+    if (!delegation_enabled_) {
+        return;
+    }
+    // 派发准则：只在真的注册了 task 工具时注入（main 在装配后显式开启），
+    // 否则模型会去调一个不存在的工具。正反两面都写：漏了反向约束就会出现
+    // "小事也派发"的浪费。
+    content +=
+            "\n\nDelegation:\n"
+            "- A `task` tool is available: it runs a sub-agent in its own separate "
+            "context and returns only a compressed report, so bulky intermediate work "
+            "never enters this conversation.\n"
+            "- Delegate when (a) the subtask is a broad investigation whose raw content "
+            "you do not need (summarizing many files, wide searches across directories), "
+            "or (b) two or more independent investigations can run in parallel — pass "
+            "them in one `tasks[]` call instead of exploring sequentially.\n"
+            "- For read-only investigation always pass type `explorer` (read/grep/glob/ls "
+            "only): it is faster and cheaper than the default `general`. Use `general` only "
+            "when the subtask must run commands or modify files.\n"
+            "- Write every subtask prompt as a self-contained brief: exact scope (which "
+            "paths), what to return (format and length), and when to stop. A vague prompt "
+            "makes the sub-agent wander until it hits its timeout.\n"
+            "- Do NOT delegate single-file reads, small lookups, or anything that "
+            "depends on this conversation: the sub-agent sees only the prompt you give "
+            "it and cannot ask you questions.";
 }
 
 void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
@@ -579,6 +611,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     llm::ChatMessage system;
     system.role = "system";
     system.content = system_prompt_;
+    AppendDelegationGuidance(system.content);
     AppendPermissionMode(system.content, ResolvePermissionMode({}, /*interactive=*/false));
     chat_messages.push_back(std::move(system));
 

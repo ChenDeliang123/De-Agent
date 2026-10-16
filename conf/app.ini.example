@@ -83,9 +83,11 @@ max_depth = 1
 ; 同时运行的子 Agent 上限（含一次批量扇出）。
 max_concurrent = 3
 ; 单个子 Agent 的硬超时（秒）；task 参数 timeout_s 可逐次覆盖。
-default_timeout_s = 300
+; 实测：默认给太大时粒度过粗的子任务会漫游到接近上限（300s 批次实测 280s 返回），
+; 所以默认收紧到 120。
+default_timeout_s = 120
 ; 子 Agent 工具循环轮次上限（防跑飞）。
-max_rounds = 24
+max_rounds = 16
 ; 单条结果回传父上下文的上限（字符，头尾保留式截断）。
 result_max_chars = 8000
 ; 子 Agent 的事件是否实时进入父会话流（false = 只回传最终结果，更安静）。

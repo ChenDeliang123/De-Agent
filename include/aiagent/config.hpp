@@ -93,8 +93,10 @@ struct AgentsConfig {
     bool enabled = true;
     int max_depth = 1;        // 0=禁用派生；1=子 Agent 不可再派生
     int max_concurrent = 3;   // 同时运行的子 Agent 上限
-    long default_timeout_s = 300;
-    int max_rounds = 24;      // 子 Agent 工具循环轮次上限
+    // 子 Agent 硬超时。实测（2026-10-16）：默认给太大时，任务粒度过粗的子 Agent
+    // 会一路漫游到接近超时上限（300s 的批次实测 280s 才返回），所以默认收紧到 120s。
+    long default_timeout_s = 120;
+    int max_rounds = 16;      // 子 Agent 工具循环轮次上限（防跑飞）
     std::size_t result_max_chars = 8000;  // 单条结果回传父上下文的上限
     bool stream_events = true;            // 子 Agent 事件是否实时进父 SSE 流
     std::string default_model;            // 空 = 继承父模型

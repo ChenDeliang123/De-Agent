@@ -238,6 +238,8 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
     spec.tool_id_prefix = prefix;
     spec.working_directory = request.working_directory;
     spec.max_tool_rounds = settings_.max_rounds;
+    // BuildChildTools 只有在 depth+1 < max_depth 时才给子 Agent 挂 task 工具。
+    spec.delegation_enabled = depth + 1 < settings_.max_depth;
 
     result.agent_id = agent_id;
     aiagent::DefaultLogger().Log(

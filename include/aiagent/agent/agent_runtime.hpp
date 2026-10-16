@@ -88,6 +88,11 @@ public:
     // 可选：注入审批回调。未注入时“需要确认”的工具直接拒绝。
     void SetApprovalHandler(ApprovalHandler handler);
 
+    // 可选：声明「本运行时可派发子 Agent」（main 在注册 task 工具后调用）。
+    // 开启后系统消息会附带派发准则（何时该派、何时不该派）；默认关闭，
+    // 避免在子 Agent 未启用时误导模型去调不存在的工具。
+    void SetDelegationEnabled(bool enabled);
+
     // 可选：注入项目指令加载器（AGENTS.md）与无 cwd 请求的默认工作目录。
     void SetProjectInstructionsLoader(
             std::shared_ptr<ProjectInstructionsLoader> loader);
@@ -145,6 +150,10 @@ private:
     // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录 + 权限模式。
     llm::ChatMessage BuildSystemMessage(
             const std::string& working_directory) const;
+
+    // 追加派发准则（仅在 SetDelegationEnabled(true) 时生效）。流式与非流式
+    // 两条系统消息构造路径共用，避免只有一条路径能派发。
+    void AppendDelegationGuidance(std::string& content) const;
 
     // 解析某工作目录当前生效的权限档位（含 max_mode/allow_full_access 夹取）。
     // interactive=false（A2A / 同步接口）时还会按 non_interactive_max_mode 夹取。
@@ -215,6 +224,8 @@ private:
     ProjectConfigProvider project_config_provider_;
     std::shared_ptr<permissions::TrustStore> trust_store_;
     ApprovalHandler approval_handler_;
+    // 是否在系统消息里注入派发准则（见 SetDelegationEnabled）。
+    bool delegation_enabled_ = false;
     mutable std::mutex session_allow_mutex_;
     // context_id -> 本会话「总是允许」的工具名集合（仅内存，不持久化）。
     std::map<std::string, std::set<std::string>> session_allow_;

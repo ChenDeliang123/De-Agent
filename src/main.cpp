@@ -697,6 +697,7 @@ int main(int argc, char** argv) {
                                 spec.system_prompt);
                         child_runtime->SetToolProvider(spec.tools);
                         child_runtime->SetMaxToolRounds(spec.max_tool_rounds);
+                        child_runtime->SetDelegationEnabled(spec.delegation_enabled);
                         child_runtime->SetFallbackWorkingDirectory(fallback_working_directory);
                         child_runtime->SetCompactionSettings(compaction_settings);
                         // 权限与父会话同源：同一存储、同一设置、同一工作目录 ⇒ 同一档位
@@ -738,6 +739,8 @@ int main(int argc, char** argv) {
                            ", concurrent=" + std::to_string(agents_config.max_concurrent) + ")";
             if (agents_config.max_depth > 0 && agent_manager->Enabled()) {
                 tools->Add(aiagent::tools::MakeSubAgentToolProvider(agent_manager, 0));
+                // 只有 task 工具真的注册成功，才在系统消息里注入派发准则。
+                runtime.SetDelegationEnabled(true);
             } else if (agents_config.max_depth <= 0) {
                 agents_info += " [task tool disabled: max_depth=0]";
             }
