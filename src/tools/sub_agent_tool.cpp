@@ -17,7 +17,9 @@ std::string FormatSeconds(long long milliseconds) {
 }
 
 // 从单个任务对象解析出请求；type 的合法性由调用方统一预检。
-bool ParseTaskItem(const nlohmann::json& item, const std::string& location,
+// from_batch=true 表示对象是 tasks[] 的一项：逐条 background 会被明确拒绝
+// （只有顶层 background 生效，避免"哪些任务在后台"变得难以解释）。
+bool ParseTaskItem(const nlohmann::json& item, const std::string& location, bool from_batch,
                    agent::SubAgentRequest* request, std::string* error) {
     if (!item.is_object()) {
         *error = location + " must be an object";
@@ -30,6 +32,10 @@ bool ParseTaskItem(const nlohmann::json& item, const std::string& location,
     }
     request->agent_type = item.value("type", std::string("general"));
     request->model = item.value("model", std::string());
+    if (from_batch && item.contains("background")) {
+        *error = location + ".background is not supported; pass background at the top level";
+        return false;
+    }
     if (item.contains("timeout_s") && item["timeout_s"].is_number_integer()) {
         request->timeout_seconds = item["timeout_s"].get<long>();
         if (request->timeout_seconds < 0) {
@@ -74,6 +80,101 @@ std::string FormatResults(const std::vector<agent::SubAgentResult>& results) {
         }
     }
     return text;
+}
+
+// 后台任务的一行状态：`bg-3 running (explorer#7, 42.1s so far)`；
+// 终态带上失败/取消原因，父据此决定是否重派。
+std::string FormatBackgroundStatus(const agent::BackgroundTaskSnapshot& task) {
+    std::string line = task.task_id + " " + agent::BackgroundStateName(task.state) + " (" +
+                       task.agent_id + ", " + FormatSeconds(task.elapsed_ms);
+    if (task.state == agent::BackgroundState::kRunning) {
+        line += " so far";
+    }
+    line += ")";
+    if (!task.result.ok && !task.result.error.empty()) {
+        line += ": " + task.result.error;
+    }
+    return line;
+}
+
+// 后台派发：逐条受理，成功回句柄，失败带上原因（不静默丢弃任何一条）。
+ToolExecutionResult DispatchBackground(
+        const std::shared_ptr<agent::SubAgentManager>& manager,
+        const std::vector<agent::SubAgentRequest>& requests, int depth) {
+    ToolExecutionResult result;
+    std::string text;
+    std::size_t started = 0;
+    for (const auto& request : requests) {
+        const agent::BackgroundStartResult dispatch = manager->RunBackground(request, depth);
+        if (!text.empty()) {
+            text += "\n";
+        }
+        if (dispatch.ok) {
+            ++started;
+            text += dispatch.task_id + " started (" + dispatch.agent_id +
+                    "); you will be notified when it finishes.";
+        } else {
+            text += "background dispatch failed: " + dispatch.error;
+        }
+    }
+    if (started > 0) {
+        result.ok = true;
+        result.text = text;
+    } else {
+        // 全部未受理：走 error 通道，让模型看到每一条的拒绝原因。
+        result.error = text;
+    }
+    return result;
+}
+
+// task_result：省略 task_id 列全部；否则取一条的状态（运行中）或报告（终态）。
+ToolExecutionResult CollectBackgroundResult(
+        const std::shared_ptr<agent::SubAgentManager>& manager,
+        const nlohmann::json& arguments) {
+    ToolExecutionResult result;
+    const std::string task_id = arguments.value("task_id", std::string());
+    if (task_id.empty()) {
+        const std::vector<agent::BackgroundTaskSnapshot> tasks = manager->BackgroundSnapshot();
+        if (tasks.empty()) {
+            result.ok = true;
+            result.text = "no background tasks";
+            return result;
+        }
+        std::string text;
+        for (const auto& task : tasks) {
+            if (!text.empty()) {
+                text += "\n";
+            }
+            text += FormatBackgroundStatus(task);
+        }
+        result.ok = true;
+        result.text = text;
+        return result;
+    }
+    const std::optional<agent::BackgroundTaskSnapshot> task = manager->PollResult(task_id);
+    if (!task.has_value()) {
+        std::string available;
+        for (const auto& candidate : manager->BackgroundSnapshot()) {
+            if (!available.empty()) {
+                available += ", ";
+            }
+            available += candidate.task_id + " (" + candidate.agent_id + ", " +
+                         agent::BackgroundStateName(candidate.state) + ")";
+        }
+        result.error = "unknown background task: " + task_id +
+                       (available.empty() ? std::string(" (no background tasks yet)")
+                                          : " (available: " + available + ")");
+        return result;
+    }
+    if (task->state == agent::BackgroundState::kRunning) {
+        result.ok = true;
+        result.text = FormatBackgroundStatus(*task);
+        return result;
+    }
+    // 终态：与前台 task 同一条标题行 + 报告正文（重复调用幂等，不消耗内容）。
+    result.ok = true;
+    result.text = FormatResults({task->result});
+    return result;
 }
 
 }  // namespace
@@ -123,22 +224,54 @@ std::vector<llm::ToolSpec> SubAgentToolProvider::ListTools() {
                                          "(max " + std::to_string(kMaxTaskBatch) + ")."},
                          {"items", {{"type", "object"},
                                     {"properties", task_item_properties},
-                                    {"required", json::array({"prompt"})}}}}}}},
+                                    {"required", json::array({"prompt"})}}}}},
+              {"background",
+               {{"type", "boolean"},
+                {"description",
+                 "Run in the background; returns a task id immediately. Use for long "
+                 "investigations while you keep working. Collect the status or report later "
+                 "with task_result. Applies to the whole call (single task or tasks[])."}}}}},
             {"required", json::array()}};
-    return {task};
+
+    llm::ToolSpec task_result;
+    task_result.name = kTaskResultToolName;
+    task_result.description =
+            "Check background subtasks started with task(background=true): returns the status "
+            "while they run, or the same title line and report the foreground task tool would "
+            "have returned once they finish. Omit task_id to list every background task that "
+            "has not been recycled yet.";
+    task_result.parameters = {
+            {"type", "object"},
+            {"properties",
+             {{"task_id", {{"type", "string"},
+                           {"description", "Task id returned by task(background=true). Omit to "
+                                           "list all."}}}}},
+            {"required", json::array()}};
+    return {task, task_result};
 }
 
 ToolExecutionResult SubAgentToolProvider::Execute(const std::string& name,
                                                   const nlohmann::json& arguments,
                                                   const ToolContext& context) {
     ToolExecutionResult result;
-    if (name != kTaskToolName) {
+    if (name != kTaskToolName && name != kTaskResultToolName) {
         result.error = "unknown tool: " + name;
         return result;
     }
     std::shared_ptr<agent::SubAgentManager> manager = manager_.lock();
     if (manager == nullptr || !manager->Enabled()) {
         result.error = "sub-agents are not available";
+        return result;
+    }
+    if (name == kTaskResultToolName) {
+        if (arguments.contains("task_id") && !arguments["task_id"].is_string()) {
+            result.error = "task_result.task_id must be a string";
+            return result;
+        }
+        return CollectBackgroundResult(manager, arguments);
+    }
+    if (arguments.contains("background") && !arguments["background"].is_boolean()) {
+        result.error = "task.background must be a boolean";
         return result;
     }
 
@@ -163,7 +296,7 @@ ToolExecutionResult SubAgentToolProvider::Execute(const std::string& name,
         for (std::size_t i = 0; i < items.size(); ++i) {
             agent::SubAgentRequest request;
             std::string parse_error;
-            if (!ParseTaskItem(items[i], "tasks[" + std::to_string(i) + "]",
+            if (!ParseTaskItem(items[i], "tasks[" + std::to_string(i) + "]", /*from_batch=*/true,
                                &request, &parse_error)) {
                 result.error = parse_error;
                 return result;
@@ -173,7 +306,7 @@ ToolExecutionResult SubAgentToolProvider::Execute(const std::string& name,
     } else if (has_prompt) {
         agent::SubAgentRequest request;
         std::string parse_error;
-        if (!ParseTaskItem(arguments, "task", &request, &parse_error)) {
+        if (!ParseTaskItem(arguments, "task", /*from_batch=*/false, &request, &parse_error)) {
             result.error = parse_error;
             return result;
         }
@@ -207,6 +340,11 @@ ToolExecutionResult SubAgentToolProvider::Execute(const std::string& name,
         request.parent_tool_call_id = context.tool_call_id;
         request.emit = context.emit;
         request.should_cancel = context.should_cancel;
+    }
+
+    if (arguments.value("background", false)) {
+        // 后台：立即返回句柄（emit/should_cancel 由 Manager 丢弃，不绑回合作用域）。
+        return DispatchBackground(manager, requests, depth_);
     }
 
     const std::vector<agent::SubAgentResult> results =

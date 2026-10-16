@@ -150,10 +150,11 @@ bool SubAgentManager::Enabled() const {
 std::shared_ptr<tools::IToolProvider> SubAgentManager::BuildChildTools(
         const AgentDefinition& definition, int depth) {
     auto composite = std::make_shared<tools::CompositeToolProvider>();
-    // 白名单过滤 + 剔除 task：递归派生由深度单独控制，不允许白名单绕过。
+    // 白名单过滤 + 剔除派发类工具（task / task_result）：递归派生由深度单独控制，
+    // 不允许白名单绕过；结果查询对拿不到 task 的子 Agent 也没有意义。
     composite->Add(std::make_shared<tools::FilteredToolProvider>(
             parent_tools_, definition.tools,
-            std::vector<std::string>{tools::kTaskToolName}));
+            std::vector<std::string>{tools::kTaskToolName, tools::kTaskResultToolName}));
     if (depth + 1 < settings_.max_depth) {
         composite->Add(tools::MakeSubAgentToolProvider(weak_from_this(), depth + 1));
     }

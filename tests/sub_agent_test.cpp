@@ -101,6 +101,19 @@ void EmitText(const std::function<void(const aiagent::llm::StreamEvent&)>& on_ev
     on_event(event);
 }
 
+void EmitToolCall(const std::function<void(const aiagent::llm::StreamEvent&)>& on_event,
+                  const std::string& id, const std::string& name,
+                  const std::string& arguments) {
+    aiagent::llm::StreamEvent event;
+    aiagent::llm::ToolCall call;
+    call.id = id;
+    call.name = name;
+    call.arguments = arguments;
+    event.tool_calls.push_back(call);
+    event.finish_reason = "tool_calls";
+    on_event(event);
+}
+
 // 子 Agent 专用：返回固定报告（可带延迟）。
 class ChildModel final : public aiagent::llm::IModelClient {
 public:
@@ -320,10 +333,87 @@ private:
     std::string prompt_;
 };
 
+// 父 Agent 专用（M4b）：第一轮派后台任务并顺手做一次别的工具调用，之后轮询
+// `task_result` 直到拿到终态报告，最后回显报告。轮询之间 sleep 一小段，避免把
+// 父的工具轮次打满（后台子 Agent 要时间跑完）。
+class BackgroundParentModel final : public aiagent::llm::IModelClient {
+public:
+    explicit BackgroundParentModel(std::shared_ptr<Harness> harness, int poll_delay_ms = 25)
+        : harness_(std::move(harness)), poll_delay_ms_(poll_delay_ms) {}
+
+    aiagent::llm::ChatResult Chat(const std::vector<aiagent::llm::ChatMessage>&,
+                                  const std::vector<aiagent::llm::ToolSpec>&,
+                                  const std::optional<std::string>&) override {
+        return EmptyChatResult();
+    }
+
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>& messages,
+                    const std::vector<aiagent::llm::ToolSpec>&,
+                    const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        {
+            std::lock_guard<std::mutex> lock(harness_->mutex);
+            harness_->calls.push_back(messages);
+        }
+        bool dispatched = false;
+        bool collected = false;
+        std::string report;
+        for (const auto& message : messages) {
+            if (message.role != "tool") {
+                continue;
+            }
+            if (message.tool_call_id == "call_bg") {
+                dispatched = true;
+            }
+            if (message.tool_call_id == "call_result") {
+                collected = true;
+                report = message.content;
+            }
+        }
+        if (!dispatched) {
+            aiagent::llm::StreamEvent event;
+            aiagent::llm::ToolCall background;
+            background.id = "call_bg";
+            background.name = aiagent::tools::kTaskToolName;
+            background.arguments =
+                    nlohmann::json{{"prompt", "background investigation"},
+                                   {"type", "explorer"},
+                                   {"background", true}}
+                            .dump();
+            aiagent::llm::ToolCall other;
+            other.id = "call_noop";
+            other.name = "noop";
+            other.arguments = "{}";
+            event.tool_calls.push_back(background);
+            event.tool_calls.push_back(other);
+            event.finish_reason = "tool_calls";
+            on_event(event);
+            return;
+        }
+        const auto poll = [&on_event]() {
+            EmitToolCall(on_event, "call_result", aiagent::tools::kTaskResultToolName,
+                         nlohmann::json{{"task_id", "bg-1"}}.dump());
+        };
+        if (!collected) {
+            poll();
+            return;
+        }
+        if (report.find("running") != std::string::npos) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(poll_delay_ms_));
+            poll();
+            return;
+        }
+        EmitText(on_event, "final: " + report);
+    }
+
+private:
+    std::shared_ptr<Harness> harness_;
+    int poll_delay_ms_ = 25;
+};
+
 // ---------------------------------------------------------------------------
 // 假工具
 // ---------------------------------------------------------------------------
-
 class NoopToolProvider final : public aiagent::tools::IToolProvider {
 public:
     std::vector<aiagent::llm::ToolSpec> ListTools() override {
@@ -426,6 +516,38 @@ std::shared_ptr<aiagent::tools::IToolProvider> ParentTools() {
     auto composite = std::make_shared<aiagent::tools::CompositeToolProvider>();
     composite->Add(std::make_shared<NoopToolProvider>());
     return composite;
+}
+
+// 轮询等待后台任务进入终态；超时返回 nullopt。
+std::optional<aiagent::agent::BackgroundTaskSnapshot> WaitForBackgroundTerminal(
+        const std::shared_ptr<aiagent::agent::SubAgentManager>& manager, const std::string& id,
+        int timeout_ms = 5000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto snapshot = manager->PollResult(id);
+        if (snapshot.has_value() &&
+            snapshot->state != aiagent::agent::BackgroundState::kRunning) {
+            return snapshot;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return std::nullopt;
+}
+
+aiagent::agent::SubAgentRequest BackgroundRequest(std::string prompt, std::string type = "general") {
+    aiagent::agent::SubAgentRequest request;
+    request.agent_type = std::move(type);
+    request.prompt = std::move(prompt);
+    request.parent_session_id = "sess-bg";
+    return request;
+}
+
+// 等到子模型被调用 count 次（后台 worker 真正进入运行循环），最多 2s。
+void WaitForStreams(const std::shared_ptr<Harness>& harness, int count) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (harness->streams.load() < count && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -591,8 +713,9 @@ void TestDepthControl() {
     {
         std::lock_guard<std::mutex> lock(captured->mutex);
         const auto& names = captured->child_tool_names.back();
-        Expect(std::find(names.begin(), names.end(), "task") == names.end(),
-               "child at depth 1 must not have the task tool");
+        Expect(std::find(names.begin(), names.end(), "task") == names.end() &&
+                       std::find(names.begin(), names.end(), "task_result") == names.end(),
+               "child at depth 1 must not have the task/task_result tools");
     }
     {
         std::lock_guard<std::mutex> lock(captured->mutex);
@@ -608,8 +731,9 @@ void TestDepthControl() {
     {
         std::lock_guard<std::mutex> lock(captured->mutex);
         const auto& names = captured->child_tool_names.back();
-        Expect(std::find(names.begin(), names.end(), "task") != names.end(),
-               "child at depth 1 should get a nested task tool when max_depth=2");
+        Expect(std::find(names.begin(), names.end(), "task") != names.end() &&
+                       std::find(names.begin(), names.end(), "task_result") != names.end(),
+               "child at depth 1 should get nested task/task_result tools when max_depth=2");
         Expect(captured->specs.back().delegation_enabled,
                "child that can delegate should also get the delegation guideline flag");
     }
@@ -887,7 +1011,13 @@ void TestTaskToolBatchAndErrors() {
     aiagent::tools::SubAgentToolProvider tool(manager, 0);
 
     const auto specs = tool.ListTools();
-    Expect(specs.size() == 1 && specs[0].name == "task", "task tool should expose one spec");
+    Expect(specs.size() == 2 && specs[0].name == "task" && specs[1].name == "task_result",
+           "provider should expose task and task_result specs");
+    Expect(specs[0].parameters["properties"].contains("background") &&
+                   specs[0].parameters["properties"]["background"]["type"] == "boolean",
+           "task should expose the optional background parameter");
+    Expect(specs[1].parameters["properties"].contains("task_id"),
+           "task_result should accept an optional task_id");
 
     aiagent::tools::ToolContext context;
     context.session_id = "sess-batch";
@@ -942,41 +1072,305 @@ void TestTaskToolBatchAndErrors() {
 }
 
 // ---------------------------------------------------------------------------
-// 后台任务（M4a）
+// task(background=true) / task_result 工具（M4b）
 // ---------------------------------------------------------------------------
 
-// 轮询等待后台任务进入终态；超时返回 nullopt。
-std::optional<aiagent::agent::BackgroundTaskSnapshot> WaitForBackgroundTerminal(
-        const std::shared_ptr<aiagent::agent::SubAgentManager>& manager, const std::string& id,
-        int timeout_ms = 5000) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto snapshot = manager->PollResult(id);
-        if (snapshot.has_value() &&
-            snapshot->state != aiagent::agent::BackgroundState::kRunning) {
-            return snapshot;
+void TestTaskToolBackgroundDispatch() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(), Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<ChildModel>(harness, "BG-REPORT", 250);
+                        }),
+            ParentTools());
+    aiagent::tools::SubAgentToolProvider tool(manager, 0);
+
+    aiagent::tools::ToolContext context;
+    context.session_id = "sess-bg-tool";
+    context.tool_call_id = "call_bg";
+    context.working_directory = "/tmp";
+    context.emit = [](const aiagent::agent::AgentEvent&) {};
+
+    // 派发：立即返回句柄（不阻塞工具线程）。
+    const auto started = std::chrono::steady_clock::now();
+    const auto dispatch = tool.Execute(
+            aiagent::tools::kTaskToolName,
+            nlohmann::json{{"prompt", "long investigation"}, {"type", "explorer"},
+                           {"background", true}},
+            context);
+    const long dispatch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+    Expect(dispatch.ok, "background dispatch should succeed, got: " + dispatch.error);
+    Expect(dispatch.text ==
+                   "bg-1 started (explorer#1); you will be notified when it finishes.",
+           "dispatch should return the handle line, got: " + dispatch.text);
+    Expect(dispatch_ms < 100,
+           "task(background=true) must return immediately, took " +
+                   std::to_string(dispatch_ms) + "ms");
+
+    // 归属透传：记录里带工具会话（结果归属/会话级取消用）与提示词摘要。
+    const auto snapshot = manager->PollResult("bg-1");
+    Expect(snapshot.has_value() && snapshot->session_id == "sess-bg-tool" &&
+                   snapshot->prompt_excerpt.find("long investigation") != std::string::npos,
+           "background task should carry the tool session and prompt excerpt");
+
+    // 运行中查询：状态行带 agent id 与已耗时。
+    const auto running = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                      nlohmann::json{{"task_id", "bg-1"}}, context);
+    Expect(running.ok && running.text.find("bg-1 running (explorer#1,") != std::string::npos &&
+                   running.text.find("so far") != std::string::npos,
+           "running task should report elapsed time, got: " + running.text);
+
+    // 完成后取：与前台 task 同一条标题行 + 报告正文。
+    Expect(WaitForBackgroundTerminal(manager, "bg-1").has_value(),
+           "background task should converge");
+    const auto done = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                   nlohmann::json{{"task_id", "bg-1"}}, context);
+    Expect(done.ok && done.text.find("[explorer#1] done in") != std::string::npos &&
+                   done.text.find("BG-REPORT") != std::string::npos,
+           "finished task should return the foreground-style line and report, got: " +
+                   done.text);
+    const auto again = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                    nlohmann::json{{"task_id", "bg-1"}}, context);
+    Expect(again.ok && again.text == done.text,
+           "fetching the same result twice should be idempotent");
+
+    // 省略 task_id：列出全部（含终态）。
+    const auto listing =
+            tool.Execute(aiagent::tools::kTaskResultToolName, nlohmann::json::object(), context);
+    Expect(listing.ok && listing.text.find("bg-1 done (explorer#1,") != std::string::npos,
+           "listing should include every task with its state, got: " + listing.text);
+
+    // 批量后台：每条一行句柄，编号与输入顺序一致。
+    const auto batch = tool.Execute(
+            aiagent::tools::kTaskToolName,
+            nlohmann::json{{"tasks", nlohmann::json::array({{{"prompt", "batch a"}},
+                                                           {{"prompt", "batch b"}}})},
+                           {"background", true}},
+            context);
+    Expect(batch.ok && batch.text.find("bg-2 started (general#2)") != std::string::npos &&
+                   batch.text.find("bg-3 started (general#3)") != std::string::npos,
+           "batch background dispatch should return one handle per task, got: " + batch.text);
+    for (const char* id : {"bg-2", "bg-3"}) {
+        Expect(WaitForBackgroundTerminal(manager, id).has_value(),
+               "batched background task should converge");
+    }
+}
+
+void TestTaskToolBackgroundErrors() {
+    aiagent::tools::ToolContext context;
+    context.session_id = "sess-bg-errors";
+
+    // 后台被关闭（max_background=0）：管理器原因原样透出。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/5,
+                         /*max_rounds=*/6, /*result_max_chars=*/8000, /*stream_events=*/true,
+                         /*max_background=*/0),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<ChildModel>(harness, "REPORT");
+                            }),
+                ParentTools());
+        aiagent::tools::SubAgentToolProvider tool(manager, 0);
+        const auto dispatch = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"prompt", "x"}, {"background", true}}, context);
+        Expect(!dispatch.ok && dispatch.error.find("disabled") != std::string::npos,
+               "background disabled should surface as a tool error, got: " + dispatch.error);
+
+        // 未知 id：列出可用 id（此刻一个都没有）。
+        const auto missing = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                          nlohmann::json{{"task_id", "bg-999"}}, context);
+        Expect(!missing.ok && missing.error.find("bg-999") != std::string::npos &&
+                       missing.error.find("no background tasks yet") != std::string::npos,
+               "unknown id should list what is available, got: " + missing.error);
+        const auto empty = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                        nlohmann::json::object(), context);
+        Expect(empty.ok && empty.text == "no background tasks",
+               "empty listing should say so, got: " + empty.text);
+    }
+
+    // 超 max_background：拒绝并提示改用前台；批量里逐条汇报受理结果。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/30,
+                         /*max_rounds=*/6, /*result_max_chars=*/8000, /*stream_events=*/true,
+                         /*max_background=*/1),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<ChildModel>(harness, "REPORT", 300);
+                            }),
+                ParentTools());
+        aiagent::tools::SubAgentToolProvider tool(manager, 0);
+        const auto first = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"prompt", "hold the slot"}, {"background", true}}, context);
+        Expect(first.ok, "first background dispatch should be admitted");
+        const auto second = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"prompt", "one too many"}, {"background", true}}, context);
+        Expect(!second.ok && second.error.find("max_background") != std::string::npos &&
+                       second.error.find("foreground") != std::string::npos,
+               "over-limit dispatch should explain the cap and suggest the foreground, got: " +
+                       second.error);
+        const auto batch = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"tasks", nlohmann::json::array({{{"prompt", "a"}},
+                                                               {{"prompt", "b"}}})},
+                               {"background", true}},
+                context);
+        Expect(!batch.ok &&
+                       batch.error.find("background dispatch failed") != std::string::npos,
+               "rejected batch should report every item, got: " + batch.error);
+        manager->ShutdownBackground(std::chrono::milliseconds(3000));
+    }
+
+    // 参数错误：background 非布尔 / 逐条给 background / task_id 非字符串。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(), Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<ChildModel>(harness, "REPORT");
+                            }),
+                ParentTools());
+        aiagent::tools::SubAgentToolProvider tool(manager, 0);
+        const auto bad_flag = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"prompt", "x"}, {"background", "yes"}}, context);
+        Expect(!bad_flag.ok && bad_flag.error.find("boolean") != std::string::npos,
+               "non-boolean background should be rejected, got: " + bad_flag.error);
+        const auto nested = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"tasks", nlohmann::json::array({{{"prompt", "x"},
+                                                                {"background", true}}})}},
+                context);
+        Expect(!nested.ok && nested.error.find("top level") != std::string::npos,
+               "per-item background should be rejected with guidance, got: " + nested.error);
+        const auto bad_id = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                         nlohmann::json{{"task_id", 7}}, context);
+        Expect(!bad_id.ok && bad_id.error.find("string") != std::string::npos,
+               "non-string task_id should be rejected, got: " + bad_id.error);
+    }
+
+    // 取消的任务也能被取到：终态原因可见（父可据此决定重派）。
+    {
+        auto harness = std::make_shared<Harness>();
+        auto captured = std::make_shared<CapturedSpecs>();
+        auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/30,
+                         /*max_rounds=*/200),
+                Definitions(),
+                MakeFactory(captured,
+                            [harness](const auto&)
+                                    -> std::shared_ptr<aiagent::llm::IModelClient> {
+                                return std::make_shared<LoopingChildModel>(harness, 40);
+                            }),
+                ParentTools());
+        aiagent::tools::SubAgentToolProvider tool(manager, 0);
+        const auto dispatch = tool.Execute(
+                aiagent::tools::kTaskToolName,
+                nlohmann::json{{"prompt", "loop"}, {"background", true}}, context);
+        Expect(dispatch.ok, "looping background dispatch should be admitted");
+        WaitForStreams(harness, 1);
+        manager->Stop("bg-1");
+        Expect(WaitForBackgroundTerminal(manager, "bg-1").has_value(),
+               "stopped background task should converge");
+        const auto cancelled = tool.Execute(aiagent::tools::kTaskResultToolName,
+                                            nlohmann::json{{"task_id", "bg-1"}}, context);
+        Expect(cancelled.ok && cancelled.text.find("[general#1] cancelled") != std::string::npos,
+               "cancelled task should be fetchable with its terminal state, got: " +
+                       cancelled.text);
+        const auto listing =
+                tool.Execute(aiagent::tools::kTaskResultToolName, nlohmann::json::object(), context);
+        Expect(listing.ok && listing.text.find("bg-1 cancelled (general#1") != std::string::npos &&
+                       listing.text.find("stopped") != std::string::npos,
+               "listing should carry the stop reason, got: " + listing.text);
+    }
+}
+
+// 端到端（真实 runtime + 假模型）：父在同一个回合里"派后台 + 继续做别的工具调用"，
+// 之后轮次用 task_result 收报告（覆盖 §5.2 的前半段；历史注入归 M4c）。
+void TestTaskToolBackgroundEndToEnd() {
+    auto parent_harness = std::make_shared<Harness>();
+    auto child_harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+
+    auto parent_tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
+    parent_tools->Add(std::make_shared<NoopToolProvider>());
+
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(), Definitions(),
+            MakeFactory(captured,
+                        [child_harness](const auto&)
+                                -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<ChildModel>(child_harness, "BG-REPORT", 60);
+                        }),
+            parent_tools);
+    parent_tools->Add(aiagent::tools::MakeSubAgentToolProvider(manager, 0));
+
+    aiagent::agent::AgentRuntime runtime(
+            std::make_shared<BackgroundParentModel>(parent_harness), "PARENT PROMPT");
+    runtime.SetToolProvider(parent_tools);
+    runtime.SetMaxToolRounds(30);
+    runtime.SetFallbackWorkingDirectory("/tmp");
+    aiagent::agent::CompactionSettings compaction;
+    compaction.enabled = false;
+    runtime.SetCompactionSettings(compaction);
+
+    const std::string reply = runtime.HandleMessageStreamingEvents(
+            a2a::models::MakeTextMessage(a2a::models::Role::kUser, "start a long investigation"),
+            {}, "sess-bg-e2e", {}, "/tmp", {});
+
+    Expect(reply.find("final: ") != std::string::npos &&
+                   reply.find("BG-REPORT") != std::string::npos,
+           "parent should collect the background report through task_result, got: " + reply);
+    Expect(reply.find("bg-1 running") == std::string::npos,
+           "final answer should quote a finished task, got: " + reply);
+
+    // 第一轮的工具结果：先拿到句柄，同一回合继续做了别的工具调用（未被阻塞）。
+    const auto parent_calls = parent_harness->Calls();
+    Expect(parent_calls.size() >= 3,
+           "parent should keep polling after dispatch, rounds=" +
+                   std::to_string(parent_calls.size()));
+    if (parent_calls.size() >= 2) {
+        bool handle_line = false;
+        bool other_tool = false;
+        for (const auto& message : parent_calls[1]) {
+            if (message.tool_call_id == "call_bg" &&
+                message.content.find("bg-1 started (explorer#1)") != std::string::npos) {
+                handle_line = true;
+            }
+            if (message.tool_call_id == "call_noop" &&
+                message.content.find("noop-result") != std::string::npos) {
+                other_tool = true;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        Expect(handle_line, "parent should receive the handle line instead of a report");
+        Expect(other_tool, "parent should continue with other tool calls while the child runs");
     }
-    return std::nullopt;
+    Expect(WaitForBackgroundTerminal(manager, "bg-1").has_value(),
+           "background child should converge");
 }
 
-aiagent::agent::SubAgentRequest BackgroundRequest(std::string prompt, std::string type = "general") {
-    aiagent::agent::SubAgentRequest request;
-    request.agent_type = std::move(type);
-    request.prompt = std::move(prompt);
-    request.parent_session_id = "sess-bg";
-    return request;
-}
-
-// 等到子模型被调用 count 次（后台 worker 真正进入运行循环），最多 2s。
-void WaitForStreams(const std::shared_ptr<Harness>& harness, int count) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (harness->streams.load() < count && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-}
-
+// ---------------------------------------------------------------------------
+// 后台任务（M4a）
+// ---------------------------------------------------------------------------
 void TestBackgroundDispatchAndPoll() {
     auto harness = std::make_shared<Harness>();
     auto captured = std::make_shared<CapturedSpecs>();
@@ -1404,6 +1798,9 @@ int main() {
     TestEventAttribution();
     TestTaskToolEndToEnd();
     TestTaskToolBatchAndErrors();
+    TestTaskToolBackgroundDispatch();
+    TestTaskToolBackgroundErrors();
+    TestTaskToolBackgroundEndToEnd();
     TestBackgroundDispatchAndPoll();
     TestBackgroundTerminalStates();
     TestBackgroundStop();
