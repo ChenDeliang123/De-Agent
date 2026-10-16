@@ -130,7 +130,7 @@ export function renderStartupLogo(
           t.dim(text.slice(brand.length))
         );
       }
-      return t.bold(t.dim(text));
+      return t.dim(text);
     });
   });
   bodyRows.forEach((row) => pushLine(row, (text) => t.dim(text)));
