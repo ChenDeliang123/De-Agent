@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "aiagent/agent/agent_event.hpp"
+#include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/config.hpp"
 #include "aiagent/tools/tool_provider.hpp"
@@ -106,13 +107,20 @@ struct BackgroundStartResult {
 // Stop() 的结果：已置取消 / 未知 id / 已结束（终态不可再取消）。
 enum class BackgroundStopOutcome { kRequested, kNotFound, kFinished };
 
-// 后台任务生命周期通知：派发成功（父/CLI 立刻可见）与收敛（结果送达的触发点）。
-enum class BackgroundNotificationKind { kStarted, kFinished };
+// Steer() 的结果：已受理 / 未知 id / 已结束（含运行已收尾）/ 收件箱满 / 内容不合法
+// （空文本或超单条上限）。命名与 BackgroundStopOutcome 保持一致。
+enum class BackgroundSteerOutcome { kAccepted, kNotFound, kFinished, kFull, kTooLarge };
+
+// 后台任务生命周期通知：派发成功（父/CLI 立刻可见）、收敛（结果送达的触发点）、
+// 纠偏消息已投递到子 Agent 的上下文（M5b，见 docs/子Agent纠偏Steer规划.md §3.4）。
+enum class BackgroundNotificationKind { kStarted, kFinished, kSteered };
 
 struct BackgroundNotification {
     BackgroundNotificationKind kind = BackgroundNotificationKind::kStarted;
-    // kStarted：state=running、result 为空；kFinished：终态 + 结果。
+    // kStarted：state=running、result 为空；kFinished：终态 + 结果；kSteered：state=running。
     BackgroundTaskSnapshot task;
+    // kSteered 才有值：本次真正投递给子 Agent 的纠偏文本。
+    std::string text;
 };
 
 // 通知回调：在后台 worker 线程上同步调用，实现方自己保证线程安全；
@@ -184,6 +192,13 @@ public:
     // 同一条通道）。message 非空时写入人类可读结果。
     BackgroundStopOutcome Stop(const std::string& id, std::string* message = nullptr);
 
+    // 向运行中的后台任务投递一句纠偏（M5b）：进它的收件箱，子 Agent 在下一个回合
+    // 边界读到（见 docs/子Agent纠偏Steer规划.md）。id 为 bg-N 或 agent_id；
+    // 只对后台任务生效（前台子 Agent 没有对外句柄，与父回合同生命周期）。
+    // message 非空时写入人类可读结果（与 Stop 一致，接口层直接回给调用方）。
+    BackgroundSteerOutcome Steer(const std::string& id, const std::string& text,
+                                 std::string* message = nullptr);
+
     // 运行中的后台任务快照，按派发顺序（含正在等 max_concurrent 槽位的任务）。
     std::vector<BackgroundTaskSnapshot> RunningSnapshot() const;
 
@@ -250,9 +265,12 @@ private:
                                 const SubAgentRequest& request);
 
     // 校验通过后的实际运行；身份由调用方给定（前台 = Run，后台 = RunBackground）。
+    // inbox 非空 = 本次运行可被纠偏（后台任务）：投递给子 runtime，投递成功时发
+    // kSteered 通知（帧由装配方推给该会话的活跃流）。
     SubAgentResult RunWithIdentity(const SubAgentRequest& request, int depth,
                                    const AgentDefinition& definition,
-                                   const RunIdentity& identity);
+                                   const RunIdentity& identity,
+                                   std::shared_ptr<MessageInbox> inbox = nullptr);
 
     // 结果表（background_mutex_ 保护）。
     const BackgroundTask* FindBackgroundLocked(const std::string& id) const;

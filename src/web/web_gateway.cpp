@@ -299,6 +299,10 @@ public:
         background_ack_handler_ = std::move(handler);
     }
 
+    void SetBackgroundSteerHandler(WebGateway::BackgroundSteerHandler handler) {
+        background_steer_handler_ = std::move(handler);
+    }
+
     void SetPermissionsListHandler(WebGateway::PermissionsListHandler handler) {
         permissions_list_handler_ = std::move(handler);
     }
@@ -797,6 +801,53 @@ private:
                                                 {"message", message}}
                                          .dump(),
                                  "application/json");
+                     });
+
+        // 纠偏：POST /api/v1/agents/:id/steer + {"message":"...","session_id":"可选"}。
+        server_.Post("/api/v1/agents/:id/steer",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!background_steer_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"background tasks not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             const std::string text = body.value("message", std::string());
+                             const std::string session_id =
+                                     body.value("session_id", std::string());
+                             const BackgroundSteerResult result = background_steer_handler_(
+                                     request.path_params.at("id"), text, session_id);
+                             switch (result.status) {
+                                 case BackgroundSteerStatus::kAccepted:
+                                     response.set_content(
+                                             nlohmann::json{{"result", "accepted"},
+                                                            {"message", result.message}}
+                                                     .dump(),
+                                             "application/json");
+                                     return;
+                                 case BackgroundSteerStatus::kNotFound:
+                                     response.status = 404;
+                                     break;
+                                 case BackgroundSteerStatus::kFinished:
+                                 case BackgroundSteerStatus::kFull:
+                                     response.status = 409;
+                                     break;
+                                 case BackgroundSteerStatus::kTooLarge:
+                                     response.status = 400;
+                                     break;
+                             }
+                             response.set_content(
+                                     nlohmann::json{{"error", result.message}}.dump(),
+                                     "application/json");
+                         } catch (const std::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", e.what()}}.dump(),
+                                     "application/json");
+                         }
                      });
 
         // 后台结果回执：POST /api/v1/agents/ack + {"task_ids":[...]}。
@@ -1366,6 +1417,7 @@ private:
     WebGateway::AgentsInfoHandler agents_handler_;
     WebGateway::BackgroundStopHandler background_stop_handler_;
     WebGateway::BackgroundAckHandler background_ack_handler_;
+    WebGateway::BackgroundSteerHandler background_steer_handler_;
     WebGateway::PermissionsListHandler permissions_list_handler_;
     WebGateway::PermissionResolveHandler permission_resolve_handler_;
     WebGateway::PermissionSetHandler permission_set_handler_;
@@ -1433,6 +1485,10 @@ void WebGateway::SetBackgroundStopHandler(WebGateway::BackgroundStopHandler hand
 
 void WebGateway::SetBackgroundAckHandler(WebGateway::BackgroundAckHandler handler) {
     impl_->SetBackgroundAckHandler(std::move(handler));
+}
+
+void WebGateway::SetBackgroundSteerHandler(WebGateway::BackgroundSteerHandler handler) {
+    impl_->SetBackgroundSteerHandler(std::move(handler));
 }
 
 void WebGateway::PublishSessionEvent(const std::string& session_id, const std::string& event,

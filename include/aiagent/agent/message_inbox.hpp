@@ -12,6 +12,9 @@ namespace aiagent::agent {
 // docs/子Agent纠偏Steer规划.md 决策记录 ②）。
 inline constexpr const char* kSteerMarker = "[steer]";
 
+// 文本是否为空或纯空白（与 Push() 的 kTooLarge 判定同源，供上层生成错误文案）。
+bool IsSteerTextEmpty(const std::string& text);
+
 // 把一条 steer 文本包装成追加进模型上下文的消息：标记 + 一句"这不是新任务"的说明。
 // 说明的目的：抑制子 Agent 把它当成新任务重开计划（子 Agent 的 system prompt 里
 // 写的是"你被交给一个自包含的任务"，不解释会冲突）。
@@ -51,6 +54,7 @@ public:
 
     std::size_t Pending() const;
     bool Closed() const;
+    Limits LimitsSnapshot() const { return limits_; }
 
     // 投递观察（装配方用来发帧/记日志；可为空）。每条消息投递时同步回调一次。
     void SetDeliveryCallback(std::function<void(const std::string& text)> callback);

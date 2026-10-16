@@ -224,6 +224,9 @@ async function sendMessage(ctx, text) {
           }
         } else if (event === "subagent_end") {
           renderer.subagentEnd(data);
+        } else if (event === "subagent_steer") {
+          // 纠偏消息真正投递给子 Agent 时才来这一帧，可能滞后于命令回显。
+          renderer.subagentSteer(data);
         } else if (event === "compaction") {
           renderer.compaction(data);
         } else if (event === "approval_request") {

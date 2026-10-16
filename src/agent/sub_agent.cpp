@@ -259,7 +259,8 @@ SubAgentResult SubAgentManager::Run(const SubAgentRequest& request, int depth) {
 
 SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, int depth,
                                                 const AgentDefinition& definition,
-                                                const RunIdentity& identity) {
+                                                const RunIdentity& identity,
+                                                std::shared_ptr<MessageInbox> inbox) {
     const auto started = std::chrono::steady_clock::now();
     SubAgentResult result;
     result.agent_id = identity.agent_id;
@@ -370,7 +371,7 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
                 a2a::models::MakeTextMessage(a2a::models::Role::kUser, request.prompt);
         const std::string reply = runtime->HandleMessageStreamingEvents(
                 incoming, {}, identity.child_context, child_events, request.working_directory,
-                should_cancel);
+                should_cancel, std::move(inbox));
         result.ok = true;
         result.text = TruncateMiddle(reply, settings_.result_max_chars);
     } catch (const std::exception& e) {
@@ -500,6 +501,8 @@ struct SubAgentManager::BackgroundTask {
     SubAgentResult result;       // 终态填充
     std::chrono::steady_clock::time_point started;
     std::shared_ptr<std::atomic<bool>> cancel_requested;  // Stop() / Shutdown 置位
+    // 纠偏收件箱（M5b）：Steer() 入队，子 runtime 在回合边界排空；运行结束由 runtime 关闭。
+    std::shared_ptr<MessageInbox> inbox;
     std::string prompt_excerpt;
     // 结果已就绪并写入本记录：ShutdownBackground 的有界等待以它为收敛点。
     bool delivered = false;
@@ -549,6 +552,7 @@ BackgroundStartResult SubAgentManager::RunBackground(const SubAgentRequest& requ
         task->session_id = request.parent_session_id;
         task->started = std::chrono::steady_clock::now();
         task->cancel_requested = std::make_shared<std::atomic<bool>>(false);
+        task->inbox = std::make_shared<MessageInbox>();
         task->prompt_excerpt = PromptExcerpt(request.prompt, 80);
         ++background_running_;
         background_tasks_[task->task_id] = task;
@@ -557,6 +561,21 @@ BackgroundStartResult SubAgentManager::RunBackground(const SubAgentRequest& requ
         try {
             task->worker = std::thread([self, task, request, depth, definition, identity]() {
                 SubAgentResult result;
+                // 纠偏消息真正被投递（子 Agent 下一轮读到）时才发通知：帧由装配方推给
+                // 该会话的活跃流，CLI 据此显示"已纠偏"（受理只是入队，不算投递）。
+                if (task->inbox != nullptr) {
+                    task->inbox->SetDeliveryCallback([self, task](const std::string& text) {
+                        BackgroundNotification notification;
+                        notification.kind = BackgroundNotificationKind::kSteered;
+                        notification.text = text;
+                        notification.task.task_id = task->task_id;
+                        notification.task.agent_id = task->agent_id;
+                        notification.task.agent_type = task->agent_type;
+                        notification.task.session_id = task->session_id;
+                        notification.task.state = BackgroundState::kRunning;
+                        self->NotifyBackground(notification);
+                    });
+                }
                 try {
                     // 后台任务不继承回合作用域的 emit / should_cancel（回合结束后调用
                     // 即悬垂）；取消来源 = Stop() 或 Manager 关闭。
@@ -581,7 +600,7 @@ BackgroundStartResult SubAgentManager::RunBackground(const SubAgentRequest& requ
                                 return false;
                             };
                     result = self->RunWithIdentity(background_request, depth, *definition,
-                                                   identity);
+                                                   identity, task->inbox);
                     if (!result.ok) {
                         // 覆盖 RunWithIdentity 里的通用 "cancelled"，让停止/关闭原因可读。
                         if (stop_observed->load()) {
@@ -735,6 +754,68 @@ void SubAgentManager::ShutdownBackground(std::chrono::milliseconds timeout) {
                 aiagent::LogLevel::kInfo, "sub_agent",
                 "event=background_shutdown cancelled=" + std::to_string(cancelled));
     }
+}
+
+BackgroundSteerOutcome SubAgentManager::Steer(const std::string& id, const std::string& text,
+                                               std::string* message) {
+    const auto reject = [message](BackgroundSteerOutcome outcome, const std::string& text_) {
+        if (message != nullptr) {
+            *message = text_;
+        }
+        return outcome;
+    };
+
+    std::shared_ptr<MessageInbox> inbox;
+    std::string task_id;
+    std::string finished_message;
+    {
+        std::lock_guard<std::mutex> lock(background_mutex_);
+        BackgroundTask* task = FindBackgroundLocked(id);
+        if (task == nullptr) {
+            return reject(BackgroundSteerOutcome::kNotFound, "unknown background task: " + id);
+        }
+        task_id = task->task_id;
+        if (task->state != BackgroundState::kRunning) {
+            // 已收敛：收件箱已关闭，明确拒绝而不是假装受理。
+            return reject(BackgroundSteerOutcome::kFinished,
+                          task->task_id + " already finished (" +
+                                  BackgroundStateName(task->state) + ")");
+        }
+        inbox = task->inbox;
+    }
+    if (inbox == nullptr) {
+        return reject(BackgroundSteerOutcome::kNotFound, "unknown background task: " + id);
+    }
+    const MessageInbox::Limits limits = inbox->LimitsSnapshot();
+    if (IsSteerTextEmpty(text)) {
+        return reject(BackgroundSteerOutcome::kTooLarge, "steer message is required");
+    }
+    if (text.size() > limits.max_text_bytes) {
+        return reject(BackgroundSteerOutcome::kTooLarge,
+                      "steer message is too long (" +
+                              std::to_string(limits.max_text_bytes) + " bytes max)");
+    }
+    // 入队在收件箱自己的锁下完成；运行恰好在此刻收尾时会拿到 kClosed → 归到"已结束"。
+    switch (inbox->Push(text)) {
+        case MessageInbox::PushResult::kAccepted:
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "sub_agent",
+                    "event=steer_accepted task_id=" + task_id + " bytes=" +
+                            std::to_string(text.size()));
+            if (message != nullptr) {
+                *message = "steering " + task_id;
+            }
+            return BackgroundSteerOutcome::kAccepted;
+        case MessageInbox::PushResult::kFull:
+            return reject(BackgroundSteerOutcome::kFull,
+                          "background task inbox is full (" +
+                                  std::to_string(limits.max_messages) + ")");
+        case MessageInbox::PushResult::kTooLarge:
+            return reject(BackgroundSteerOutcome::kTooLarge, "steer message is required");
+        case MessageInbox::PushResult::kClosed:
+            break;
+    }
+    return reject(BackgroundSteerOutcome::kFinished, task_id + " already finished");
 }
 
 std::vector<BackgroundTaskSnapshot> SubAgentManager::PendingResults() const {

@@ -876,6 +876,48 @@ int main(int argc, char** argv) {
                     }
                     return agent_manager->AcknowledgeResults(task_ids);
                 });
+        // 纠偏（M5b）：运行中的后台任务补一句指令。session_id 给了就必须匹配，
+        // 避免跨会话误操作；状态映射见 WebGateway::BackgroundSteerStatus。
+        web_gateway.SetBackgroundSteerHandler(
+                [agent_manager](const std::string& id, const std::string& text,
+                                const std::string& session_id)
+                        -> aiagent::web::WebGateway::BackgroundSteerResult {
+                    using Status = aiagent::web::WebGateway::BackgroundSteerStatus;
+                    aiagent::web::WebGateway::BackgroundSteerResult result;
+                    if (agent_manager == nullptr) {
+                        result.status = Status::kNotFound;
+                        result.message = "sub-agents are not enabled";
+                        return result;
+                    }
+                    if (!session_id.empty()) {
+                        const auto snapshot = agent_manager->PollResult(id);
+                        if (!snapshot.has_value() || snapshot->session_id != session_id) {
+                            result.status = Status::kNotFound;
+                            result.message = "unknown background task: " + id;
+                            return result;
+                        }
+                    }
+                    std::string message;
+                    switch (agent_manager->Steer(id, text, &message)) {
+                        case aiagent::agent::BackgroundSteerOutcome::kAccepted:
+                            result.status = Status::kAccepted;
+                            break;
+                        case aiagent::agent::BackgroundSteerOutcome::kNotFound:
+                            result.status = Status::kNotFound;
+                            break;
+                        case aiagent::agent::BackgroundSteerOutcome::kFinished:
+                            result.status = Status::kFinished;
+                            break;
+                        case aiagent::agent::BackgroundSteerOutcome::kFull:
+                            result.status = Status::kFull;
+                            break;
+                        case aiagent::agent::BackgroundSteerOutcome::kTooLarge:
+                            result.status = Status::kTooLarge;
+                            break;
+                    }
+                    result.message = message;
+                    return result;
+                });
         // 手动压缩：压缩后把更短的历史作为新任务落库，并刷新缓存。
         web_gateway.SetCompactHandler(
                 [&](const std::string& session_id, const std::string& cwd,
@@ -1268,6 +1310,16 @@ int main(int argc, char** argv) {
                                     {{"agent_id", task.agent_id},
                                      {"task_id", task.task_id},
                                      {"background", true}});
+                            return;
+                        }
+                        if (notification.kind ==
+                            aiagent::agent::BackgroundNotificationKind::kSteered) {
+                            // 纠偏真正投递（子 Agent 下一轮读到）才推帧：受理只是入队。
+                            web_gateway.PublishSessionEvent(
+                                    task.session_id, "subagent_steer",
+                                    {{"task_id", task.task_id},
+                                     {"agent_id", task.agent_id},
+                                     {"text", notification.text}});
                             return;
                         }
                         web_gateway.PublishSessionEvent(

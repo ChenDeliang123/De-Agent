@@ -140,6 +140,29 @@ export async function ackAgentResults(backendUrl, taskIds) {
   return body;
 }
 
+// 给运行中的后台任务发纠偏消息（steer）；:id 同样接受 task_id 或 agent_id。
+// 200 返回 {result:"accepted", message}；409（已结束/收件箱满）、400、404 的
+// body.error 原样抛出给调用方展示。session_id 非空才带。
+export async function steerAgent(backendUrl, id, text, sessionId) {
+  const payload = { message: text };
+  if (sessionId) {
+    payload.session_id = sessionId;
+  }
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/agents/${encodeURIComponent(id)}/steer`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: encoder.encode(JSON.stringify(payload)),
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `steer failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
 export async function health(backendUrl) {
   const response = await fetch(`${normalizeBackendUrl(backendUrl)}/health`);
   if (!response.ok) {

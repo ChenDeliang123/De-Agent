@@ -784,6 +784,79 @@ int main() {
                 http.Post(base + "/api/v1/agents/ack", "{not json", "application/json");
         Expect(ack_bad.status_code == 400, "invalid ack body should be rejected");
 
+        // 后台纠偏接口：未注入 handler → 501；注入后按状态映射到 200/404/409/400。
+        const auto steer_unset = http.Post(base + "/api/v1/agents/bg-1/steer",
+                                          R"({"message":"x"})", "application/json");
+        Expect(steer_unset.status_code == 501, "steer should be 501 without a handler");
+
+        std::vector<std::string> steered_ids;
+        gateway.SetBackgroundSteerHandler(
+                [&steered_ids](const std::string& id, const std::string& text,
+                               const std::string& session_id)
+                        -> aiagent::web::WebGateway::BackgroundSteerResult {
+                    using Status = aiagent::web::WebGateway::BackgroundSteerStatus;
+                    aiagent::web::WebGateway::BackgroundSteerResult result;
+                    steered_ids.push_back(id);
+                    result.message =
+                            "steering " + id + " text=" + text + " session=" + session_id;
+                    if (id == "bg-9") {
+                        result.status = Status::kNotFound;
+                        result.message = "unknown background task: bg-9";
+                    } else if (id == "bg-2") {
+                        result.status = Status::kFinished;
+                        result.message = "bg-2 already finished (done)";
+                    } else if (id == "bg-3") {
+                        result.status = Status::kFull;
+                        result.message = "background task inbox is full (8)";
+                    } else if (id == "bg-4") {
+                        result.status = Status::kTooLarge;
+                        result.message = "steer message is too long (4096 bytes max)";
+                    } else {
+                        result.status = Status::kAccepted;
+                    }
+                    return result;
+                });
+
+        const auto steer_ok = http.Post(
+                base + "/api/v1/agents/bg-1/steer",
+                R"({"message":"只看 include/","session_id":"sess-bg"})", "application/json");
+        Expect(steer_ok.IsSuccess() &&
+                       nlohmann::json::parse(steer_ok.body).value("result", std::string()) ==
+                               "accepted",
+               "steer should accept a running task, got: " + steer_ok.body);
+        Expect(steer_ok.body.find("text=只看 include/") != std::string::npos &&
+                       steer_ok.body.find("session=sess-bg") != std::string::npos,
+               "steer should pass message and session_id through, got: " + steer_ok.body);
+        const auto steer_missing = http.Post(base + "/api/v1/agents/bg-9/steer",
+                                            R"({"message":"x"})", "application/json");
+        Expect(steer_missing.status_code == 404 &&
+                       nlohmann::json::parse(steer_missing.body)
+                                       .value("error", std::string())
+                                       .find("bg-9") != std::string::npos,
+               "unknown task should return 404, got: " + steer_missing.body);
+        const auto steer_finished = http.Post(base + "/api/v1/agents/bg-2/steer",
+                                             R"({"message":"x"})", "application/json");
+        Expect(steer_finished.status_code == 409 &&
+                       nlohmann::json::parse(steer_finished.body)
+                                       .value("error", std::string())
+                                       .find("already finished") != std::string::npos,
+               "finished task should return 409, got: " + steer_finished.body);
+        Expect(http.Post(base + "/api/v1/agents/bg-3/steer", R"({"message":"x"})",
+                        "application/json")
+                               .status_code == 409,
+               "full inbox should return 409");
+        const auto steer_large = http.Post(base + "/api/v1/agents/bg-4/steer",
+                                          R"({"message":"x"})", "application/json");
+        Expect(steer_large.status_code == 400 &&
+                       nlohmann::json::parse(steer_large.body)
+                                       .value("error", std::string())
+                                       .find("too long") != std::string::npos,
+               "oversized message should return 400, got: " + steer_large.body);
+        const auto steer_bad_body = http.Post(base + "/api/v1/agents/bg-1/steer",
+                                             "{not json", "application/json");
+        Expect(steer_bad_body.status_code == 400, "invalid steer body should be rejected");
+        Expect(steered_ids.size() == 5, "every steer call should reach the handler");
+
         // 回合外事件推送：活跃流内到达的帧按序补发；无活跃流时静默丢弃。
         gateway.SetStreamEventHandler(
                 [&gateway](const std::string& session_id, const std::string&,

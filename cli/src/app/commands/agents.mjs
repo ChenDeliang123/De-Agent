@@ -1,8 +1,8 @@
 // 子 Agent 类指令（category=info）：/agents 打印开关、上限、定义、统计与运行中的后台任务；
-// /agents stop <task_id|agent_id|all> 停止后台任务。
+// /agents stop <task_id|agent_id|all> 停止后台任务；/agents steer <id> <message> 纠偏。
 // 数据来自后端 `GET /api/v1/agents`；关闭时后端返回 {"enabled":false}。
 
-import { getAgents, stopAgent } from "../session.mjs";
+import { getAgents, steerAgent, stopAgent } from "../session.mjs";
 
 function definitionLine(definition) {
   const name = String(definition?.name ?? "?");
@@ -26,7 +26,7 @@ function formatElapsed(ms) {
   return `${minutes}m ${seconds}s`;
 }
 
-// `  bg-3 explorer#7 12.3s <prompt 摘要>`；缺字段自动省略。
+// `  bg-3 explorer#7 12.3s <prompt 摘要> (steerable)`；缺字段自动省略。
 function runningLine(item) {
   const parts = [String(item?.task_id ?? "?"), String(item?.agent_id ?? "?")];
   const elapsed = formatElapsed(item?.elapsed_ms);
@@ -37,7 +37,8 @@ function runningLine(item) {
   if (excerpt) {
     parts.push(excerpt);
   }
-  return `  ${parts.join(" ")}`;
+  // 运行中的后台任务可以用 /agents steer <id> <message> 纠偏。
+  return `  ${parts.join(" ")} (steerable)`;
 }
 
 // 停止单个后台任务：已结束按后端 message 提示，未知（404）同样按后端 message 报错。
@@ -84,15 +85,31 @@ async function stopAll(ctx) {
   }
 }
 
+// steer：给运行中的后台任务发纠偏消息。409/404/400 等都只打印一行，不抛穿。
+async function steerTask(ctx, id, text) {
+  try {
+    const body = await steerAgent(ctx.backend, id, text, ctx.state?.sessionId ?? undefined);
+    if (body?.result === "accepted") {
+      ctx.print(`steered ${id}`);
+      return true;
+    }
+    ctx.print(String(body?.message ?? `steered ${id}`));
+    return true;
+  } catch (error) {
+    ctx.print(`steer failed: ${error.message}`);
+    return false;
+  }
+}
+
 export const agentCommands = [
   {
     name: "agents",
     aliases: [],
-    description: "Show sub-agent settings, definitions, stats, and background tasks",
-    argHint: "[stop <task_id|agent_id|all>]",
+    description: "Show sub-agent settings, stats, and manage background tasks (stop/steer)",
+    argHint: "[stop <id|all> | steer <id> <message>]",
     category: "info",
     handler: async (ctx, arg) => {
-      const [sub, id] = String(arg ?? "").trim().split(/\s+/).filter(Boolean);
+      const [sub, id, ...rest] = String(arg ?? "").trim().split(/\s+/).filter(Boolean);
       if (sub === "stop") {
         if (!id) {
           ctx.print("usage: /agents stop <task_id|agent_id|all>");
@@ -103,6 +120,15 @@ export const agentCommands = [
           return;
         }
         await stopTask(ctx, id);
+        return;
+      }
+      if (sub === "steer") {
+        const text = rest.join(" ").trim();
+        if (!id || !text) {
+          ctx.print("usage: /agents steer <task_id|agent_id> <message>");
+          return;
+        }
+        await steerTask(ctx, id, text);
         return;
       }
       let info;

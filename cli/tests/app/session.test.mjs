@@ -13,6 +13,7 @@ import {
   listSessions,
   loadHistory,
   setTrust,
+  steerAgent,
   stopAgent,
   streamChat,
 } from "../../src/app/session.mjs";
@@ -399,6 +400,77 @@ test("cli session client lists, stops, and acks background agents", async () => 
     assert.equal(requests[7].url, "/api/v1/agents/ack");
     assert.deepEqual(JSON.parse(requests[7].body), { task_ids: ["bg-3", "bg-4"] });
     await assert.rejects(ackAgentResults(base, ["bg-500"]), /ack agents failed: HTTP 500/);
+  } finally {
+    await close(backend);
+  }
+});
+
+test("cli session client steers a background agent", async () => {
+  const requests = [];
+  const backend = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ method: request.method, url: request.url, body });
+      const send = (status, payload) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(payload));
+      };
+      const steerAccepted = () => send(200, { result: "accepted", message: "steering bg-3 (explorer#7)" });
+      if (request.url === "/api/v1/agents/bg-3/steer" && request.method === "POST") {
+        return steerAccepted();
+      }
+      if (request.url === "/api/v1/agents/bg-4/steer" && request.method === "POST") {
+        return steerAccepted();
+      }
+      if (request.url === "/api/v1/agents/explorer%237/steer" && request.method === "POST") {
+        return steerAccepted();
+      }
+      if (request.url === "/api/v1/agents/bg-400/steer" && request.method === "POST") {
+        return send(400, { error: "steer message is required" });
+      }
+      if (request.url === "/api/v1/agents/bg-404/steer" && request.method === "POST") {
+        return send(404, { error: "unknown background task: bg-404" });
+      }
+      if (request.url === "/api/v1/agents/bg-409/steer" && request.method === "POST") {
+        return send(409, { error: "background task inbox is full (8)" });
+      }
+      if (request.url === "/api/v1/agents/bg-500/steer" && request.method === "POST") {
+        return send(500, {});
+      }
+      return send(500, { error: `unexpected ${request.method} ${request.url}` });
+    });
+  });
+
+  const port = await listen(backend);
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    // 带 session_id：body 里包含 session_id。
+    const accepted = await steerAgent(base, "bg-3", "只看 include/ 目录", "s1");
+    assert.deepEqual(accepted, { result: "accepted", message: "steering bg-3 (explorer#7)" });
+    assert.equal(requests[0].method, "POST");
+    assert.equal(requests[0].url, "/api/v1/agents/bg-3/steer");
+    assert.deepEqual(JSON.parse(requests[0].body), {
+      message: "只看 include/ 目录",
+      session_id: "s1",
+    });
+
+    // 不带 session_id：body 里不出现该字段。
+    await steerAgent(base, "bg-4", "换个思路");
+    assert.deepEqual(JSON.parse(requests[1].body), { message: "换个思路" });
+
+    // agent_id 形态（含 `#`）转义。
+    await steerAgent(base, "explorer#7", "hi", "s1");
+    assert.equal(requests[2].url, "/api/v1/agents/explorer%237/steer");
+
+    // 400/404/409 的 body.error 原样透出；500 无 error 时退回状态码文案。
+    await assert.rejects(steerAgent(base, "bg-400", "", "s1"), /steer message is required/);
+    await assert.rejects(steerAgent(base, "bg-404", "hi"), /unknown background task: bg-404/);
+    await assert.rejects(steerAgent(base, "bg-409", "hi", "s1"), /background task inbox is full \(8\)/);
+    await assert.rejects(steerAgent(base, "bg-500", "hi"), /steer failed: HTTP 500/);
+    assert.equal(requests.length, 7);
+    assert.equal(requests[6].url, "/api/v1/agents/bg-500/steer");
   } finally {
     await close(backend);
   }

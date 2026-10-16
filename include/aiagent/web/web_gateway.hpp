@@ -160,6 +160,16 @@ public:
     using BackgroundAckHandler =
             std::function<std::size_t(const std::vector<std::string>& task_ids)>;
 
+    // 向运行中的后台任务投递纠偏（POST /api/v1/agents/:id/steer，M5b）。
+    enum class BackgroundSteerStatus { kAccepted, kNotFound, kFinished, kFull, kTooLarge };
+    struct BackgroundSteerResult {
+        BackgroundSteerStatus status = BackgroundSteerStatus::kNotFound;
+        std::string message;  // 人类可读（直接回给调用方）
+    };
+    // session_id 为空表示不做会话校验；非空时由装配方比对（不匹配按 404 处理）。
+    using BackgroundSteerHandler = std::function<BackgroundSteerResult(
+            const std::string& id, const std::string& text, const std::string& session_id)>;
+
     // 权限清单（GET /api/v1/permissions）。
     using PermissionsListHandler = std::function<PermissionsSnapshot()>;
 
@@ -253,6 +263,7 @@ public:
 
     // 注入后台任务停止/结果回执逻辑（未设置时对应接口返回 501）。
     void SetBackgroundStopHandler(BackgroundStopHandler handler);
+    void SetBackgroundSteerHandler(BackgroundSteerHandler handler);
     void SetBackgroundAckHandler(BackgroundAckHandler handler);
 
     // 向某个会话的活跃 SSE 流推送一帧（后台任务的派发/结果通知）。

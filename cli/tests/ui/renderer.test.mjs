@@ -436,3 +436,42 @@ test("renderer clips background result lines to the terminal width", () => {
   // 报告正文没超过 5 行，不出现折叠行。
   assert.ok(!rows.some(({ line }) => line.includes("(+")), "no folding for a 3-line report");
 });
+
+test("renderer prints sub-agent steering frames", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.subagentSteer({ task_id: "bg-3", agent_id: "explorer#7", text: "只看 include/ 目录" });
+  // 多行文本只取首行。
+  renderer.subagentSteer({ agent_id: "general#2", text: "第一行\n第二行" });
+  // 空文本给可读占位。
+  renderer.subagentSteer({ agent_id: "explorer#1", text: "   " });
+  const text = out.text();
+  assert.ok(text.includes("  ↳ steered explorer#7: 只看 include/ 目录"), text);
+  assert.ok(text.includes("  ↳ steered general#2: 第一行"), text);
+  assert.ok(!text.includes("第二行"), `steer frames only show the first line: ${text}`);
+  assert.ok(text.includes("  ↳ steered explorer#1: <text 缺失>"), text);
+});
+
+test("renderer clips sub-agent steering lines to the terminal width", () => {
+  for (const columns of [20, 40, 80]) {
+    for (const mode of ["none", "truecolor"]) {
+      const out = fakeOut(false);
+      out.columns = columns;
+      const renderer = new TranscriptRenderer(out, { mode });
+      renderer.subagentSteer({
+        agent_id: "explorer#7",
+        text: "很长的一段纠偏文本 ".repeat(30),
+      });
+      for (const line of out.text().split("\n")) {
+        if (line !== "") {
+          assert.ok(
+            visibleWidth(line) <= columns,
+            `line overflows ${columns} columns: ${JSON.stringify(line)}`,
+          );
+        }
+      }
+      assert.ok(out.text().includes("…"), "overlong steering lines are clipped with an ellipsis");
+    }
+  }
+});

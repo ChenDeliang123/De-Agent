@@ -119,10 +119,10 @@ test("/agents prints settings, definitions, and stats", async () => {
       ),
       `missing tokens line: ${text}`,
     );
-    // 运行中的后台任务（M4c）：`<task_id> <agent_id> <已运行时长> <prompt 摘要>`。
+    // 运行中的后台任务（M4c）：`<task_id> <agent_id> <已运行时长> <prompt 摘要> (steerable)`。
     assert.ok(printed.includes("running:"), `missing running header: ${text}`);
     assert.ok(
-      printed.includes("  bg-1 explorer#7 12.3s scan the cli"),
+      printed.includes("  bg-1 explorer#7 12.3s scan the cli (steerable)"),
       `missing running row: ${text}`,
     );
     assert.ok(printed.includes("definitions:"), `missing definitions header: ${text}`);
@@ -168,8 +168,8 @@ test("/agents is registered under info and shows up in /help", () => {
   const command = commands.find((entry) => entry.name === "agents");
   assert.ok(command, "missing /agents command");
   assert.equal(command.category, "info");
-  // stop 子命令通过参数传入，不新增顶层指令（候选顺序依赖顶层列表稳定）。
-  assert.equal(command.argHint, "[stop <task_id|agent_id|all>]");
+  // stop/steer 子命令通过参数传入，不新增顶层指令（候选顺序依赖顶层列表稳定）。
+  assert.equal(command.argHint, "[stop <id|all> | steer <id> <message>]");
   assert.ok(renderHelp().includes("/agents"), "/help should list /agents");
 });
 
@@ -294,6 +294,74 @@ test("/agents stop all handles empty and missing sessions", async () => {
       backend.requests.map((entry) => entry.url),
       ["/api/v1/agents?session_id=s1"],
     );
+  } finally {
+    await close(backend.server);
+  }
+});
+
+test("/agents steer sends a steering message to a background task", async () => {
+  const backend = await startRoutesBackend((request, response) => {
+    if (request.url === "/api/v1/agents/bg-3/steer" && request.method === "POST") {
+      return sendJson(response, 200, { result: "accepted", message: "steering bg-3 (explorer#7)" });
+    }
+    if (request.url === "/api/v1/agents/bg-4/steer" && request.method === "POST") {
+      return sendJson(response, 409, { error: "bg-4 already finished (done)" });
+    }
+    if (request.url === "/api/v1/agents/bg-9/steer" && request.method === "POST") {
+      return sendJson(response, 404, { error: "unknown background task: bg-9" });
+    }
+    if (request.url === "/api/v1/agents/explorer%237/steer" && request.method === "POST") {
+      return sendJson(response, 200, { result: "accepted", message: "steering explorer#7" });
+    }
+    return sendJson(response, 500, { error: `unexpected ${request.method} ${request.url}` });
+  });
+  try {
+    const { ctx, printed } = makeContext(backend.url, "s1");
+    // 带空格的纠偏文本按原样发送（token 重新拼接）。
+    await runCommand(ctx, "/agents steer bg-3 只看 include/ 目录");
+    assert.deepEqual(printed, ["steered bg-3"]);
+    assert.deepEqual(backend.requests[0], {
+      method: "POST",
+      url: "/api/v1/agents/bg-3/steer",
+      body: JSON.stringify({ message: "只看 include/ 目录", session_id: "s1" }),
+    });
+
+    // agent_id 形态同样接受；`#` 会转义。
+    await runCommand(ctx, "/agents steer explorer#7 换个思路");
+    assert.equal(printed.at(-1), "steered explorer#7");
+    assert.equal(backend.requests.at(-1).url, "/api/v1/agents/explorer%237/steer");
+    assert.deepEqual(JSON.parse(backend.requests.at(-1).body), {
+      message: "换个思路",
+      session_id: "s1",
+    });
+
+    // 409 已结束：只打印一行，不抛穿。
+    await runCommand(ctx, "/agents steer bg-4 停一下");
+    assert.equal(printed.at(-1), "steer failed: bg-4 already finished (done)");
+
+    // 404 未知任务同理。
+    await runCommand(ctx, "/agents steer bg-9 停一下");
+    assert.equal(printed.at(-1), "steer failed: unknown background task: bg-9");
+    assert.equal(backend.requests.length, 4);
+  } finally {
+    await close(backend.server);
+  }
+});
+
+test("/agents steer requires an id and a message", async () => {
+  const backend = await startRoutesBackend((request, response) =>
+    sendJson(response, 500, { error: `unexpected ${request.method} ${request.url}` }),
+  );
+  try {
+    const { ctx, printed } = makeContext(backend.url, "s1");
+    await runCommand(ctx, "/agents steer");
+    assert.deepEqual(printed, ["usage: /agents steer <task_id|agent_id> <message>"]);
+    await runCommand(ctx, "/agents steer bg-3");
+    assert.deepEqual(printed, [
+      "usage: /agents steer <task_id|agent_id> <message>",
+      "usage: /agents steer <task_id|agent_id> <message>",
+    ]);
+    assert.deepEqual(backend.requests, [], "usage errors must not hit the backend");
   } finally {
     await close(backend.server);
   }

@@ -167,10 +167,14 @@ public:
         return EmptyChatResult();
     }
 
-    void ChatStream(const std::vector<aiagent::llm::ChatMessage>&,
+    void ChatStream(const std::vector<aiagent::llm::ChatMessage>& messages,
                     const std::vector<aiagent::llm::ToolSpec>&,
                     const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
             override {
+        {
+            std::lock_guard<std::mutex> lock(harness_->mutex);
+            harness_->calls.push_back(messages);
+        }
         harness_->streams.fetch_add(1);
         harness_->Enter();
         if (delay_ms_ > 0) {
@@ -1445,6 +1449,139 @@ void TestBackgroundNotifyAndAck() {
            "throwing callback must not break convergence or the result table");
 }
 
+// M5b：运行中纠偏——受理、投递、通知与拒绝面。
+void TestBackgroundSteer() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/30,
+                     /*max_rounds=*/200),
+            Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            return std::make_shared<LoopingChildModel>(harness, 30);
+                        }),
+            ParentTools());
+
+    std::mutex notify_mutex;
+    std::vector<aiagent::agent::BackgroundNotification> notifications;
+    manager->SetBackgroundNotifyCallback(
+            [&notify_mutex, &notifications](
+                    const aiagent::agent::BackgroundNotification& notification) {
+                std::lock_guard<std::mutex> lock(notify_mutex);
+                notifications.push_back(notification);
+            });
+
+    const auto dispatch = manager->RunBackground(BackgroundRequest("loop for steer"), 0);
+    Expect(dispatch.ok, "dispatch should succeed");
+    WaitForStreams(harness, 1);
+
+    std::string message;
+    Expect(manager->Steer("bg-1", "只看 include/ 目录", &message) ==
+                   aiagent::agent::BackgroundSteerOutcome::kAccepted &&
+                   message == "steering bg-1",
+           "steer should be accepted with a readable message, got: " + message);
+    // 按 agent_id 也能 steer。
+    Expect(manager->Steer(dispatch.agent_id, "再补一句") ==
+                   aiagent::agent::BackgroundSteerOutcome::kAccepted,
+           "steer should also accept the agent id");
+
+    // 子 Agent 在下一个回合边界读到：harness 记录的模型入参里出现 [steer] 标记。
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    std::string steer_seen;
+    while (std::chrono::steady_clock::now() < deadline && steer_seen.empty()) {
+        for (const auto& call : harness->Calls()) {
+            for (const auto& call_message : call) {
+                if (call_message.role == "user" &&
+                    call_message.content.find(aiagent::agent::kSteerMarker) == 0) {
+                    steer_seen = call_message.content;
+                    break;
+                }
+            }
+            if (!steer_seen.empty()) {
+                break;
+            }
+        }
+        if (steer_seen.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    Expect(steer_seen.find("只看 include/ 目录") != std::string::npos &&
+                   steer_seen.find("do not restart") != std::string::npos,
+           "the child should see the wrapped steer message, got: " + steer_seen);
+
+    // 通知：派发 → 纠偏投递各一次，投递通知带原文。
+    {
+        std::lock_guard<std::mutex> lock(notify_mutex);
+        bool steered_notified = false;
+        for (const auto& notification : notifications) {
+            if (notification.kind == aiagent::agent::BackgroundNotificationKind::kSteered &&
+                notification.task.task_id == "bg-1" &&
+                notification.text == "只看 include/ 目录") {
+                steered_notified = true;
+            }
+        }
+        Expect(steered_notified, "delivery of a steer should be notified with its text");
+    }
+
+    // 拒绝面（不需要占满收件箱的那几种）。
+    Expect(manager->Steer("bg-999", "x", &message) ==
+                   aiagent::agent::BackgroundSteerOutcome::kNotFound &&
+                   message == "unknown background task: bg-999",
+           "unknown id should be rejected with the stop-style wording, got: " + message);
+    Expect(manager->Steer("bg-1", "", &message) ==
+                   aiagent::agent::BackgroundSteerOutcome::kTooLarge &&
+                   message == "steer message is required",
+           "empty text should be rejected, got: " + message);
+    Expect(manager->Steer("bg-1", std::string(5000, 'x'), &message) ==
+                   aiagent::agent::BackgroundSteerOutcome::kTooLarge &&
+                   message == "steer message is too long (4096 bytes max)",
+           "oversized text should be rejected with the cap in the message, got: " + message);
+
+    std::string stop_message;
+    manager->Stop("bg-1", &stop_message);
+    Expect(WaitForBackgroundTerminal(manager, "bg-1").has_value(), "task should converge");
+    Expect(manager->Steer("bg-1", "太晚了", &message) ==
+                   aiagent::agent::BackgroundSteerOutcome::kFinished &&
+                   message.find("already finished (cancelled)") != std::string::npos,
+           "steering a finished task should report its terminal state, got: " + message);
+}
+
+// M5b：收件箱满时的拒绝（用一个"回合边界迟迟不到"的子 Agent 构造）。
+void TestBackgroundSteerInboxFull() {
+    auto harness = std::make_shared<Harness>();
+    auto captured = std::make_shared<CapturedSpecs>();
+    auto manager = std::make_shared<aiagent::agent::SubAgentManager>(
+            Settings(/*max_depth=*/1, /*max_concurrent=*/3, /*default_timeout_s=*/30,
+                     /*max_rounds=*/5),
+            Definitions(),
+            MakeFactory(captured,
+                        [harness](const auto&) -> std::shared_ptr<aiagent::llm::IModelClient> {
+                            // 每轮阻塞 5s：投递点迟迟不到，收件箱能攒满。
+                            return std::make_shared<LoopingChildModel>(harness, 5000);
+                        }),
+            ParentTools());
+
+    const auto dispatch = manager->RunBackground(BackgroundRequest("blocked child"), 0);
+    Expect(dispatch.ok, "dispatch should succeed");
+    WaitForStreams(harness, 1);
+
+    // 收件箱上限 8 条：第 9 条被拒（不挤掉已受理的）。
+    for (int i = 0; i < 8; ++i) {
+        Expect(manager->Steer("bg-1", "steer " + std::to_string(i)) ==
+                       aiagent::agent::BackgroundSteerOutcome::kAccepted,
+               "steer below the cap should be accepted");
+    }
+    std::string message;
+    Expect(manager->Steer("bg-1", "one too many", &message) ==
+                   aiagent::agent::BackgroundSteerOutcome::kFull &&
+                   message == "background task inbox is full (8)",
+           "steer over the cap should be rejected with the limit in the message, got: " +
+                   message);
+
+    manager->ShutdownBackground(std::chrono::milliseconds(3000));
+}
+
 // ---------------------------------------------------------------------------
 // 后台任务（M4a）
 // ---------------------------------------------------------------------------
@@ -1879,6 +2016,8 @@ int main() {
     TestTaskToolBackgroundErrors();
     TestTaskToolBackgroundEndToEnd();
     TestBackgroundNotifyAndAck();
+    TestBackgroundSteer();
+    TestBackgroundSteerInboxFull();
     TestBackgroundDispatchAndPoll();
     TestBackgroundTerminalStates();
     TestBackgroundStop();

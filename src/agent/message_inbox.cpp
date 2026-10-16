@@ -9,13 +9,13 @@
 namespace aiagent::agent {
 namespace {
 
-bool IsBlank(const std::string& text) {
-    return std::all_of(text.begin(), text.end(), [](unsigned char ch) {
-        return std::isspace(ch) != 0;
-    });
-}
-
 }  // namespace
+
+bool IsSteerTextEmpty(const std::string& text) {
+    return text.empty() || std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+               return std::isspace(ch) != 0;
+           });
+}
 
 std::string FormatSteerMessage(const std::string& text) {
     std::string message = std::string(kSteerMarker) + " " + text;
@@ -29,7 +29,7 @@ std::string FormatSteerMessage(const std::string& text) {
 MessageInbox::MessageInbox(Limits limits) : limits_(limits) {}
 
 MessageInbox::PushResult MessageInbox::Push(std::string text) {
-    if (text.empty() || text.size() > limits_.max_text_bytes || IsBlank(text)) {
+    if (IsSteerTextEmpty(text) || text.size() > limits_.max_text_bytes) {
         return PushResult::kTooLarge;
     }
     std::lock_guard<std::mutex> lock(mutex_);

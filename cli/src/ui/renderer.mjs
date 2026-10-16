@@ -534,6 +534,20 @@ export class TranscriptRenderer {
     this.#writeReportSummary(data?.text);
   }
 
+  // 纠偏消息投递（subagent_steer 帧）：`  ↳ steered explorer#7: 只看 include/ 目录`。
+  // 多行文本只取首行；空文本给可读占位。
+  subagentSteer(data = {}) {
+    this.#beginOutput();
+    this.#flushMdBuffer();
+    this.#endContentBlock();
+    const agent = this.#agentName(data) || "subagent";
+    const first = String(data?.text ?? "")
+      .split("\n")[0]
+      .trim();
+    const label = first || "<text 缺失>";
+    this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} steered ${agent}: ${label}`));
+  }
+
   // 成功行：`  ↳ explorer#1 done in 3.9s · 3 tool calls · 4.4k tokens`。
   #doneLine(agent, data) {
     const t = this.#t;
