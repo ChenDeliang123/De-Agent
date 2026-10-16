@@ -54,6 +54,17 @@ int main() {
                    "prompt should cap bug-chasing with an escalation rule");
 
     // 5) 敏捷迭代（历史事故：把“实现一个小游戏”当成一次性大工程，先造设计再写代码）。
+    // 只读聚合类任务：一条 pipeline 完成，不写脚本/报告、不逐文件 read（2026-10-16 实测 190s→秒级）。
+    ExpectContains(prompt, "ONE shell pipeline",
+                   "prompt should route read-only aggregation to one shell pipeline");
+    ExpectContains(prompt, "Do NOT write helper scripts or report files",
+                   "prompt should forbid helper scripts/reports for aggregation");
+    ExpectContains(prompt, "Work in agile iterations when changing code",
+                   "iteration guidance should be scoped to code changes");
+    ExpectContains(prompt, "Work on one slice at a time when changing code",
+                   "one-slice guidance should be scoped to code changes");
+    ExpectContains(prompt, "for a code change, running it once",
+                   "verification guidance should be scoped to code changes");
     ExpectContains(prompt, "Work in agile iterations",
                    "prompt should require agile, iterative delivery");
     ExpectContains(prompt, "Favor working software over an elaborate upfront design",

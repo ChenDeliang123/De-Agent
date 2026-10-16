@@ -651,7 +651,10 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     bash.description =
             "Execute a bash command in the working directory. Returns combined stdout and "
             "stderr, truncated to the last 2000 lines or 50KB. Optionally provide a timeout "
-            "in seconds (default 60).";
+            "in seconds (default 60). For aggregation tasks (line or file counts, size or "
+            "symbol statistics, enumerating matches) prefer ONE pipeline that prints the "
+            "summary (e.g. `git ls-files | xargs wc -l`) over several small commands or a "
+            "helper script.";
     bash.parameters = {{"type", "object"},
                        {"properties",
                         {{"command", {{"type", "string"},
