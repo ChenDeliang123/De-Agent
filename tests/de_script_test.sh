@@ -73,4 +73,58 @@ if ! out="$("${DE}" purge --yes 2>&1)"; then
 fi
 [ ! -e "${DE_HOME}" ] || fail "purge did not remove data dir ${DE_HOME}"
 
+# --- 启动输出回放（TTY 下 banner 必须出现在终端，非 TTY 不污染 stdout） ------
+# 真实 backend 的输出被 nohup 重定向进 backend-console.log；de 启动成功后应把
+# 新增部分回放到终端（仅 TTY），否则用户永远看不到启动横幅。
+mkdir -p "${DE_HOME}/conf"
+printf '[deepseek]\napi_key = sk-test\nmodel = fake\n' >"${DE_HOME}/conf/conf.ini"
+if ! command -v nc >/dev/null 2>&1; then
+  echo "replay test skipped: 'nc' not found"
+else
+  FAKE_BIN="${PREFIX}/bin/aiagent_app"
+  mv "${FAKE_BIN}" "${FAKE_BIN}.real"
+  cat >"${FAKE_BIN}" <<'FAKE'
+#!/usr/bin/env bash
+# 假后端：先打印启动横幅，再在 de 传入的端口上应答 /health。
+trap 'kill "${NC_PID:-}" 2>/dev/null; exit 0' TERM INT
+PORT=18081
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backend-port) PORT="$2"; shift 2 ;;
+    --web-port) PORT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'FAKE-STARTUP-BANNER\n'
+while true; do
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{"status":"ok"}' | nc -l -p "${PORT}" >/dev/null 2>&1 &
+  NC_PID=$!
+  wait "${NC_PID}" 2>/dev/null || sleep 0.2
+done
+FAKE
+  chmod +x "${FAKE_BIN}"
+  # 用非默认端口，避免和开发机上正在运行的后端冲突。
+  REPLAY_PORT=18088
+  "${DE}" stop --backend-port "${REPLAY_PORT}" >/dev/null 2>&1 || true
+  "${DE}" restart --backend-port "${REPLAY_PORT}" >/tmp/de-replay-out.txt 2>&1 || true
+  if grep -q "FAKE-STARTUP-BANNER" /tmp/de-replay-out.txt; then
+    fail "replay leaked to non-tty stdout"
+  fi
+  grep -q "FAKE-STARTUP-BANNER" "${DE_HOME}/runtime/backend-console.log" ||
+    fail "backend startup output missing from console log"
+
+  if command -v script >/dev/null 2>&1; then
+    script -qefc "${DE} restart --backend-port ${REPLAY_PORT}" /tmp/de-replay-tty.raw \
+      >/dev/null 2>&1 || true
+    grep -q "FAKE-STARTUP-BANNER" /tmp/de-replay-tty.raw ||
+      fail "startup banner not replayed on tty"
+    echo "replay test passed (tty + non-tty)"
+  else
+    echo "replay test skipped: 'script' not found"
+  fi
+  rm -f /tmp/de-replay-out.txt /tmp/de-replay-tty.raw
+  "${DE}" stop --backend-port "${REPLAY_PORT}" >/dev/null 2>&1 || true
+  mv "${FAKE_BIN}.real" "${FAKE_BIN}"
+fi
+
 echo "de script test passed"

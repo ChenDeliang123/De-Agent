@@ -354,6 +354,7 @@ start_backend() {
 
   if health_check; then
     echo "backend already running on http://127.0.0.1:${BACKEND_PORT}"
+    echo "  (启动横幅见 'de logs'；想在这里看到它用 'de restart')"
     return 0
   fi
 
@@ -390,6 +391,10 @@ start_backend() {
     backend_args+=(--log-level "${LOG_LEVEL}")
   fi
   mkdir -p "${LAUNCH_CWD}"
+  # 记录启动前的 console 日志位置：健康后只回放本次新增的启动输出
+  # （启动横幅写在 console 日志里；不回放的话终端上看不到）。
+  local console_before=0
+  [ -f "${CONSOLE_LOG_FILE}" ] && console_before="$(stat -c '%s' "${CONSOLE_LOG_FILE}" 2>/dev/null || echo 0)"
   (
     cd "${LAUNCH_CWD}"
     nohup "${backend_args[@]}" >>"${CONSOLE_LOG_FILE}" 2>&1 &
@@ -399,6 +404,12 @@ start_backend() {
   for _ in $(seq 1 120); do
     if health_check; then
       echo "backend ready on http://127.0.0.1:${BACKEND_PORT}"
+      # banner 与首个后端进程的输出合并回显；非交互（管道/CI）不回放。
+      local console_after
+      console_after="$(stat -c '%s' "${CONSOLE_LOG_FILE}" 2>/dev/null || echo "${console_before}")"
+      if [ "${console_after}" -gt "${console_before}" ] && [ -t 1 ]; then
+        tail -c "+$((console_before + 1))" "${CONSOLE_LOG_FILE}" || true
+      fi
       return 0
     fi
     if ! pid_alive; then
