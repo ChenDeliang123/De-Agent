@@ -145,6 +145,14 @@ private:
     std::atomic<unsigned long long> run_counter_{0};
 };
 
+// 定义装载结果：可用定义 + 因缺提示词被跳过的内置定义名。
+struct AgentDefinitionLoadResult {
+    std::vector<AgentDefinition> definitions;
+    // 内置定义缺提示词（安装不完整）时跳过并记录，由调用方决定是否降级为
+    // 「关闭子 Agent」；用户显式配置的定义缺提示词则直接报错（error 返回空）。
+    std::vector<std::string> skipped_builtins;
+};
+
 // 从 [agents] 配置 + 提示词文件解析运行期定义。
 //
 // - 内置目录：general（继承父工具集，提示词 prompts/general.md）、
@@ -152,8 +160,9 @@ private:
 // - [agents.<name>] 按名字覆盖或追加内置定义；
 // - 提示词解析：system_prompt_file 含 '/' 时按显式路径（绝对或相对 cwd）；
 //   否则依次在 prompt_dirs 中查找 <file>；内置定义的文件名固定为 <name>.md。
-//   找不到任何提示词文件时报错（不做无提示词的静默降级）。
-std::optional<std::vector<AgentDefinition>> LoadAgentDefinitions(
+//   内置定义找不到文件 → 记入 skipped_builtins（安装不完整，可降级）；
+//   配置的定义找不到文件 → 返回 nullopt 并在 error 中写明搜索过的路径。
+std::optional<AgentDefinitionLoadResult> LoadAgentDefinitions(
         const AgentsConfig& config, const std::vector<std::string>& prompt_dirs,
         std::string* error);
 

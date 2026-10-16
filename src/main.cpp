@@ -648,11 +648,32 @@ int main(int argc, char** argv) {
                 prompt_dirs.push_back(share_dir + "/prompts");
             }
             prompt_dirs.push_back("prompts");
+            std::string searched_dirs;
+            for (const auto& dir : prompt_dirs) {
+                if (!searched_dirs.empty()) {
+                    searched_dirs += ", ";
+                }
+                searched_dirs += dir;
+            }
             std::vector<aiagent::agent::AgentDefinition> agent_definitions;
             if (auto loaded = aiagent::agent::LoadAgentDefinitions(agents_config, prompt_dirs,
                                                                    &agents_error);
                 loaded.has_value()) {
-                agent_definitions = std::move(*loaded);
+                agent_definitions = std::move(loaded->definitions);
+                // 内置提示词缺失 = 安装不完整：只降级该定义（全缺则整体关闭子 Agent），
+                // 不拖垮后端；用户显式配置的定义缺提示词仍按配置错误处理。
+                for (const auto& skipped : loaded->skipped_builtins) {
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kWarning, "main",
+                            "agent prompt missing for builtin definition '" + skipped +
+                                    "'; skipping it (searched: " + searched_dirs + ")");
+                }
+                if (agent_definitions.empty()) {
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kWarning, "main",
+                            "no sub-agent prompts found; sub-agents disabled (searched: " +
+                                    searched_dirs + ")");
+                }
             } else {
                 std::cerr << "配置错误: " << agents_error << '\n';
                 return 1;
@@ -709,6 +730,9 @@ int main(int argc, char** argv) {
             agents_info = "agents:";
             for (const auto& definition : agent_definitions) {
                 agents_info += " " + definition.name;
+            }
+            if (agent_definitions.empty()) {
+                agents_info += " none [prompts missing]";
             }
             agents_info += " (depth=" + std::to_string(agents_config.max_depth) +
                            ", concurrent=" + std::to_string(agents_config.max_concurrent) + ")";

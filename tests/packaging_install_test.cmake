@@ -38,7 +38,11 @@ set(expected
     "${stage}/${AIAGENT_INSTALL_BINDIR}/de"
     "${stage}/${AIAGENT_INSTALL_LIBDIR}/de/cli/cli.mjs"
     "${stage}/${AIAGENT_INSTALL_DATADIR}/de/conf/app.ini.example"
-    "${stage}/${AIAGENT_INSTALL_DATADIR}/de/conf/cli.ini.example")
+    "${stage}/${AIAGENT_INSTALL_DATADIR}/de/conf/cli.ini.example"
+    # 子 Agent 提示词：缺失时后端会拒绝启动（不做无提示词的静默降级），
+    # 所以安装布局必须包含它们。
+    "${stage}/${AIAGENT_INSTALL_DATADIR}/de/prompts/general.md"
+    "${stage}/${AIAGENT_INSTALL_DATADIR}/de/prompts/explorer.md")
 
 foreach(path ${expected})
   if(NOT EXISTS "${path}")

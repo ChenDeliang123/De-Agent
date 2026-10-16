@@ -395,10 +395,13 @@ void TestDefinitionLoading() {
             config, {dir.string() + "/prompts"}, &error);
     Expect(definitions.has_value(), "definitions should load from prompt dirs");
     if (definitions.has_value()) {
-        Expect(definitions->size() == 3, "builtins plus custom definition should be present");
-        const auto& general = (*definitions)[0];
-        const auto& explorer = (*definitions)[1];
-        const auto& reviewer = (*definitions)[2];
+        Expect(definitions->definitions.size() == 3,
+               "builtins plus custom definition should be present");
+        Expect(definitions->skipped_builtins.empty(),
+               "no builtin should be skipped when all prompts exist");
+        const auto& general = definitions->definitions[0];
+        const auto& explorer = definitions->definitions[1];
+        const auto& reviewer = definitions->definitions[2];
         Expect(general.name == "general" && general.tools.empty(),
                "general should inherit the parent tool set");
         Expect(general.system_prompt.find("GENERAL FROM FILE") != std::string::npos,
@@ -411,13 +414,25 @@ void TestDefinitionLoading() {
                "custom definition should be loaded with its model and prompt");
     }
 
+    // 用户显式配置的定义缺提示词 → 硬错误（不静默降级）。
     aiagent::AgentsConfig missing = config;
     missing.agents[0].system_prompt_file = "missing.md";
     error.clear();
     const auto failed =
             aiagent::agent::LoadAgentDefinitions(missing, {dir.string() + "/prompts"}, &error);
     Expect(!failed.has_value() && error.find("missing.md") != std::string::npos,
-           "missing prompt file should fail loudly with the searched path");
+           "missing prompt file for a configured definition should fail loudly");
+
+    // 内置定义缺提示词（安装不完整）→ 跳过该定义并记录，由调用方降级。
+    const auto bare = TempDir() / "bare";
+    std::filesystem::create_directories(bare);
+    error.clear();
+    const auto degraded = aiagent::agent::LoadAgentDefinitions({}, {bare.string()}, &error);
+    Expect(degraded.has_value() && degraded->definitions.empty(),
+           "builtins without prompt files should be skipped instead of failing");
+    Expect(degraded.has_value() && degraded->skipped_builtins.size() == 2,
+           "skipped builtins should be reported to the caller");
+    Expect(error.empty(), "skipping builtins should not be reported as a config error");
 
     std::filesystem::remove_all(dir);
 }

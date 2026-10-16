@@ -370,7 +370,7 @@ SubAgentStats SubAgentManager::Stats() const {
     return stats_;
 }
 
-std::optional<std::vector<AgentDefinition>> LoadAgentDefinitions(
+std::optional<AgentDefinitionLoadResult> LoadAgentDefinitions(
         const AgentsConfig& config, const std::vector<std::string>& prompt_dirs,
         std::string* error) {
     std::vector<AgentDefinition> definitions;
@@ -383,8 +383,10 @@ std::optional<std::vector<AgentDefinition>> LoadAgentDefinitions(
                                          "", "", {"read", "grep", "glob", "ls"}});
 
     std::vector<std::string> prompt_files;
+    std::vector<bool> builtin;
     for (const auto& definition : definitions) {
         prompt_files.push_back(definition.name + ".md");
+        builtin.push_back(true);
     }
 
     for (const auto& configured : config.agents) {
@@ -403,6 +405,7 @@ std::optional<std::vector<AgentDefinition>> LoadAgentDefinitions(
             definitions.push_back(AgentDefinition{configured.name, configured.description, "",
                                                   configured.model, configured.tools});
             prompt_files.push_back(configured.name + ".md");
+            builtin.push_back(false);
             index = definitions.size() - 1;
         } else {
             index = static_cast<std::size_t>(std::distance(definitions.begin(), it));
@@ -416,17 +419,28 @@ std::optional<std::vector<AgentDefinition>> LoadAgentDefinitions(
             if (!configured.tools.empty()) {
                 definition.tools = configured.tools;
             }
+            // 显式配置（含对内置定义的覆盖）按「用户定义」对待：缺提示词即报错。
+            if (!configured.system_prompt_file.empty()) {
+                builtin[index] = false;
+            }
         }
         if (!configured.system_prompt_file.empty()) {
             prompt_files[index] = configured.system_prompt_file;
         }
     }
 
+    AgentDefinitionLoadResult result;
+    std::vector<AgentDefinition> loaded;
     for (std::size_t i = 0; i < definitions.size(); ++i) {
         std::string read_error;
         const std::optional<std::string> content =
                 ReadPromptFile(prompt_files[i], prompt_dirs, &read_error);
         if (!content.has_value()) {
+            if (builtin[i]) {
+                // 内置定义缺提示词 = 安装不完整：跳过该定义，由调用方决定是否降级。
+                result.skipped_builtins.push_back(definitions[i].name);
+                continue;
+            }
             if (error != nullptr) {
                 *error = read_error;
             }
@@ -438,9 +452,12 @@ std::optional<std::vector<AgentDefinition>> LoadAgentDefinitions(
             }
             return std::nullopt;
         }
-        definitions[i].system_prompt = *content;
+        AgentDefinition definition = definitions[i];
+        definition.system_prompt = *content;
+        loaded.push_back(std::move(definition));
     }
-    return definitions;
+    result.definitions = std::move(loaded);
+    return result;
 }
 
 }  // namespace aiagent::agent
