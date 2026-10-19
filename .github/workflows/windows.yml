@@ -41,8 +41,13 @@ jobs:
             & (Join-Path $root "bootstrap-vcpkg.bat") -disableMetrics
             if ($LASTEXITCODE -ne 0) { throw "bootstrap-vcpkg failed: $LASTEXITCODE" }
           }
-          & (Join-Path $root "vcpkg.exe") install "curl[core,ssl]:x64-windows-static"
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & (Join-Path $root "vcpkg.exe") install "curl[core,ssl]:x64-windows-static"
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
 
       - name: Configure
         shell: pwsh
@@ -54,17 +59,31 @@ jobs:
             -DA2A_BUILD_EXAMPLES=OFF
 
       - name: Build
-        run: cmake --build build-release/windows-a2a --config Release --parallel
+        shell: pwsh
+        run: |
+          cmake --build build-release/windows-a2a --config Release --parallel 2>&1 |
+            Tee-Object -FilePath build-release/windows-a2a/build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
 
       - name: Test
-        run: ctest --test-dir build-release/windows-a2a -C Release --output-on-failure
+        shell: pwsh
+        run: |
+          ctest --test-dir build-release/windows-a2a -C Release --output-on-failure 2>&1 |
+            Tee-Object -FilePath build-release/windows-a2a/test.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
 
-      - name: Upload test log
+      - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: a2a-windows-test-log
-          path: build-release/windows-a2a/Testing/Temporary/LastTest.log
+          name: a2a-windows-logs
+          path: |
+            build-release/windows-a2a/build.log
+            build-release/windows-a2a/test.log
+            build-release/windows-a2a/Testing/Temporary/LastTest.log
+            build-release/windows-a2a/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
 
   # 根项目中当前已可移植的部分：日志、LLM 客户端、版本与 M0 冒烟。
@@ -90,22 +109,33 @@ jobs:
             -DAIAGENT_BUILD_EXAMPLES=OFF
 
       - name: Build portable targets
-        run: >
-          cmake --build build-release/windows-root --config Release --parallel
-          --target aiagent_log aiagent_llm aiagent_platform m0_smoke_test version_test llm_client_test process_test
+        shell: pwsh
+        run: |
+          cmake --build build-release/windows-root --config Release --parallel `
+            --target aiagent_log aiagent_llm aiagent_platform m0_smoke_test version_test llm_client_test process_test 2>&1 |
+            Tee-Object -FilePath build-release/windows-root/build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
 
       - name: Test portable targets
         shell: pwsh
         run: |
           ctest --test-dir build-release/windows-root -C Release --output-on-failure `
-            -R '^(aiagent_m0_smoke|aiagent_version|aiagent_llm_client|aiagent_process)$'
+            -R '^(aiagent_m0_smoke|aiagent_version|aiagent_llm_client|aiagent_process)$' 2>&1 |
+            Tee-Object -FilePath build-release/windows-root/test.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
 
-      - name: Upload test log
+      - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: root-portable-windows-test-log
-          path: build-release/windows-root/Testing/Temporary/LastTest.log
+          name: root-portable-windows-logs
+          path: |
+            build-release/windows-root/build.log
+            build-release/windows-root/test.log
+            build-release/windows-root/Testing/Temporary/LastTest.log
+            build-release/windows-root/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
 
   # P2 平台层落地后，根项目应能在 Windows 上编译/链接。
@@ -130,4 +160,19 @@ jobs:
             -DAIAGENT_BUILD_EXAMPLES=OFF
 
       - name: Build aiagent_app
-        run: cmake --build build-release/full-app --config Release --parallel --target aiagent_app
+        shell: pwsh
+        run: |
+          cmake --build build-release/full-app --config Release --parallel --target aiagent_app 2>&1 |
+            Tee-Object -FilePath build-release/full-app/build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-app-windows-logs
+          path: |
+            build-release/full-app/build.log
+            build-release/full-app/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
