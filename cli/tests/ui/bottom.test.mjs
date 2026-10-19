@@ -74,6 +74,7 @@ test("region works without a TTY by writing through", () => {
   };
   const region = new BottomRegion(out);
   region.setFooter("footer");
+  region.setSubagentRows(["  ↳ explorer#1"]);
   region.appendOutput("plain\n");
   assert.equal(chunks.join(""), "plain\n");
 });
@@ -83,4 +84,107 @@ test("region clamps the status row to the content width", () => {
   const region = new BottomRegion(out);
   region.setFooter("a very long footer line");
   assert.equal(terminal.screen().at(-1), "a very long");
+});
+
+test("region renders subagent rows above the status row", () => {
+  const { terminal, out } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setFooter("footer");
+  region.setSubagentRows(["  ↳ explorer#1 · glob", "  ↳ explorer#2 · writing"]);
+
+  assert.deepEqual(terminal.screen().slice(-3), [
+    "  ↳ explorer#1 · glob",
+    "  ↳ explorer#2 · writing",
+    "footer",
+  ]);
+});
+
+test("region positions the cursor on the status row below subagent rows", () => {
+  const { text, out } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setSubagentRows(["  ↳ explorer#1", "  ↳ explorer#2"]);
+  region.setFooter("footer");
+
+  assert.ok(
+    text().endsWith("\r\x1b[6C"),
+    `cursor should land at the end of "footer": ${JSON.stringify(text().slice(-40))}`,
+  );
+});
+
+test("region keeps the editor cursor when subagent rows are present", () => {
+  const { terminal, text, out } = captureOutput(20);
+  const region = new BottomRegion(out);
+  region.setFooter("footer");
+  const border = "─".repeat(19);
+  region.setEditor({ lines: [border, "❯ hi", border], cursorRow: 1, cursorCol: 4 });
+  region.setSubagentRows(["  [explorer#1] glob"]);
+
+  assert.deepEqual(terminal.screen().slice(-5), [
+    border,
+    "❯ hi",
+    border,
+    "  [explorer#1] glob",
+    "footer",
+  ]);
+  assert.ok(
+    text().endsWith("\x1b[3A\r\x1b[4C"),
+    `cursor should stay on the editor line: ${JSON.stringify(text().slice(-40))}`,
+  );
+});
+
+test("region clips subagent rows to the content width", () => {
+  const { terminal, out } = captureOutput(12);
+  const region = new BottomRegion(out);
+  region.setFooter("f");
+  region.setSubagentRows(["x".repeat(40), `\x1b[2m${"y".repeat(40)}\x1b[0m`]);
+
+  assert.deepEqual(terminal.screen().slice(-3), [
+    "x".repeat(11),
+    "y".repeat(11),
+    "f",
+  ]);
+  for (const line of terminal.screen()) {
+    assert.ok(line.length <= 11, `line overflows the terminal: ${JSON.stringify(line)}`);
+  }
+});
+
+test("region replaces stale subagent rows on refresh", () => {
+  const { terminal, out } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setFooter("footer");
+  region.setSubagentRows(["  ↳ explorer#1", "  ↳ explorer#2"]);
+  region.setSubagentRows(["  ↳ explorer#1"]);
+
+  assert.deepEqual(terminal.screen().slice(-2), ["  ↳ explorer#1", "footer"]);
+  assert.ok(
+    !terminal.screen().some((line) => line.includes("explorer#2")),
+    `stale subagent row left on screen: ${JSON.stringify(terminal.screen())}`,
+  );
+});
+
+test("region clears subagent rows with an empty list", () => {
+  const { terminal, out } = captureOutput(40);
+  const region = new BottomRegion(out);
+  region.setFooter("footer");
+  region.setSubagentRows(["  ↳ explorer#1"]);
+  region.setSubagentRows([]);
+
+  assert.equal(terminal.screen().at(-1), "footer");
+  assert.ok(!terminal.screen().some((line) => line.includes("explorer#1")));
+});
+
+test("region suspend/resume keeps subagent rows", () => {
+  const { terminal, out } = captureOutput(30);
+  const region = new BottomRegion(out);
+  region.setSubagentRows(["  ↳ explorer#1"]);
+  region.setFooter("footer");
+
+  region.suspend();
+  assert.ok(!terminal.lines().some((line) => line.includes("explorer#1")));
+
+  region.appendOutput("question?\n");
+  assert.equal(terminal.screen().at(-1), "question?");
+
+  region.resume();
+  assert.deepEqual(terminal.screen().slice(-2), ["  ↳ explorer#1", "footer"]);
 });

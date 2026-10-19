@@ -23,6 +23,7 @@ export class BottomRegion {
   #editor = null;
   #footer = "";
   #working = "";
+  #subagentRows = [];
   #pending = "";
 
   constructor(output, { enabled } = {}) {
@@ -61,6 +62,16 @@ export class BottomRegion {
   // 工作状态（spinner + 文案），显示在状态行最左侧；空串表示空闲。
   setWorking(text) {
     this.#working = String(text ?? "");
+    this.render();
+  }
+
+  // 子 Agent 状态行（渲染器生成，通常已带 Agent 标签/颜色）；空数组清除。
+  // 行数与语义由调用方控制（当前最多 4 行 + `… +N more`），这里只负责
+  // 布局、裁剪与光标记账。
+  setSubagentRows(rows) {
+    this.#subagentRows = Array.isArray(rows)
+      ? rows.map((row) => String(row ?? "")).filter((row) => row !== "")
+      : [];
     this.render();
   }
 
@@ -115,8 +126,16 @@ export class BottomRegion {
       }
       cursorRow = base + (this.#editor.cursorRow ?? 0);
       cursorCol = this.#editor.cursorCol ?? 0;
-    } else if (!this.#pending) {
-      // 只有状态行：光标停在状态行末尾所在行的行首（写入前会先擦除）。
+    }
+
+    // 子 Agent 状态行：位于输入框之后、主状态行之前。逐行按可见宽度裁剪，
+    // 保证物理行数与记账一致，不触发终端自动折行。
+    for (const row of this.#subagentRows) {
+      rows.push(clipVisible(row, width, { ellipsis: false }));
+    }
+
+    // 没有输入框/未完成行时，光标停在主状态行（若没有主状态行则停最后一行）。
+    if (!this.#pending && !this.#editor) {
       cursorRow = rows.length;
     }
 
