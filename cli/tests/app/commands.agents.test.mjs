@@ -3,6 +3,17 @@ import http from "node:http";
 import test from "node:test";
 
 import { commands, renderHelp, runCommand } from "../../src/app/commands/index.mjs";
+import { TranscriptRenderer } from "../../src/ui/renderer.mjs";
+
+function fakeOut() {
+  return {
+    isTTY: false,
+    columns: 80,
+    write() {
+      return true;
+    },
+  };
+}
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -52,7 +63,7 @@ const ENABLED = {
   ],
 };
 
-function makeContext(backend, sessionId = null) {
+function makeContext(backend, sessionId = null, overrides = {}) {
   const printed = [];
   const ctx = {
     backend,
@@ -60,6 +71,7 @@ function makeContext(backend, sessionId = null) {
     commands,
     print: (line) => printed.push(line),
     log: () => {},
+    ...overrides,
   };
   return { ctx, printed };
 }
@@ -169,7 +181,10 @@ test("/agents is registered under info and shows up in /help", () => {
   assert.ok(command, "missing /agents command");
   assert.equal(command.category, "info");
   // stop/steer 子命令通过参数传入，不新增顶层指令（候选顺序依赖顶层列表稳定）。
-  assert.equal(command.argHint, "[stop <id|all> | steer <id> <message>]");
+  assert.equal(
+    command.argHint,
+    "[stop <id|all> | steer <id> <message> | show [id]]",
+  );
   assert.ok(renderHelp().includes("/agents"), "/help should list /agents");
 });
 
@@ -365,4 +380,81 @@ test("/agents steer requires an id and a message", async () => {
   } finally {
     await close(backend.server);
   }
+});
+
+test("/agents show lists available transcripts", async () => {
+  const renderer = {
+    subagentTranscriptIds: () => ["explorer#1", "explorer#2"],
+    subagentTranscript: () => null,
+  };
+  const { ctx, printed } = makeContext("http://unused", "s1", { renderer });
+  assert.equal(await runCommand(ctx, "/agents show"), true);
+  assert.deepEqual(printed, [
+    "available transcripts:",
+    "  explorer#1",
+    "  explorer#2",
+    "usage: /agents show <agent_id>",
+  ]);
+});
+
+test("/agents show prints one bounded transcript", async () => {
+  const transcript = {
+    lines: ["plain", "  ┏ glob", "x".repeat(100)],
+    dropped: 2,
+    truncated: true,
+  };
+  const renderer = {
+    subagentTranscriptIds: () => ["explorer#1"],
+    subagentTranscript: (id) => (id === "explorer#1" ? transcript : null),
+  };
+  const { ctx, printed } = makeContext("http://unused", null, { renderer, columns: 20 });
+  assert.equal(await runCommand(ctx, "/agents show explorer#1"), true);
+  assert.equal(
+    printed[0],
+    "explorer#1 transcript (last 3 lines, 2 earlier lines dropped)",
+  );
+  assert.equal(printed[1], "  plain");
+  assert.equal(printed[2], "    ┏ glob");
+  assert.equal(printed[3].length, 20);
+  assert.ok(printed[3].endsWith("…"));
+});
+
+test("/agents show reports unknown and background ids", async () => {
+  const renderer = {
+    subagentTranscriptIds: () => ["explorer#1"],
+    subagentTranscript: (id) => (id === "explorer#1" ? { lines: ["ok"], dropped: 0 } : null),
+  };
+  const { ctx, printed } = makeContext("http://unused", null, { renderer });
+  await runCommand(ctx, "/agents show explorer#9");
+  assert.deepEqual(printed, ["no transcript for explorer#9 (available: explorer#1)"]);
+  await runCommand(ctx, "/agents show bg-3");
+  assert.match(printed.at(-1), /background task/);
+  assert.match(printed.at(-1), /task_result/);
+});
+
+test("/agents show handles empty and missing renderers", async () => {
+  const { ctx, printed } = makeContext("http://unused", null, {
+    renderer: { subagentTranscriptIds: () => [] },
+  });
+  await runCommand(ctx, "/agents show");
+  assert.deepEqual(printed, ["no sub-agent transcripts for this turn"]);
+
+  const missing = makeContext("http://unused");
+  await runCommand(missing.ctx, "/agents show");
+  assert.deepEqual(missing.printed, ["no sub-agent transcripts available"]);
+});
+
+test("/agents show reads the real renderer transcript", async () => {
+  const renderer = new TranscriptRenderer(fakeOut(), { mode: "none" });
+  renderer.content("hello", "explorer#1");
+  renderer.content(" world\n", "explorer#1");
+  renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
+  renderer.toolEnd(true, "1 file", "explorer#1");
+
+  const { ctx, printed } = makeContext("http://unused", null, { renderer });
+  await runCommand(ctx, "/agents show explorer#1");
+  assert.match(printed[0], /explorer#1 transcript \(5 lines\)/);
+  assert.ok(printed.some((line) => line.includes("hello world")), printed.join("\n"));
+  assert.ok(printed.some((line) => line.includes("glob")), printed.join("\n"));
+  assert.ok(printed.some((line) => line.includes("1 file")), printed.join("\n"));
 });

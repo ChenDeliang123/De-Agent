@@ -3,6 +3,7 @@
 // 数据来自后端 `GET /api/v1/agents`；关闭时后端返回 {"enabled":false}。
 
 import { getAgents, steerAgent, stopAgent } from "../session.mjs";
+import { clipToWidth } from "../../ui/text.mjs";
 
 function definitionLine(definition) {
   const name = String(definition?.name ?? "?");
@@ -101,15 +102,67 @@ async function steerTask(ctx, id, text) {
   }
 }
 
+// `/agents show [id]`：列出/打印当前回合的前台子 Agent transcript。
+// transcript 由 CLI 渲染器在内存中保留，后端没有对应接口。
+function showTranscript(ctx, id) {
+  const renderer = ctx.renderer;
+  if (!renderer || typeof renderer.subagentTranscriptIds !== "function") {
+    ctx.print("no sub-agent transcripts available");
+    return;
+  }
+  const ids = renderer.subagentTranscriptIds();
+  if (!id) {
+    if (ids.length === 0) {
+      ctx.print("no sub-agent transcripts for this turn");
+      return;
+    }
+    ctx.print("available transcripts:");
+    for (const agent of ids) {
+      ctx.print(`  ${agent}`);
+    }
+    ctx.print("usage: /agents show <agent_id>");
+    return;
+  }
+  if (id.startsWith("bg-")) {
+    ctx.print(
+      `${id} is a background task; transcripts are only kept for foreground sub-agents. Use /agents or task_result.`,
+    );
+    return;
+  }
+  const transcript = renderer.subagentTranscript(id);
+  if (!transcript) {
+    const available = ids.length > 0 ? ` (available: ${ids.join(", ")})` : "";
+    ctx.print(`no transcript for ${id}${available}`);
+    return;
+  }
+  const meta =
+    transcript.dropped > 0
+      ? `last ${transcript.lines.length} lines, ${transcript.dropped} earlier lines dropped`
+      : `${transcript.lines.length} lines`;
+  ctx.print(`${id} transcript (${meta})`);
+  const columns = Math.max(
+    20,
+    Number(ctx.columns) || Number(process.stdout?.columns) || 80,
+  );
+  for (const line of transcript.lines) {
+    // 2 格缩进 + 可能的省略号：裁剪上限留 3 列，保证整行不超过终端宽度。
+    ctx.print(`  ${clipToWidth(line, Math.max(10, columns - 3))}`);
+  }
+}
+
 export const agentCommands = [
   {
     name: "agents",
     aliases: [],
-    description: "Show sub-agent settings, stats, and manage background tasks (stop/steer)",
-    argHint: "[stop <id|all> | steer <id> <message>]",
+    description: "Show sub-agent settings, stats, transcripts, and manage background tasks",
+    argHint: "[stop <id|all> | steer <id> <message> | show [id]]",
     category: "info",
     handler: async (ctx, arg) => {
       const [sub, id, ...rest] = String(arg ?? "").trim().split(/\s+/).filter(Boolean);
+      if (sub === "show") {
+        showTranscript(ctx, id);
+        return;
+      }
       if (sub === "stop") {
         if (!id) {
           ctx.print("usage: /agents stop <task_id|agent_id|all>");

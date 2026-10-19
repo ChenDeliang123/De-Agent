@@ -403,6 +403,21 @@ test("renderer paints sub-agent status rows in the bottom region", () => {
   renderer.endReply();
 });
 
+test("renderer labels sub-agent approval requests", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+  renderer.approvalRequest({
+    name: "bash",
+    agent_id: "explorer#1",
+    reason: "needs approval",
+    arguments: { command: "touch /tmp/probe" },
+  });
+  const text = out.text();
+  assert.ok(text.includes("approval needed"), text);
+  assert.ok(text.includes("bash"), text);
+  assert.ok(text.includes("[explorer#1]"), text);
+});
+
 test("renderer prints sub-agent lifecycle lines", () => {
   const out = fakeOut(true);
   const renderer = new TranscriptRenderer(out, { mode: "none" });

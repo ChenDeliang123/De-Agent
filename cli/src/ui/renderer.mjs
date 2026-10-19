@@ -736,9 +736,14 @@ export class TranscriptRenderer {
     this.#endContentBlock();
     const t = this.#t;
     const name = data?.name ?? "tool";
+    const agent = this.#agentName(data);
     const reason = data?.reason ?? "requires approval";
     const args = prettyArguments(data?.arguments);
-    this.#write(`\n${t.fg("warning", `${this.#sym.warn} approval needed`)} ${t.bold(name)}`);
+    this.#write(
+      `\n${t.fg("warning", `${this.#sym.warn} approval needed`)} ${t.bold(name)}${
+        agent ? ` ${this.#agentTag(agent)}` : ""
+      }`,
+    );
     if (args) {
       this.#write(` ${t.dim(clipToWidth(args, Math.max(10, this.#width() - 40)))}`);
     }
