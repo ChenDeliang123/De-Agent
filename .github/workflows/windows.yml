@@ -84,10 +84,11 @@ jobs:
           $logs = @("build-release/windows-a2a/build.log", "build-release/windows-a2a/test.log", "$env:RUNNER_TEMP\vcpkg.log")
           foreach ($log in $logs) {
             if (-not (Test-Path $log)) { continue }
-            $lines = Get-Content $log -Tail 200 | Where-Object {
-              $_ -match '(?i)\berror\b|LNK\d+|C\d{4}|FAILED|错误|失败'
-            }
-            if (-not $lines) { $lines = Get-Content $log -Tail 5 }
+            $lines = Get-Content $log -Tail 1000 | Where-Object {
+              $_ -match '(?i)\berror\b|\bfatal error\b|LNK\d{4}|MSB\d{4}|FAILED|错误|失败' -and
+              $_ -notmatch '(?i)warning'
+            } | Select-Object -Last 10
+            if (-not $lines) { $lines = Get-Content $log -Tail 10 }
             foreach ($line in $lines) {
               if ($emitted -ge 10) { break }
               $text = ($line -replace "`r", "")
@@ -158,10 +159,11 @@ jobs:
           $logs = @("build-release/windows-root/build.log", "build-release/windows-root/test.log")
           foreach ($log in $logs) {
             if (-not (Test-Path $log)) { continue }
-            $lines = Get-Content $log -Tail 200 | Where-Object {
-              $_ -match '(?i)\berror\b|LNK\d+|C\d{4}|FAILED|错误|失败'
-            }
-            if (-not $lines) { $lines = Get-Content $log -Tail 5 }
+            $lines = Get-Content $log -Tail 1000 | Where-Object {
+              $_ -match '(?i)\berror\b|\bfatal error\b|LNK\d{4}|MSB\d{4}|FAILED|错误|失败' -and
+              $_ -notmatch '(?i)warning'
+            } | Select-Object -Last 10
+            if (-not $lines) { $lines = Get-Content $log -Tail 10 }
             foreach ($line in $lines) {
               if ($emitted -ge 10) { break }
               $text = ($line -replace "`r", "")
@@ -221,10 +223,11 @@ jobs:
           $logs = @("build-release/full-app/build.log")
           foreach ($log in $logs) {
             if (-not (Test-Path $log)) { continue }
-            $lines = Get-Content $log -Tail 200 | Where-Object {
-              $_ -match '(?i)\berror\b|LNK\d+|C\d{4}|FAILED|错误|失败'
-            }
-            if (-not $lines) { $lines = Get-Content $log -Tail 5 }
+            $lines = Get-Content $log -Tail 1000 | Where-Object {
+              $_ -match '(?i)\berror\b|\bfatal error\b|LNK\d{4}|MSB\d{4}|FAILED|错误|失败' -and
+              $_ -notmatch '(?i)warning'
+            } | Select-Object -Last 10
+            if (-not $lines) { $lines = Get-Content $log -Tail 10 }
             foreach ($line in $lines) {
               if ($emitted -ge 10) { break }
               $text = ($line -replace "`r", "")
