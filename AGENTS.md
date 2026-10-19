@@ -75,3 +75,16 @@
       成一段，但不能只有标题。
     - 一次逻辑改动对应一个 commit；不要把多个不相关改动塞进同一个提交。
     - 具体写法可参考 `项目改动内容.md` 的改动历史条目。
+
+11. 提交后必须推送到远端；父仓库有两个远端，不能只推 Gitee。
+    - `origin` = Gitee（默认 fetch/push）；`github` = GitHub（推送镜像）。
+    - `master` 可用 `git push-all`；其它分支必须显式双推：
+      `git push origin <branch> && git push github <branch>`。
+    - 推送后用 `git ls-remote origin <branch>` 和
+      `git ls-remote github <branch>` 校验两端指向同一 commit。
+    - 子模块是独立仓库：先在其仓库提交并推送到它自己的远端（当前
+      `vendor/a2a-protocol`、`vendor/mcp-extension-platform` 只有 Gitee
+      `origin`），再回父仓库提交 submodule 指针 bump；只推父仓库不会把子模块
+      commit 带到远端。
+    - 新会话不继承历史对话；推送状态以 `git ls-remote` 和仓库实际配置为准。
+    - 双远端配置细节见 `docs/双远端同步-Gitee-GitHub.md`。
