@@ -17,6 +17,13 @@ const TOOL_PREVIEW_LINES = 8;
 const MaxResultLines = 5;
 // 单行超过该长度就先按普通段落刷出，避免长行长时间不显示。
 const MAX_PARTIAL_LINE = 200;
+// 根 `task` 工具结果最多打印的行数；超出折叠，模型仍收到完整结果。
+const MAX_TASK_RESULT_LINES = 80;
+// 子 Agent 事后 transcript：每 Agent 保留的行数与单行字符上限（仅内存）。
+const MAX_TRANSCRIPT_LINES = 200;
+const MAX_TRANSCRIPT_LINE_CHARS = 500;
+// 底部状态区最多同时显示的 Agent 行数；超出显示 `… +N more`。
+const MAX_SUBAGENT_STATUS_ROWS = 4;
 
 function truncate(text) {
   if (text.length <= MaxDisplayText) {
@@ -189,6 +196,13 @@ export class TranscriptRenderer {
   // 文本块归属：子 Agent 的块只在首行加一次 [agent] 标注。
   #contentAgent = "";
   #pendingAgentPrefix = "";
+  // 前台子 Agent 的实时状态：agentId -> { state, tool, toolCalls, failed }。
+  #subagents = new Map();
+  // 事后 transcript：agentId -> { lines, dropped, partial }；仅内存、有界。
+  #subagentTranscripts = new Map();
+  // 根工具名：按工具调用 id 记录，用于识别 `task` 并打印完整报告。
+  #rootToolNames = new Map();
+  #rootToolName = "";
 
   constructor(out = process.stdout, options = {}) {
     this.#out = out;
@@ -213,6 +227,29 @@ export class TranscriptRenderer {
   // 当前工作目录，用于把工具里的相对路径解析成可点击的绝对路径。
   setCwd(cwd) {
     this.#cwd = cwd ?? "";
+  }
+
+  // 当前回合有 transcript 的 Agent id（供 `/agents show` 使用）。
+  subagentTranscriptIds() {
+    return [...this.#subagentTranscripts.entries()]
+      .filter(([, entry]) => entry.lines.length > 0 || entry.partial !== "")
+      .map(([agent]) => agent);
+  }
+
+  // 读取某个 Agent 的有界 transcript；不存在/为空返回 null。
+  subagentTranscript(agentId) {
+    const entry = this.#subagentTranscripts.get(String(agentId ?? ""));
+    if (!entry) {
+      return null;
+    }
+    const lines = [...entry.lines];
+    if (entry.partial !== "") {
+      lines.push(this.#truncateTranscriptLine(entry.partial));
+    }
+    if (lines.length === 0) {
+      return null;
+    }
+    return { lines, dropped: entry.dropped, truncated: entry.dropped > 0 };
   }
 
   wait(label = "working") {
@@ -262,6 +299,218 @@ export class TranscriptRenderer {
     return String(value ?? "");
   }
 
+  // 把前台子 Agent 状态同步到底部区域；没有 region 或旧 region 时静默跳过。
+  #syncSubagentStatus() {
+    if (typeof this.#region?.setSubagentRows !== "function") {
+      return;
+    }
+    const entries = [...this.#subagents.entries()];
+    const rows = [];
+    for (const [agent, state] of entries.slice(0, MAX_SUBAGENT_STATUS_ROWS)) {
+      rows.push(this.#formatSubagentStatusRow(agent, state));
+    }
+    if (entries.length > MAX_SUBAGENT_STATUS_ROWS) {
+      rows.push(this.#t.dim(`  … +${entries.length - MAX_SUBAGENT_STATUS_ROWS} more`));
+    }
+    this.#region.setSubagentRows(rows);
+  }
+
+  #formatSubagentStatusRow(agent, state) {
+    const parts = [agent];
+    if (state.state === "tool" && state.tool) {
+      parts.push(state.tool);
+    } else if (state.state === "tool") {
+      parts.push("tool");
+    } else if (state.state) {
+      parts.push(state.state);
+    }
+    const calls = state.toolCalls ?? 0;
+    parts.push(`${calls} call${calls === 1 ? "" : "s"}`);
+    if ((state.failed ?? 0) > 0) {
+      parts.push(`${state.failed} failed`);
+    }
+    return this.#t.dim(`  ${this.#sym.subagent} ${parts.join(` ${this.#sym.dot} `)}`);
+  }
+
+  #updateSubagent(agentId, patch) {
+    if (!agentId) {
+      return;
+    }
+    const current = this.#subagents.get(agentId) ?? {
+      state: "starting",
+      tool: "",
+      toolCalls: 0,
+      failed: 0,
+    };
+    this.#subagents.set(agentId, { ...current, ...patch });
+    this.#syncSubagentStatus();
+  }
+
+  // 回合边界：清状态行；clearTranscripts=true 时同时丢弃上一回合的事后缓冲。
+  #resetSubagentTracking(clearTranscripts) {
+    this.#subagents.clear();
+    this.#rootToolNames.clear();
+    this.#rootToolName = "";
+    if (clearTranscripts) {
+      this.#subagentTranscripts.clear();
+    }
+    this.#syncSubagentStatus();
+  }
+
+  #ensureTranscript(agentId) {
+    let entry = this.#subagentTranscripts.get(agentId);
+    if (!entry) {
+      entry = { lines: [], dropped: 0, partial: "" };
+      this.#subagentTranscripts.set(agentId, entry);
+    }
+    return entry;
+  }
+
+  #truncateTranscriptLine(line) {
+    const source = String(line ?? "").replace(/\r$/, "");
+    return source.length > MAX_TRANSCRIPT_LINE_CHARS
+      ? `${source.slice(0, MAX_TRANSCRIPT_LINE_CHARS - 1)}…`
+      : source;
+  }
+
+  #pushTranscriptLine(entry, line) {
+    entry.lines.push(this.#truncateTranscriptLine(line));
+    if (entry.lines.length > MAX_TRANSCRIPT_LINES) {
+      entry.lines.shift();
+      entry.dropped += 1;
+    }
+  }
+
+  #appendTranscriptLines(agentId, lines) {
+    if (!agentId || !Array.isArray(lines) || lines.length === 0) {
+      return;
+    }
+    const entry = this.#ensureTranscript(agentId);
+    for (const line of lines) {
+      this.#pushTranscriptLine(entry, line);
+    }
+  }
+
+  #appendTranscriptContent(agentId, token) {
+    if (!agentId) {
+      return;
+    }
+    const entry = this.#ensureTranscript(agentId);
+    entry.partial += String(token ?? "");
+    let index;
+    while ((index = entry.partial.indexOf("\n")) !== -1) {
+      const line = entry.partial.slice(0, index);
+      entry.partial = entry.partial.slice(index + 1);
+      this.#pushTranscriptLine(entry, line);
+    }
+    if (entry.partial.length > MAX_TRANSCRIPT_LINE_CHARS) {
+      this.#pushTranscriptLine(entry, entry.partial);
+      entry.partial = "";
+    }
+  }
+
+  #flushTranscriptPartial(agentId) {
+    const entry = this.#subagentTranscripts.get(agentId);
+    if (!entry || entry.partial === "") {
+      return;
+    }
+    this.#pushTranscriptLine(entry, entry.partial);
+    entry.partial = "";
+  }
+
+  // 子 Agent 工具块转成纯文本行，供事后 transcript 使用（不写主终端）。
+  #subagentToolLines(name, id, rawArguments) {
+    const args = normalizeArguments(rawArguments);
+    const lines = [`${this.#sym.top} ${name}${id ? ` (${id})` : ""}`];
+    const hasPath =
+      args && typeof args === "object" && typeof args.path === "string" && args.path;
+    if (hasPath) {
+      lines.push(`  ${args.path}`);
+    }
+    if (
+      name === "edit" &&
+      args &&
+      typeof args === "object" &&
+      (args.oldText !== undefined ||
+        args.newText !== undefined ||
+        Array.isArray(args.edits))
+    ) {
+      const blocks = Array.isArray(args.edits)
+        ? args.edits.filter((block) => block && typeof block === "object")
+        : [{ oldText: args.oldText, newText: args.newText }];
+      blocks.forEach((block, index) => {
+        if (blocks.length > 1) {
+          lines.push(`  block ${index + 1}/${blocks.length}`);
+        }
+        for (const line of String(block.oldText ?? "").split("\n")) {
+          if (line !== "") {
+            lines.push(`  - ${line}`);
+          }
+        }
+        for (const line of String(block.newText ?? "").split("\n")) {
+          if (line !== "") {
+            lines.push(`  + ${line}`);
+          }
+        }
+      });
+      const max = 24;
+      if (lines.length > max) {
+        return lines.slice(0, max).concat([`  … (+${lines.length - max} lines)`]);
+      }
+      return lines;
+    }
+    let rest = args;
+    if (hasPath) {
+      rest = { ...args };
+      delete rest.path;
+    }
+    const text = prettyArguments(rest);
+    if (text && text !== "{}") {
+      lines.push(`  ${clipToWidth(text, MAX_TRANSCRIPT_LINE_CHARS - 2)}`);
+    }
+    return lines;
+  }
+
+  #transcriptPreviewLines(text) {
+    const source = String(text ?? "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n+$/, "");
+    if (source === "") {
+      return [];
+    }
+    const lines = source.split("\n");
+    const shown = lines
+      .slice(0, TOOL_PREVIEW_LINES)
+      .map((line) => clipToWidth(line, MAX_TRANSCRIPT_LINE_CHARS - 4));
+    if (lines.length > TOOL_PREVIEW_LINES) {
+      shown.push(`… (+${lines.length - TOOL_PREVIEW_LINES} lines)`);
+    }
+    return shown.map((line) => `  ${this.#sym.bar} ${line}`);
+  }
+
+  // 根 `task` 的工具结果：完整打印（最多 80 行），不再走 8 行 preview。
+  #writeTaskResult(text) {
+    const source = String(text ?? "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n+$/, "");
+    if (source === "") {
+      return;
+    }
+    const lines = source.split("\n");
+    const shown = lines.slice(0, MAX_TASK_RESULT_LINES);
+    for (const line of shown) {
+      if (line === "") {
+        this.#write("\n");
+      } else {
+        this.#writeClipped(`  ${line}`);
+      }
+    }
+    const hidden = lines.length - shown.length;
+    if (hidden > 0) {
+      this.#writeClipped(`  … (+${hidden} lines)`);
+    }
+  }
+
   // 块边界（用户消息、工具调用、回合结束等）：下一段文本重新输出 Agent 标注。
   #endContentBlock() {
     this.#contentAgent = "";
@@ -302,11 +551,13 @@ export class TranscriptRenderer {
     this.#turnLabelPrinted = false;
     this.#md.reset();
     this.#endContentBlock();
+    this.#resetSubagentTracking(true);
   }
 
   startReply() {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#resetSubagentTracking(true);
     this.#md.reset();
     this.#endContentBlock();
     this.#write("\n");
@@ -318,16 +569,25 @@ export class TranscriptRenderer {
   }
 
   content(token, agentId = "") {
+    const agent = String(agentId ?? "");
+    // 子 Agent 的正文只进事后 transcript，绝不进入主 transcript 的共享缓冲区。
+    if (agent) {
+      this.#appendTranscriptContent(agent, token);
+      const current = this.#subagents.get(agent);
+      if (!current || current.state !== "writing") {
+        this.#updateSubagent(agent, { state: "writing", tool: "" });
+      }
+      return;
+    }
     if (!this.#assistantActive) {
       this.#beginOutput();
       this.#write("\n");
       this.#ensureAssistantLabel();
       this.#assistantActive = true;
     }
-    const agent = String(agentId ?? "");
     if (agent !== this.#contentAgent) {
       this.#contentAgent = agent;
-      // 子 Agent 的文本块只在首行标注一次；根 Agent（空）沿用原有缩进。
+      // 根 Agent（空）沿用原有缩进；子 Agent 不再走这条路径。
       this.#pendingAgentPrefix = agent;
     }
     this.#assistantWroteText = true;
@@ -343,10 +603,23 @@ export class TranscriptRenderer {
   }
 
   toolStart(id, name, rawArguments, agentId = "") {
+    const agent = String(agentId ?? "");
+    if (agent) {
+      this.#flushTranscriptPartial(agent);
+      this.#appendTranscriptLines(agent, this.#subagentToolLines(name, id, rawArguments));
+      const current = this.#subagents.get(agent);
+      this.#updateSubagent(agent, {
+        state: "tool",
+        tool: name,
+        toolCalls: (current?.toolCalls ?? 0) + 1,
+      });
+      return;
+    }
+    this.#rootToolNames.set(String(id ?? ""), name);
+    this.#rootToolName = name;
     this.#beginOutput();
     this.#flushMdBuffer();
     const t = this.#t;
-    const agent = String(agentId ?? "");
     this.#write("\n");
     const label = `${t.bold(name)}${id ? ` ${t.dim(`(${id.slice(0, 8)})`)}` : ""}`;
     // 子 Agent 的工具块：`  [explorer#1] ┏ glob` + 内容行再缩进两格。
@@ -365,8 +638,12 @@ export class TranscriptRenderer {
   }
 
   toolOutput(text, agentId = "") {
-    this.#beginOutput();
     const agent = String(agentId ?? "");
+    if (agent) {
+      this.#appendTranscriptLines(agent, this.#transcriptPreviewLines(text));
+      return;
+    }
+    this.#beginOutput();
     const indent = agent ? "    " : "  ";
     for (const line of this.#previewLines(text)) {
       this.#writeRow(
@@ -379,24 +656,43 @@ export class TranscriptRenderer {
     }
   }
 
-  toolEnd(ok, text, agentId = "") {
+  toolEnd(ok, text, agentId = "", id = "") {
+    const agent = String(agentId ?? "");
+    if (agent) {
+      this.#flushTranscriptPartial(agent);
+      if (text) {
+        this.#appendTranscriptLines(agent, this.#transcriptPreviewLines(text));
+      }
+      const outcome = ok ? `${this.#sym.ok} ok` : `${this.#sym.fail} failed`;
+      this.#appendTranscriptLines(agent, [`  ${this.#sym.bottom} ${outcome}`]);
+      const current = this.#subagents.get(agent);
+      this.#updateSubagent(agent, {
+        state: "thinking",
+        tool: "",
+        failed: (current?.failed ?? 0) + (ok ? 0 : 1),
+      });
+      return;
+    }
     this.#beginOutput();
     const t = this.#t;
-    const agent = String(agentId ?? "");
+    const toolName = id ? this.#rootToolNames.get(String(id)) : this.#rootToolName;
+    this.#rootToolNames.delete(String(id ?? ""));
+    this.#rootToolName = "";
     const colorName = ok ? "success" : "error";
     const body = String(text ?? "");
-    const indent = agent ? "    " : "  ";
     if (body) {
-      for (const line of this.#previewLines(body)) {
-        this.#writeRow(agent, `${indent}${t.fg("borderMuted", this.#sym.bar)} ${t.dim(line)}`);
+      if (toolName === "task") {
+        this.#writeTaskResult(body);
+      } else {
+        for (const line of this.#previewLines(body)) {
+          this.#writeRow("", `  ${t.fg("borderMuted", this.#sym.bar)} ${t.dim(line)}`);
+        }
       }
     }
     const status = ok
       ? `${t.fg(colorName, this.#sym.ok)} ok`
       : `${t.fg(colorName, this.#sym.fail)} failed`;
-    // 子 Agent 的块在末行再带一次 [agent] 标记，闭合视觉边界。
-    const tag = agent ? this.#agentTag(agent) : "";
-    this.#writeRow(agent, `  ${tag}${t.fg(colorName, this.#sym.bottom)} ${status}`);
+    this.#writeRow("", `  ${t.fg(colorName, this.#sym.bottom)} ${status}`);
     this.#resumeAssistant = true;
     this.#currentTool = "";
     this.#spinner.start("thinking", "accent");
@@ -405,6 +701,7 @@ export class TranscriptRenderer {
   endReply() {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#resetSubagentTracking(false);
     this.#endContentBlock();
     this.#write("\n");
     this.#assistantActive = false;
@@ -424,6 +721,7 @@ export class TranscriptRenderer {
   interrupted() {
     this.#beginOutput();
     this.#flushMdBuffer();
+    this.#resetSubagentTracking(false);
     this.#endContentBlock();
     const t = this.#t;
     this.#write(`\n${t.fg("warning", `${this.#sym.interrupted} interrupted`)}\n`);
@@ -465,14 +763,23 @@ export class TranscriptRenderer {
     this.#spinner.start("thinking", "accent");
   }
 
-  compaction(data) {
+  compaction(data, agentId = "") {
+    const agent = String(agentId ?? "");
+    const before = data?.tokens_before ?? "?";
+    const after = data?.tokens_after ?? "?";
+    const reason = data?.forced ? " (overflow)" : "";
+    if (agent) {
+      this.#flushTranscriptPartial(agent);
+      this.#appendTranscriptLines(agent, [
+        `${this.#sym.compact} context compacted${reason}: ${before} → ${after} tokens`,
+      ]);
+      this.#updateSubagent(agent, { state: "compacting", tool: "" });
+      return;
+    }
     this.#beginOutput();
     this.#flushMdBuffer();
     this.#endContentBlock();
     const t = this.#t;
-    const before = data?.tokens_before ?? "?";
-    const after = data?.tokens_after ?? "?";
-    const reason = data?.forced ? " (overflow)" : "";
     this.#write(
       `\n${t.dim(`${this.#sym.compact} context compacted${reason}: ${before} → ${after} tokens`)}\n`,
     );
@@ -488,10 +795,19 @@ export class TranscriptRenderer {
   subagentStart(agentOrData) {
     this.#beginOutput();
     this.#flushMdBuffer();
-    const agent = this.#agentName(agentOrData) || "subagent";
+    const named = this.#agentName(agentOrData);
+    const agent = named || "subagent";
     const background =
       agentOrData && typeof agentOrData === "object" && agentOrData.background === true;
     if (!background) {
+      if (named) {
+        this.#updateSubagent(named, {
+          state: "starting",
+          tool: "",
+          toolCalls: 0,
+          failed: 0,
+        });
+      }
       this.#writeClipped(this.#t.dim(`  ${this.#sym.subagent} ${agent} started`));
       return;
     }
@@ -503,10 +819,13 @@ export class TranscriptRenderer {
   // 子 Agent 结束：成功 `  ↳ explorer#1 done in 3.9s · 3 tool calls`；
   // 失败 `  ↳ explorer#1 failed: <text>`。
   subagentEnd(data = {}) {
+    const agent = this.#agentName(data) || "subagent";
+    this.#flushTranscriptPartial(agent);
+    this.#subagents.delete(agent);
+    this.#syncSubagentStatus();
     this.#beginOutput();
     this.#flushMdBuffer();
     const t = this.#t;
-    const agent = this.#agentName(data) || "subagent";
     if (data?.ok === false) {
       const reason = String(data?.text ?? "").trim() || "unknown error";
       this.#writeClipped(t.dim(`  ${this.#sym.subagent} ${agent} failed: ${reason}`));

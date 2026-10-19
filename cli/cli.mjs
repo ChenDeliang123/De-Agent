@@ -260,7 +260,7 @@ async function sendMessage(ctx, text) {
         } else if (event === "tool_output") {
           renderer.toolOutput(data.content ?? "", agentId);
         } else if (event === "tool_end") {
-          renderer.toolEnd(Boolean(data.ok), data.text ?? "", agentId);
+          renderer.toolEnd(Boolean(data.ok), data.text ?? "", agentId, data.id ?? "");
         } else if (event === "subagent_start") {
           renderer.subagentStart(data);
         } else if (event === "subagent_result") {
@@ -277,7 +277,7 @@ async function sendMessage(ctx, text) {
           // 纠偏消息真正投递给子 Agent 时才来这一帧，可能滞后于命令回显。
           renderer.subagentSteer(data);
         } else if (event === "compaction") {
-          renderer.compaction(data);
+          renderer.compaction(data, agentId);
         } else if (event === "approval_request") {
           await handleApproval(ctx, requestSessionId, data);
         } else if (event === "error") {

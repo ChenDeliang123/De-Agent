@@ -21,6 +21,19 @@ function fakeOut(isTTY = true) {
   };
 }
 
+// 只记录 setSubagentRows 的 region：enabled=false 让主输出仍走 out，
+// spinner 也不会调用 region.setWorking。
+function fakeRegion() {
+  const snapshots = [];
+  return {
+    enabled: false,
+    snapshots,
+    setSubagentRows(rows) {
+      snapshots.push([...rows]);
+    },
+  };
+}
+
 test("renderer shows a spinner while waiting, clears it on output", () => {
   const out = fakeOut(true);
   const renderer = new TranscriptRenderer(out, { mode: "truecolor" });
@@ -192,34 +205,37 @@ test("renderer without a region keeps writing directly (non-TTY / pipe)", () => 
   assert.ok(!text.includes("\x1b[48;"), "no background block without colour support");
 });
 
-test("renderer labels a sub-agent text block once, at its first line", () => {
+test("renderer isolates sub-agent content and buffers a transcript", () => {
   const out = fakeOut(true);
   const renderer = new TranscriptRenderer(out, { mode: "none" });
 
   renderer.startReply();
+  renderer.subagentStart("explorer#1");
   renderer.content("Hi", "explorer#1");
   renderer.content(" there\n", "explorer#1");
   renderer.content("next line\n", "explorer#1");
-  const text = out.text();
-  assert.ok(
-    text.includes("  [explorer#1] Hi there"),
-    `first line of the block should carry the agent label: ${JSON.stringify(text)}`,
-  );
-  assert.ok(text.includes("  next line"), "continuation lines keep the plain indent");
-  assert.equal(
-    (text.match(/\[explorer#1\]/g) ?? []).length,
-    1,
-    "consecutive tokens from the same agent share one label",
-  );
-
-  // 工具调用打断文本块：同一 Agent 的下一段文本重新标注。
   renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
-  renderer.toolEnd(true, "", "explorer#1");
+  renderer.toolOutput("cli/cli.mjs", "explorer#1");
+  renderer.toolEnd(true, "1 file", "explorer#1");
   renderer.content("after the tool\n", "explorer#1");
-  const second = out.text();
-  assert.ok(second.includes("  [explorer#1] after the tool"), "a new block is labelled again");
-  assert.equal((second.match(/\[explorer#1\]/g) ?? []).length, 4, "block + tool + tool + block");
+
+  const text = out.text();
+  assert.ok(text.includes("  ↳ explorer#1 started"), text);
+  assert.ok(!text.includes("Hi there"), "sub-agent content must not reach the main transcript");
+  assert.ok(!text.includes("next line"));
+  assert.ok(!text.includes("[explorer#1]"), "main transcript has no sub-agent detail block");
+  assert.ok(!text.includes("sub1:c1"), "sub-agent tool id must not reach the main transcript");
+
+  const transcript = renderer.subagentTranscript("explorer#1");
+  assert.ok(transcript, "transcript should exist after the turn");
+  assert.ok(transcript.lines.some((line) => line.includes("Hi there")));
+  assert.ok(transcript.lines.some((line) => line.includes("next line")));
+  assert.ok(transcript.lines.some((line) => line.includes("glob")));
+  assert.ok(transcript.lines.some((line) => line.includes("cli/cli.mjs")));
+  assert.ok(transcript.lines.some((line) => line.includes("after the tool")));
+
   renderer.endReply();
+  assert.ok(renderer.subagentTranscript("explorer#1"), "endReply keeps the transcript");
 });
 
 test("renderer keeps root-agent content and tools unchanged", () => {
@@ -241,23 +257,149 @@ test("renderer keeps root-agent content and tools unchanged", () => {
   renderer.endReply();
 });
 
-test("renderer marks sub-agent tool blocks with a label and extra indent", () => {
+test("renderer isolates interleaved sub-agent streams", () => {
   const out = fakeOut(true);
   const renderer = new TranscriptRenderer(out, { mode: "none" });
 
   renderer.startReply();
-  renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
-  renderer.toolOutput("cli/cli.mjs", "explorer#1");
-  renderer.toolEnd(true, "1 file", "explorer#1");
+  renderer.subagentStart("explorer#1");
+  renderer.subagentStart("explorer#2");
+  renderer.content("A1", "explorer#1");
+  renderer.content("B1", "explorer#2");
+  renderer.content("A2\n", "explorer#1");
+  renderer.content("B2\n", "explorer#2");
+
   const text = out.text();
+  for (const fragment of ["A1", "A2", "B1", "B2"]) {
+    assert.ok(!text.includes(fragment), `sub-agent fragment leaked: ${fragment}`);
+  }
+  assert.deepEqual(renderer.subagentTranscript("explorer#1").lines, ["A1A2"]);
+  assert.deepEqual(renderer.subagentTranscript("explorer#2").lines, ["B1B2"]);
+  assert.deepEqual(renderer.subagentTranscriptIds(), ["explorer#1", "explorer#2"]);
+  renderer.endReply();
+});
+
+test("renderer bounds and clears sub-agent transcripts", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.startReply();
+  renderer.subagentStart("explorer#1");
+  for (let index = 0; index < 250; index += 1) {
+    renderer.content(`line ${index}\n`, "explorer#1");
+  }
+  renderer.content(`${"x".repeat(600)}\n`, "explorer#1");
+
+  const transcript = renderer.subagentTranscript("explorer#1");
+  assert.equal(transcript.lines.length, 200);
+  assert.equal(transcript.dropped, 51);
+  assert.ok(transcript.truncated);
+  assert.equal(transcript.lines.at(-1).length, 500);
+  assert.ok(transcript.lines.at(-1).endsWith("…"));
+
+  renderer.endReply();
+  assert.ok(renderer.subagentTranscript("explorer#1"), "endReply keeps the transcript");
+  renderer.user("next turn");
+  assert.equal(renderer.subagentTranscript("explorer#1"), null);
+  assert.deepEqual(renderer.subagentTranscriptIds(), []);
+});
+
+test("renderer prints the full root task result", () => {
+  const out = fakeOut(true);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.startReply();
+  const report = Array.from({ length: 100 }, (_, index) => `report line ${index}`).join("\n");
+  renderer.toolStart("call-1", "task", { tasks: [] });
+  renderer.toolEnd(true, report, "", "call-1");
+
+  const text = out.text();
+  assert.ok(text.includes("  ┏ task (call-1)"), text);
+  assert.ok(text.includes("  report line 0"));
+  assert.ok(text.includes("  report line 79"));
+  assert.ok(!text.includes("  report line 80"), "lines beyond the cap are folded");
+  assert.ok(text.includes("  … (+20 lines)"));
+  assert.ok(text.includes("  ┗ ✔ ok"));
+  renderer.endReply();
+});
+
+test("renderer tracks sub-agent status rows", () => {
+  const out = fakeOut(true);
+  const region = fakeRegion();
+  const renderer = new TranscriptRenderer(out, { mode: "none", region });
+
+  renderer.startReply();
+  renderer.subagentStart("explorer#1");
+  assert.equal(region.snapshots.at(-1).length, 1);
+  assert.ok(region.snapshots.at(-1)[0].includes("explorer#1"));
+  assert.ok(region.snapshots.at(-1)[0].includes("starting"));
+
+  renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
+  let row = region.snapshots.at(-1)[0];
+  assert.ok(row.includes("glob"), row);
+  assert.ok(row.includes("1 call"), row);
+
+  renderer.toolEnd(false, "boom", "explorer#1");
+  row = region.snapshots.at(-1)[0];
+  assert.ok(row.includes("thinking"), row);
+  assert.ok(row.includes("1 failed"), row);
+
+  renderer.content("working", "explorer#1");
+  row = region.snapshots.at(-1)[0];
+  assert.ok(row.includes("writing"), row);
+
+  renderer.subagentEnd({ agent_id: "explorer#1", ok: true, duration_ms: 1000, tool_calls: 1 });
+  assert.deepEqual(region.snapshots.at(-1), []);
+  renderer.endReply();
+});
+
+test("renderer caps sub-agent status rows", () => {
+  const out = fakeOut(true);
+  const region = fakeRegion();
+  const renderer = new TranscriptRenderer(out, { mode: "none", region });
+
+  for (let index = 1; index <= 6; index += 1) {
+    renderer.subagentStart(`explorer#${index}`);
+  }
+  const rows = region.snapshots.at(-1);
+  assert.equal(rows.length, 5);
+  assert.ok(rows.at(-1).includes("+2 more"), rows.at(-1));
+  renderer.endReply();
+});
+
+test("renderer does not track background sub-agents in the status area", () => {
+  const out = fakeOut(true);
+  const region = fakeRegion();
+  const renderer = new TranscriptRenderer(out, { mode: "none", region });
+
+  renderer.subagentStart({ agent_id: "explorer#7", task_id: "bg-3", background: true });
+  assert.equal(region.snapshots.length, 0, "background start must not create a status row");
+  renderer.endReply();
+  assert.deepEqual(region.snapshots.at(-1), []);
+});
+
+test("renderer paints sub-agent status rows in the bottom region", () => {
+  const { terminal, out } = captureOutput(60);
+  const region = new BottomRegion(out);
+  region.setFooter("footer");
+  const renderer = new TranscriptRenderer(out, { mode: "none", region });
+
+  renderer.startReply();
+  renderer.subagentStart("explorer#1");
+  renderer.toolStart("sub1:c1", "glob", { path: "cli" }, "explorer#1");
+  let screen = terminal.screen();
   assert.ok(
-    text.includes("  [explorer#1] ┏ glob (sub1:c1)"),
-    `sub-agent header carries the label: ${JSON.stringify(text)}`,
+    screen.some((line) => line.includes("explorer#1") && line.includes("glob")),
+    `status row missing: ${JSON.stringify(screen)}`,
   );
-  assert.ok(text.includes("    ┃ cli"), "sub-agent arguments are indented two more spaces");
-  assert.ok(text.includes("    ┃ cli/cli.mjs"), "sub-agent output is indented two more spaces");
-  assert.ok(text.includes("    ┃ 1 file"), "sub-agent end payload keeps the indent");
-  assert.ok(text.includes("  [explorer#1] ┗ ✔ ok"), "sub-agent footer keeps the label");
+  assert.equal(screen.at(-1), "footer", "footer stays at the very bottom");
+
+  renderer.subagentEnd({ agent_id: "explorer#1", ok: true, duration_ms: 1000, tool_calls: 1 });
+  screen = terminal.screen();
+  assert.ok(
+    !screen.some((line) => line.includes("explorer#1") && line.includes("glob")),
+    `status row should disappear on end: ${JSON.stringify(screen)}`,
+  );
   renderer.endReply();
 });
 
@@ -317,7 +459,7 @@ test("renderer prints sub-agent lifecycle lines", () => {
   assert.ok(text.includes("  ↳ explorer#1 failed: timed out"), text);
 });
 
-test("renderer clips sub-agent lines to the terminal width", () => {
+test("renderer clips sub-agent lifecycle lines to the terminal width", () => {
   const out = fakeOut(false);
   out.columns = 26;
   const renderer = new TranscriptRenderer(out, { mode: "none" });
@@ -330,9 +472,6 @@ test("renderer clips sub-agent lines to the terminal width", () => {
     tool_calls: 1,
     text: "boom ".repeat(20),
   });
-  renderer.toolStart("sub1:c1", "bash", { command: "x".repeat(120) }, "explorer#1");
-  renderer.toolOutput("y".repeat(120), "explorer#1");
-  renderer.toolEnd(true, "z".repeat(120), "explorer#1");
   for (const line of out.text().split("\n")) {
     if (line !== "") {
       assert.ok(displayWidth(line) <= 26, `line overflows the terminal: ${JSON.stringify(line)}`);
