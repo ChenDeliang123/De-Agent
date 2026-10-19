@@ -20,8 +20,14 @@ struct MCPConfig {
     bool enabled = false;
     std::string binary;
     std::string plugins_dir;
+#ifdef _WIN32
+    std::string python_path = "python";
+    // 空 = 不传 -l，MCP server 使用自身默认日志目录。
+    std::string log_dir;
+#else
     std::string python_path = "python3";
     std::string log_dir = "/tmp/mcp_logs";
+#endif
     long request_timeout_seconds = 60;
 };
 

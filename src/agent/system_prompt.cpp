@@ -16,6 +16,13 @@ std::string BuildCodingSystemPrompt() {
             std::string(aiagent::kAgentName) + ", a general-purpose coding agent by " +
             aiagent::kAgentAuthor + ".\n"
             "Available tools: read, write, edit, bash, ls, glob, grep.\n"
+#ifdef _WIN32
+            "Platform: Windows x64. The bash tool runs commands via `cmd.exe /d /s /c`; "
+            "use Windows commands (dir, type, findstr, where, copy, move) or invoke "
+            "PowerShell explicitly when needed.\n"
+#else
+            "Platform: POSIX (Linux). The bash tool runs commands via `/bin/sh -c`.\n"
+#endif
             "Rules:\n"
             "- When the user asks to create or modify code/files, use write or edit in the SAME "
             "turn. Do NOT stop after presenting a plan.\n"

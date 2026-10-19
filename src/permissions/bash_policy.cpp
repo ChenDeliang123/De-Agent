@@ -1,7 +1,10 @@
 #include "aiagent/permissions/bash_policy.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -11,7 +14,7 @@ namespace aiagent::permissions {
 namespace {
 
 // 内置默认规则：首次运行时会以带注释的形式写入 bash_policy.rules。
-constexpr const char* kDefaultRules = R"BASH(# ai-agent bash 命令策略（白名单 / 黑名单）
+constexpr const char* kDefaultRulesPosix = R"BASH(# ai-agent bash 命令策略（白名单 / 黑名单）
 #
 # 一行一条规则；空行与以 # 开头的行会被忽略。
 #
@@ -126,6 +129,83 @@ allow pip show
 allow cargo metadata
 )BASH";
 
+constexpr const char* kDefaultRulesWindows = R"BASH(# ai-agent Windows 命令策略（白名单 / 黑名单）
+#
+# 语法与 POSIX 版本一致；Windows 上 token 与 re: 匹配均不区分大小写。
+# 注意：字符串匹配不是安全边界，只用于降低灾难性误操作的概率。
+
+# ---------------- 黑名单：灾难级，永远拒绝 ----------------
+deny format
+deny diskpart
+deny bcdedit
+deny bootrec
+deny re: \breg(\.exe)?\s+delete\b
+deny shutdown
+deny re: \b(restart|stop)-computer\b
+deny re: \btaskkill(\.exe)?\b.*(/f|/im)\b
+deny re: \bdel\b.*(/s|/q).*[a-z]:[\\/]
+deny re: \b(rd|rmdir)\b.*(/s|/q).*[a-z]:[\\/]
+deny re: \bRemove-Item\b.*-(Recurse|Force).*[a-z]:[\\/]
+deny re: \b(powershell|pwsh)(\.exe)?\b.*-(enc|encodedcommand)\b
+deny re: \b(certutil|bitsadmin)(\.exe)?\b.*(-urlcache|/transfer)\b
+deny re: \bInvoke-Expression\b.*\b(iwr|Invoke-WebRequest|curl)\b
+deny re: \bnet(\.exe)?\s+user\b.*(/add|/delete)\b
+deny re: \bsc(\.exe)?\s+delete\b
+deny re: \bicacls(\.exe)?\b.*(/grant|/deny)\b
+deny takeown
+deny re: \bvssadmin(\.exe)?\b.*delete\b
+deny re: \bwmic(\.exe)?\b.*delete\b
+deny re: \bgit\s+push\b.*(--force|-f)\b
+deny git reset --hard
+deny git clean -fdx
+
+# ---------------- 白名单：只读 / 无副作用，免确认 ----------------
+allow dir
+allow type
+allow where
+allow findstr
+allow more
+allow tree
+allow cd
+allow echo
+allow set
+allow ver
+allow whoami
+allow hostname
+allow systeminfo
+allow tasklist
+allow Get-ChildItem
+allow Get-Content
+allow Select-String
+allow Measure-Object
+allow git status
+allow git diff
+allow git log
+allow git show
+allow git blame
+allow git remote -v
+allow git stash list
+allow git tag
+allow git describe
+allow git rev-parse
+allow git ls-files
+allow node --version
+allow npm --version
+allow python --version
+allow py --version
+allow cmake --version
+allow git --version
+allow npm ls
+allow pip list
+allow pip show
+)BASH";
+
+#ifdef _WIN32
+constexpr const char* kDefaultRules = kDefaultRulesWindows;
+#else
+constexpr const char* kDefaultRules = kDefaultRulesPosix;
+#endif
+
 std::string Trim(const std::string& value) {
     std::size_t begin = 0;
     while (begin < value.size() &&
@@ -221,13 +301,21 @@ std::vector<std::vector<std::string>> SplitCommand(const std::string& command) {
     return segments;
 }
 
+bool TokenEqual(const std::string& left, const std::string& right) {
+#ifdef _WIN32
+    return ::_stricmp(left.c_str(), right.c_str()) == 0;
+#else
+    return left == right;
+#endif
+}
+
 bool TokenPrefixMatches(const std::vector<std::string>& segment,
                         const std::vector<std::string>& rule) {
     if (rule.empty() || segment.size() < rule.size()) {
         return false;
     }
     for (std::size_t i = 0; i < rule.size(); ++i) {
-        if (segment[i] != rule[i]) {
+        if (!TokenEqual(segment[i], rule[i])) {
             return false;
         }
     }
@@ -262,7 +350,13 @@ BashPolicy ParseBashPolicy(const std::string& content) {
                 continue;
             }
             try {
+#ifdef _WIN32
+                rule.regex = std::regex(
+                        rule.pattern, std::regex_constants::ECMAScript |
+                                              std::regex_constants::icase);
+#else
                 rule.regex = std::regex(rule.pattern);
+#endif
             } catch (const std::regex_error&) {
                 rule.valid = false;
             }
@@ -298,7 +392,7 @@ bool LoadBashPolicyFile(const std::string& path, BashPolicy* out, std::string* e
         }
         return false;
     }
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open bash policy file: " + path;
@@ -318,11 +412,11 @@ bool WriteDefaultBashPolicyFile(const std::string& path) {
         return false;
     }
     std::error_code ec;
-    const std::filesystem::path target(path);
+    const std::filesystem::path target = aiagent::platform::FromUtf8(path);
     if (target.has_parent_path()) {
         std::filesystem::create_directories(target.parent_path(), ec);
     }
-    std::ofstream output(path, std::ios::trunc);
+    std::ofstream output(target, std::ios::binary | std::ios::trunc);
     if (!output) {
         return false;
     }

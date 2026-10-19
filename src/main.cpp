@@ -52,6 +52,8 @@
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/permissions/project_config.hpp"
 #include "aiagent/permissions/trust_store.hpp"
+#include "aiagent/platform/console.hpp"
+#include "aiagent/platform/paths.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
@@ -262,7 +264,8 @@ a2a::models::AgentCard BuildAgentCard(int port) {
 // 交互终端上 stdout 才加 ANSI 颜色：重定向/管道时保持纯文本。
 bool StdoutSupportsColor() {
 #ifdef _WIN32
-    return _isatty(_fileno(stdout)) != 0;
+    return _isatty(_fileno(stdout)) != 0 &&
+           aiagent::platform::EnableVirtualTerminal();
 #else
     return isatty(STDOUT_FILENO) != 0;
 #endif
@@ -327,6 +330,7 @@ void PrintStartupBanner(const std::string& model, int port, int web_port,
 
 int main(int argc, char** argv) {
     try {
+        aiagent::platform::ConfigureConsoleUtf8();
         const AppOptions options = ParseOptions(argc, argv);
 
         // 路径解析：先定位配置文件，再解析数据目录与安装资源目录。
@@ -399,11 +403,11 @@ int main(int argc, char** argv) {
         }
 
         auto task_store =
-                std::make_shared<a2a::server::SqliteTaskStore>(db_path.string());
+                std::make_shared<a2a::server::SqliteTaskStore>(aiagent::platform::ToUtf8(db_path));
         // 会话显式标题：与任务库同目录的 JSON 文件。
         std::filesystem::path meta_path = db_path;
         meta_path.replace_filename("aiagent_sessions.json");
-        aiagent::agent::SessionMetaStore session_meta(meta_path.string());
+        aiagent::agent::SessionMetaStore session_meta(aiagent::platform::ToUtf8(meta_path));
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
         const std::string coding_system_prompt =
                 aiagent::agent::BuildCodingSystemPrompt();
@@ -418,7 +422,7 @@ int main(int argc, char** argv) {
         }
         instructions_config = *parsed_instructions;
         const std::string fallback_working_directory =
-                std::filesystem::current_path().string();
+                aiagent::platform::ToUtf8(std::filesystem::current_path());
         runtime.SetFallbackWorkingDirectory(fallback_working_directory);
         auto instructions_loader =
                 std::make_shared<aiagent::agent::ProjectInstructionsLoader>(
@@ -481,7 +485,7 @@ int main(int argc, char** argv) {
         if (permissions_path.empty()) {
             std::filesystem::path fallback = db_path;
             fallback.replace_filename("permissions.json");
-            permissions_path = fallback.string();
+            permissions_path = aiagent::platform::ToUtf8(fallback);
         }
         auto permission_store =
                 std::make_shared<aiagent::permissions::PermissionStore>(permissions_path);
@@ -547,7 +551,7 @@ int main(int argc, char** argv) {
         if (bash_policy_path.empty()) {
             std::filesystem::path fallback = db_path;
             fallback.replace_filename("bash_policy.rules");
-            bash_policy_path = fallback.string();
+            bash_policy_path = aiagent::platform::ToUtf8(fallback);
         }
         aiagent::permissions::BashPolicy bash_policy;
         std::string bash_policy_error;
@@ -589,7 +593,7 @@ int main(int argc, char** argv) {
         if (trust_path.empty()) {
             std::filesystem::path fallback = db_path;
             fallback.replace_filename("trust.json");
-            trust_path = fallback.string();
+            trust_path = aiagent::platform::ToUtf8(fallback);
         }
         auto trust_store =
                 std::make_shared<aiagent::permissions::TrustStore>(trust_path);
@@ -597,7 +601,8 @@ int main(int argc, char** argv) {
 
         auto tools = std::make_shared<aiagent::tools::CompositeToolProvider>();
         tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
-                std::filesystem::current_path().string(), tools_config.sandbox_roots));
+                aiagent::platform::ToUtf8(std::filesystem::current_path()),
+                tools_config.sandbox_roots));
         runtime.SetToolProvider(tools);
 
         // MCP：优先读 [mcp] 配置；没有时依次尝试安装目录 share/de/mcp 与源码树
@@ -608,20 +613,39 @@ int main(int argc, char** argv) {
         if (parsed_mcp.has_value() && parsed_mcp->enabled) {
             mcp_config = *parsed_mcp;
         } else {
+            const auto path_exists = [](const std::string& path) {
+                if (path.empty()) {
+                    return false;
+                }
+                std::error_code ec;
+                return std::filesystem::exists(aiagent::platform::FromUtf8(path), ec) &&
+                       !ec;
+            };
+
             std::vector<std::string> binary_candidates;
             std::vector<std::string> plugin_candidates;
             if (!share_dir.empty()) {
-                binary_candidates.push_back(share_dir + "/mcp/mcp_server");
-                plugin_candidates.push_back(share_dir + "/mcp/plugins");
+                binary_candidates.push_back(
+                        aiagent::platform::ToUtf8(aiagent::platform::FromUtf8(share_dir) /
+                                                  "mcp" / "mcp_server"));
+                binary_candidates.push_back(
+                        aiagent::platform::ToUtf8(aiagent::platform::FromUtf8(share_dir) /
+                                                  "mcp" / "mcp_server.exe"));
+                plugin_candidates.push_back(
+                        aiagent::platform::ToUtf8(aiagent::platform::FromUtf8(share_dir) /
+                                                  "mcp" / "plugins"));
             }
             binary_candidates.push_back(
                     "vendor/mcp-extension-platform/build/mcp_server/mcp_server");
+            binary_candidates.push_back(
+                    "vendor/mcp-extension-platform/build/mcp_server/mcp_server.exe");
             plugin_candidates.push_back(
                     "vendor/mcp-extension-platform/mcp_server/plugins");
 
-            auto first_existing = [](const std::vector<std::string>& candidates) {
+            auto first_existing = [&path_exists](
+                                          const std::vector<std::string>& candidates) {
                 for (const auto& candidate : candidates) {
-                    if (std::filesystem::exists(candidate)) {
+                    if (path_exists(candidate)) {
                         return candidate;
                     }
                 }
@@ -637,7 +661,7 @@ int main(int argc, char** argv) {
             if (!options.mcp_python_path.empty()) {
                 mcp_config.python_path = options.mcp_python_path;
             }
-            mcp_config.enabled = std::filesystem::exists(mcp_config.binary);
+            mcp_config.enabled = path_exists(mcp_config.binary);
         }
 
         auto mcp_bridge = std::make_shared<aiagent::mcp::MCPClientBridge>();
@@ -1190,12 +1214,12 @@ int main(int argc, char** argv) {
                         return false;
                     }
                     const std::filesystem::path de_dir =
-                            std::filesystem::path(project_root) / ".de";
+                            aiagent::platform::FromUtf8(project_root) / ".de";
                     std::error_code ec;
                     std::filesystem::create_directories(de_dir, ec);
                     if (ec) {
                         if (error != nullptr) {
-                            *error = "cannot create " + de_dir.string();
+                            *error = "cannot create " + aiagent::platform::ToUtf8(de_dir);
                         }
                         return false;
                     }
@@ -1408,16 +1432,15 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        std::signal(SIGINT, OnSignal);
-        std::signal(SIGTERM, OnSignal);
+        aiagent::platform::InstallStopHandler(OnSignal);
 
         std::string banner_info = mcp_info;
         if (!agents_info.empty() && agents_info != "agents off") {
             banner_info += "  ·  " + agents_info;
         }
         PrintStartupBanner(config->model, options.port, options.web_port,
-                           db_path.string(), log_config.file, tools->ListTools().size(),
-                           banner_info);
+                           aiagent::platform::ToUtf8(db_path), log_config.file,
+                           tools->ListTools().size(), banner_info);
 
         while (!g_stop_requested) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));

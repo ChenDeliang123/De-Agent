@@ -1,5 +1,7 @@
 #include "aiagent/permissions/trust_store.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <json.hpp>
 
 #include <filesystem>
@@ -18,23 +20,25 @@ TrustStore::TrustStore(std::string path) : path_(std::move(path)) {
 
 std::string TrustStore::Canonicalize(const std::string& path) {
     std::error_code ec;
-    std::filesystem::path target(path);
+    std::filesystem::path target = platform::FromUtf8(path);
     if (!target.is_absolute()) {
         std::error_code abs_ec;
         target = std::filesystem::absolute(target, abs_ec);
         if (abs_ec) {
-            return target.lexically_normal().string();
+            return platform::NormalizePathKey(
+                    platform::ToUtf8(target.lexically_normal()));
         }
     }
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(target, ec);
     if (ec) {
-        return target.lexically_normal().string();
+        return platform::NormalizePathKey(
+                platform::ToUtf8(target.lexically_normal()));
     }
-    return canonical.string();
+    return platform::NormalizePathKey(platform::ToUtf8(canonical));
 }
 
 void TrustStore::Load() {
-    std::ifstream input(path_);
+    std::ifstream input(aiagent::platform::FromUtf8(path_));
     if (!input) {
         return;
     }
@@ -71,14 +75,14 @@ void TrustStore::SaveLocked() const {
     for (const auto& [key, trusted] : decisions_) {
         json["trust"][key] = trusted;
     }
-    const std::filesystem::path target(path_);
+    const std::filesystem::path target = aiagent::platform::FromUtf8(path_);
     std::error_code ec;
     if (target.has_parent_path()) {
         std::filesystem::create_directories(target.parent_path(), ec);
     }
-    const std::filesystem::path temp(path_ + ".tmp");
+    const std::filesystem::path temp = aiagent::platform::FromUtf8(path_ + ".tmp");
     {
-        std::ofstream output(temp, std::ios::trunc);
+        std::ofstream output(temp, std::ios::binary | std::ios::trunc);
         if (!output) {
             return;
         }
@@ -97,9 +101,10 @@ std::optional<bool> TrustStore::Resolve(const std::string& path) const {
     }
     const std::string canonical = Canonicalize(path);
     std::lock_guard<std::mutex> lock(mutex_);
-    std::filesystem::path candidate(canonical);
+    std::filesystem::path candidate = platform::FromUtf8(canonical);
     while (true) {
-        const auto it = decisions_.find(candidate.string());
+        const auto it =
+                decisions_.find(platform::NormalizePathKey(platform::ToUtf8(candidate)));
         if (it != decisions_.end()) {
             return it->second;
         }

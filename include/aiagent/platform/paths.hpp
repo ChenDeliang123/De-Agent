@@ -11,6 +11,12 @@ namespace aiagent::platform {
 // Windows 上禁止直接用 path.string() 处理用户路径（会走 ACP，可能丢字符）。
 std::filesystem::path FromUtf8(std::string_view text);
 std::string ToUtf8(const std::filesystem::path& path);
+// 模型可见路径统一用 '/' 分隔的 UTF-8。
+std::string ToGenericUtf8(const std::filesystem::path& path);
+// 点号前缀或 Windows FILE_ATTRIBUTE_HIDDEN。
+bool IsHiddenPath(const std::filesystem::path& path);
+// 权限/信任表的路径键：Windows 上统一分隔符并折叠 ASCII 大小写。
+std::string NormalizePathKey(std::string path);
 
 // 当前进程可执行文件路径；拿不到时返回空。
 std::string ExecutablePath();

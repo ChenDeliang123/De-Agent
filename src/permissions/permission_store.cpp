@@ -1,5 +1,7 @@
 #include "aiagent/permissions/permission_store.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <json.hpp>
 
 #include <chrono>
@@ -39,23 +41,25 @@ PermissionStore::PermissionStore(std::string path) : path_(std::move(path)) {
 
 std::string PermissionStore::Canonicalize(const std::string& path) {
     std::error_code ec;
-    std::filesystem::path target(path);
+    std::filesystem::path target = platform::FromUtf8(path);
     if (!target.is_absolute()) {
         std::error_code abs_ec;
         target = std::filesystem::absolute(target, abs_ec);
         if (abs_ec) {
-            return target.lexically_normal().string();
+            return platform::NormalizePathKey(
+                    platform::ToUtf8(target.lexically_normal()));
         }
     }
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(target, ec);
     if (ec) {
-        return target.lexically_normal().string();
+        return platform::NormalizePathKey(
+                platform::ToUtf8(target.lexically_normal()));
     }
-    return canonical.string();
+    return platform::NormalizePathKey(platform::ToUtf8(canonical));
 }
 
 void PermissionStore::Load() {
-    std::ifstream input(path_);
+    std::ifstream input(aiagent::platform::FromUtf8(path_));
     if (!input) {
         return;
     }
@@ -102,14 +106,14 @@ void PermissionStore::SaveLocked() const {
     for (const auto& [key, mode] : modes_) {
         json["paths"][key] = {{"mode", ModeName(mode)}, {"updated_at", NowIso8601()}};
     }
-    const std::filesystem::path target(path_);
+    const std::filesystem::path target = aiagent::platform::FromUtf8(path_);
     std::error_code ec;
     if (target.has_parent_path()) {
         std::filesystem::create_directories(target.parent_path(), ec);
     }
-    const std::filesystem::path temp(path_ + ".tmp");
+    const std::filesystem::path temp = aiagent::platform::FromUtf8(path_ + ".tmp");
     {
-        std::ofstream output(temp, std::ios::trunc);
+        std::ofstream output(temp, std::ios::binary | std::ios::trunc);
         if (!output) {
             return;
         }
@@ -130,9 +134,10 @@ std::optional<PermissionEntry> PermissionStore::Resolve(const std::string& path)
     const std::string canonical = Canonicalize(path);
     std::lock_guard<std::mutex> lock(mutex_);
 
-    std::filesystem::path candidate(canonical);
+    std::filesystem::path candidate = platform::FromUtf8(canonical);
     while (true) {
-        const std::string key = candidate.string();
+        const std::string key =
+                platform::NormalizePathKey(platform::ToUtf8(candidate));
         const auto it = modes_.find(key);
         if (it != modes_.end()) {
             const bool exact = (key == canonical);

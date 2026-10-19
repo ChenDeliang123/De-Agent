@@ -82,17 +82,6 @@ add_subdirectory("${AIAGENT_A2A_SOURCE_DIR}" a2a-protocol)
 # ---------------------------------------------------------------------------
 # 本项目核心库
 # ---------------------------------------------------------------------------
-add_library(aiagent_log STATIC src/log.cpp)
-target_include_directories(aiagent_log PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-# 生成的 version.hpp 通过 aiagent_version 传递到所有下游目标。
-target_link_libraries(aiagent_log PUBLIC aiagent_version)
-
-if(MSVC)
-  target_compile_options(aiagent_log PRIVATE /W4 /permissive-)
-else()
-  target_compile_options(aiagent_log PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
 # 平台层：UTF-8 路径/环境变量 + 子进程（POSIX/Windows 各一份实现）。
 if(WIN32)
   set(AIAGENT_PLATFORM_PROCESS_SOURCE src/platform/process_win.cpp)
@@ -101,6 +90,7 @@ else()
 endif()
 
 add_library(aiagent_platform STATIC
+  src/platform/console.cpp
   src/platform/paths.cpp
   ${AIAGENT_PLATFORM_PROCESS_SOURCE}
 )
@@ -111,6 +101,17 @@ if(MSVC)
   target_compile_options(aiagent_platform PRIVATE /W4 /permissive-)
 else()
   target_compile_options(aiagent_platform PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(aiagent_log STATIC src/log.cpp)
+target_include_directories(aiagent_log PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# 生成的 version.hpp 通过 aiagent_version 传递到所有下游目标。
+target_link_libraries(aiagent_log PUBLIC aiagent_version aiagent_platform)
+
+if(MSVC)
+  target_compile_options(aiagent_log PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_log PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 add_library(aiagent_llm STATIC

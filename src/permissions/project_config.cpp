@@ -1,5 +1,7 @@
 #include "aiagent/permissions/project_config.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <filesystem>
 #include <system_error>
 
@@ -10,9 +12,9 @@ std::string FindProjectRoot(const std::string& cwd, bool fallback_to_cwd) {
         return {};
     }
     std::error_code ec;
-    std::filesystem::path dir = std::filesystem::weakly_canonical(cwd, ec);
+    std::filesystem::path dir = std::filesystem::weakly_canonical(aiagent::platform::FromUtf8(cwd), ec);
     if (ec) {
-        dir = std::filesystem::absolute(cwd, ec);
+        dir = std::filesystem::absolute(aiagent::platform::FromUtf8(cwd), ec);
         if (ec) {
             return {};
         }
@@ -21,7 +23,7 @@ std::string FindProjectRoot(const std::string& cwd, bool fallback_to_cwd) {
     std::filesystem::path current = dir;
     while (true) {
         if (std::filesystem::exists(current / ".git", ec)) {
-            return current.string();
+            return aiagent::platform::ToUtf8(current);
         }
         const std::filesystem::path parent = current.parent_path();
         if (parent.empty() || parent == current) {
@@ -32,10 +34,10 @@ std::string FindProjectRoot(const std::string& cwd, bool fallback_to_cwd) {
 
     // 非 git 项目：init 时直接认 cwd；读取时只在 cwd 已有 .de/ 时认。
     if (fallback_to_cwd) {
-        return dir.string();
+        return aiagent::platform::ToUtf8(dir);
     }
     if (std::filesystem::is_directory(dir / ".de", ec)) {
-        return dir.string();
+        return aiagent::platform::ToUtf8(dir);
     }
     return {};
 }
@@ -45,7 +47,7 @@ std::shared_ptr<const ProjectConfig> ProjectConfigCache::Get(const std::string& 
     if (root.empty()) {
         return nullptr;
     }
-    const std::filesystem::path de_dir = std::filesystem::path(root) / ".de";
+    const std::filesystem::path de_dir = aiagent::platform::FromUtf8(root) / ".de";
     std::error_code ec;
     if (!std::filesystem::is_directory(de_dir, ec)) {
         return nullptr;
@@ -63,13 +65,13 @@ std::shared_ptr<const ProjectConfig> ProjectConfigCache::Get(const std::string& 
     const std::filesystem::path permissions_file = de_dir / "permissions.json";
     if (std::filesystem::exists(permissions_file, ec)) {
         config->permissions =
-                std::make_shared<PermissionStore>(permissions_file.string());
+                std::make_shared<PermissionStore>(aiagent::platform::ToUtf8(permissions_file));
     }
 
     const std::filesystem::path bash_file = de_dir / "bash_policy.rules";
     if (std::filesystem::exists(bash_file, ec)) {
         BashPolicy policy;
-        if (LoadBashPolicyFile(bash_file.string(), &policy, nullptr)) {
+        if (LoadBashPolicyFile(aiagent::platform::ToUtf8(bash_file), &policy, nullptr)) {
             config->bash_policy = std::make_shared<const BashPolicy>(std::move(policy));
         }
     }

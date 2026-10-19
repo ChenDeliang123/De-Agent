@@ -119,6 +119,44 @@ std::string ToUtf8(const std::filesystem::path& path) {
 #endif
 }
 
+std::string ToGenericUtf8(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const std::u8string utf8 = path.generic_u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+#else
+    return path.generic_string();
+#endif
+}
+
+std::string NormalizePathKey(std::string path) {
+#ifdef _WIN32
+    std::replace(path.begin(), path.end(), '/', '\\');
+    for (char& c : path) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+#endif
+    return path;
+}
+
+bool IsHiddenPath(const std::filesystem::path& path) {
+    const std::filesystem::path name = path.filename();
+    if (name.empty()) {
+        return false;
+    }
+#ifdef _WIN32
+    if (name.native().front() == L'.') {
+        return true;
+    }
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+#else
+    return name.native().front() == '.';
+#endif
+}
+
 std::string ExecutablePath() {
 #ifdef _WIN32
     std::vector<wchar_t> buffer(MAX_PATH);

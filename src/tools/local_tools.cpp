@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -14,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "aiagent/platform/paths.hpp"
 #include "aiagent/tools/run_command.hpp"
 #include "aiagent/log.hpp"
 
@@ -97,7 +99,7 @@ std::string ReadSliced(const std::string& content, const nlohmann::json& argumen
 }
 
 std::string ReadFile(const std::string& path, bool* ok, std::string* error) {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(aiagent::platform::FromUtf8(path), std::ios::binary);
     if (!input) {
         *ok = false;
         *error = "cannot open file: " + path;
@@ -111,6 +113,14 @@ std::string ReadFile(const std::string& path, bool* ok, std::string* error) {
 
 // child 是否位于 root 之内（或等于 root）。按路径分量比较，
 // 避免 /foo 误判 /foobar。
+bool PathComponentEqual(const fs::path& left, const fs::path& right) {
+#ifdef _WIN32
+    return _wcsicmp(left.c_str(), right.c_str()) == 0;
+#else
+    return left == right;
+#endif
+}
+
 bool IsWithin(const fs::path& child, const fs::path& root) {
     if (root.empty()) {
         return false;
@@ -118,7 +128,8 @@ bool IsWithin(const fs::path& child, const fs::path& root) {
     auto root_it = root.begin();
     auto child_it = child.begin();
     for (; root_it != root.end(); ++root_it, ++child_it) {
-        if (child_it == child.end() || *child_it != *root_it) {
+        if (child_it == child.end() ||
+            !PathComponentEqual(*child_it, *root_it)) {
             return false;
         }
     }
@@ -136,6 +147,14 @@ fs::path CanonicalOrNormal(const fs::path& path) {
 }
 
 // ---------- 只读检索工具（ls / glob / grep）的公共实现 ----------
+
+std::string NormalizeGlobPattern(std::string pattern) {
+#ifdef _WIN32
+    // 模型/用户可能写 `**\*.cpp`；统一成模型可见的 '/' 形式。
+    std::replace(pattern.begin(), pattern.end(), '\\', '/');
+#endif
+    return pattern;
+}
 
 // 把 glob（`*` / `?` / `**`，以 '/' 分隔）编译成锚定的 ECMAScript 正则源：
 // `**` 匹配任意多段（含 0 段），`*` / `?` 只在单个路径段内匹配。
@@ -193,15 +212,15 @@ bool WalkTree(const fs::path& dir, const fs::path& relative, int depth, int max_
 
     std::vector<fs::directory_entry> children;
     for (const fs::directory_entry& entry : iterator) {
-        const std::string name = entry.path().filename().string();
-        if (!name.empty() && name[0] == '.') {
+        if (aiagent::platform::IsHiddenPath(entry.path())) {
             continue;
         }
         children.push_back(entry);
     }
     std::sort(children.begin(), children.end(),
               [](const fs::directory_entry& a, const fs::directory_entry& b) {
-                  return a.path().filename().string() < b.path().filename().string();
+                  return aiagent::platform::ToGenericUtf8(a.path().filename()) <
+                         aiagent::platform::ToGenericUtf8(b.path().filename());
               });
 
     for (const fs::directory_entry& child : children) {
@@ -229,7 +248,8 @@ bool WalkTree(const fs::path& dir, const fs::path& relative, int depth, int max_
 // 检索根必须存在且是目录。
 bool CheckSearchRoot(const std::string& path, std::string* error) {
     std::error_code status_error;
-    const fs::file_status status = fs::status(path, status_error);
+    const fs::file_status status =
+            fs::status(aiagent::platform::FromUtf8(path), status_error);
     if (status_error || !fs::exists(status)) {
         *error = "path does not exist: " + path;
         return false;
@@ -293,9 +313,9 @@ ToolExecutionResult RunLs(const std::string& root, const nlohmann::json& argumen
 
     std::vector<std::string> lines;
     bool truncated = false;
-    WalkTree(root, fs::path(), 0, static_cast<int>(depth),
+    WalkTree(aiagent::platform::FromUtf8(root), fs::path(), 0, static_cast<int>(depth),
              [&](const fs::path&, const fs::path& relative, bool is_dir, bool) {
-                 std::string line = relative.generic_string();
+                 std::string line = aiagent::platform::ToGenericUtf8(relative);
                  if (is_dir) {
                      line += '/';
                  }
@@ -327,9 +347,11 @@ ToolExecutionResult RunGlob(const std::string& root, const std::string& pattern,
         return result;
     }
 
+    const std::string normalized_pattern = NormalizeGlobPattern(pattern);
     std::regex expression;
     try {
-        expression.assign(GlobToRegexSource(pattern), std::regex_constants::ECMAScript);
+        expression.assign(GlobToRegexSource(normalized_pattern),
+                          std::regex_constants::ECMAScript);
     } catch (const std::regex_error& regex_error) {
         result.error = "invalid glob pattern: " + pattern + " (" + regex_error.what() + ")";
         return result;
@@ -346,12 +368,12 @@ ToolExecutionResult RunGlob(const std::string& root, const std::string& pattern,
 
     std::vector<std::string> matches;
     bool truncated = false;
-    WalkTree(root, fs::path(), 0, 0,
+    WalkTree(aiagent::platform::FromUtf8(root), fs::path(), 0, 0,
              [&](const fs::path&, const fs::path& relative, bool, bool is_file) {
                  if (!is_file) {
                      return true;
                  }
-                 const std::string relative_text = relative.generic_string();
+                 const std::string relative_text = aiagent::platform::ToGenericUtf8(relative);
                  if (!std::regex_search(relative_text, expression)) {
                      return true;
                  }
@@ -414,7 +436,8 @@ ToolExecutionResult RunGrep(const std::string& root, const std::string& pattern,
             literal && ignore_case ? ToLowerAscii(pattern) : std::string();
 
     // include：不含 '/' 时按文件名匹配，否则按相对路径匹配。
-    const std::string include = arguments.value("include", std::string());
+    const std::string include =
+            NormalizeGlobPattern(arguments.value("include", std::string()));
     bool include_on_basename = false;
     std::regex include_expression;
     if (!include.empty()) {
@@ -437,15 +460,15 @@ ToolExecutionResult RunGrep(const std::string& root, const std::string& pattern,
 
     std::vector<std::string> matches;
     bool truncated = false;
-    WalkTree(root, fs::path(), 0, 0,
+    WalkTree(aiagent::platform::FromUtf8(root), fs::path(), 0, 0,
              [&](const fs::path& absolute, const fs::path& relative, bool, bool is_file) {
                  if (!is_file) {
                      return true;
                  }
-                 const std::string relative_text = relative.generic_string();
+                 const std::string relative_text = aiagent::platform::ToGenericUtf8(relative);
                  if (!include.empty()) {
                      const std::string target = include_on_basename
-                                                        ? relative.filename().generic_string()
+                                                        ? aiagent::platform::ToGenericUtf8(relative.filename())
                                                         : relative_text;
                      if (!std::regex_search(target, include_expression)) {
                          return true;
@@ -539,16 +562,17 @@ bool LocalCodingTools::ResolvePath(const std::string& path,
         return false;
     }
 
-    const fs::path base =
-            working_directory.empty() ? fs::path(cwd_) : fs::path(working_directory);
-    fs::path target(path);
+    const fs::path base = working_directory.empty()
+                                  ? aiagent::platform::FromUtf8(cwd_)
+                                  : aiagent::platform::FromUtf8(working_directory);
+    fs::path target = aiagent::platform::FromUtf8(path);
     if (!target.is_absolute()) {
         target = base / target;
     }
     const fs::path effective = CanonicalOrNormal(target);
 
     if (policy.allow_outside) {
-        *resolved = effective.string();
+        *resolved = aiagent::platform::ToUtf8(effective);
         return true;
     }
 
@@ -558,7 +582,7 @@ bool LocalCodingTools::ResolvePath(const std::string& path,
         if (extra.empty()) {
             continue;
         }
-        fs::path root(extra);
+        fs::path root = aiagent::platform::FromUtf8(extra);
         if (!root.is_absolute()) {
             root = base / root;
         }
@@ -567,7 +591,7 @@ bool LocalCodingTools::ResolvePath(const std::string& path,
 
     for (const fs::path& root : roots) {
         if (IsWithin(effective, root)) {
-            *resolved = effective.string();
+            *resolved = aiagent::platform::ToUtf8(effective);
             return true;
         }
     }
@@ -649,16 +673,17 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     llm::ToolSpec bash;
     bash.name = "bash";
     bash.description =
-            "Execute a bash command in the working directory. Returns combined stdout and "
-            "stderr, truncated to the last 2000 lines or 50KB. Optionally provide a timeout "
-            "in seconds (default 60). For aggregation tasks (line or file counts, size or "
-            "symbol statistics, enumerating matches) prefer ONE pipeline that prints the "
-            "summary (e.g. `git ls-files | xargs wc -l`) over several small commands or a "
-            "helper script.";
+            "Execute a shell command in the working directory. POSIX uses /bin/sh -c; "
+            "Windows uses cmd.exe /d /s /c. Returns combined stdout and stderr, truncated "
+            "to the last 2000 lines or 50KB. Optionally provide a timeout in seconds "
+            "(default 60). For aggregation tasks (line or file counts, size or symbol "
+            "statistics, enumerating matches) prefer ONE pipeline that prints the summary "
+            "(e.g. `git ls-files | xargs wc -l`) over several small commands or a helper "
+            "script.";
     bash.parameters = {{"type", "object"},
                        {"properties",
                         {{"command", {{"type", "string"},
-                                      {"description", "Bash command to execute"}}},
+                                      {"description", "Shell command to execute"}}},
                          {"timeout", {{"type", "integer"},
                                       {"description", "Timeout in seconds (optional, default 60)"}}}}},
                        {"required", json::array({"command"})}};
@@ -668,7 +693,7 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     ls.description =
             "List a directory tree. Entries are paths relative to the listed root (directories "
             "end with '/'), sorted by name within each level. Hidden files and directories "
-            "(names starting with '.') are skipped. Depth is clamped to 1..4 (default 2) and at "
+            "(dot-prefix or Windows hidden attribute) are skipped. Depth is clamped to 1..4 (default 2) and at "
             "most 200 entries are returned (default).";
     ls.parameters = {{"type", "object"},
                      {"properties",
@@ -686,7 +711,7 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     glob.description =
             "Find files by glob pattern ('*', '?' and '**' are supported; '**' also matches zero "
             "path segments). Only files are returned, as sorted paths relative to the search "
-            "root. Hidden files and directories (names starting with '.') are skipped. At most "
+            "root. Hidden files and directories (dot-prefix or Windows hidden attribute) are skipped. At most "
             "200 matches (default) are returned and output is truncated to 50KB.";
     glob.parameters = {{"type", "object"},
                        {"properties",
@@ -704,8 +729,9 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     grep.description =
             "Search file contents line by line under a directory. By default pattern is an "
             "ECMAScript regular expression; set literal=true for plain substring matching. "
-            "Hidden files and directories (names starting with '.') are skipped, as are binary "
-            "files and files larger than 1MB. Results are reported as 'path:line: content' "
+            "Hidden files and directories (dot-prefix or Windows hidden attribute) are "
+            "skipped, as are binary files and files larger than 1MB. Results are reported as "
+            "'path:line: content' "
             "(content truncated to 500 characters); at most 100 results (default) are returned "
             "and output is truncated to 50KB.";
     grep.parameters = {
@@ -779,7 +805,7 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
                                      "tool=write path=" + path +
                                              " event=start content_bytes=" +
                                              std::to_string(content.size()));
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        std::ofstream output(aiagent::platform::FromUtf8(path), std::ios::binary | std::ios::trunc);
         if (!output) {
             result.error = "cannot open file for write: " + path;
             return result;
@@ -908,7 +934,7 @@ ToolExecutionResult LocalCodingTools::Execute(const std::string& name,
             updated.replace(span.start, span.end - span.start,
                             blocks[span.block].new_text);
         }
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        std::ofstream output(aiagent::platform::FromUtf8(path), std::ios::binary | std::ios::trunc);
         if (!output) {
             result.error = "cannot open file for write: " + path;
             return result;

@@ -1,5 +1,7 @@
 #include "aiagent/agent/session_meta_store.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <json.hpp>
 
 #include <filesystem>
@@ -17,7 +19,7 @@ SessionMetaStore::SessionMetaStore(std::string path) : path_(std::move(path)) {
 }
 
 void SessionMetaStore::Load() {
-    std::ifstream input(path_);
+    std::ifstream input(aiagent::platform::FromUtf8(path_));
     if (!input) {
         return;
     }
@@ -64,14 +66,14 @@ void SessionMetaStore::SaveLocked() const {
     for (const auto& [session_id, cwd] : cwds_) {
         json["cwds"][session_id] = cwd;
     }
-    const std::filesystem::path target(path_);
+    const std::filesystem::path target = aiagent::platform::FromUtf8(path_);
     std::error_code ec;
     if (target.has_parent_path()) {
         std::filesystem::create_directories(target.parent_path(), ec);
     }
-    const std::filesystem::path temp = std::filesystem::path(path_ + ".tmp");
+    const std::filesystem::path temp = aiagent::platform::FromUtf8(path_ + ".tmp");
     {
-        std::ofstream output(temp, std::ios::trunc);
+        std::ofstream output(temp, std::ios::binary | std::ios::trunc);
         if (!output) {
             return;
         }

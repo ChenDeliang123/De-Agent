@@ -1,5 +1,7 @@
 #include "aiagent/log.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <cctype>
 #include <chrono>
 #include <ctime>
@@ -98,11 +100,11 @@ public:
         }
         file_path_ = file_path;
         if (!file_path_.empty()) {
-            const std::filesystem::path path(file_path_);
+            const std::filesystem::path path = aiagent::platform::FromUtf8(file_path_);
             if (path.has_parent_path()) {
                 std::filesystem::create_directories(path.parent_path());
             }
-            file_stream_.open(file_path_, std::ios::app);
+            file_stream_.open(path, std::ios::app | std::ios::binary);
         }
     }
 
@@ -144,21 +146,21 @@ private:
         }
         file_stream_.close();
 
-        const std::filesystem::path path(file_path_);
+        const std::filesystem::path path = aiagent::platform::FromUtf8(file_path_);
         for (int i = max_files_ - 1; i >= 1; --i) {
-            const auto from = std::filesystem::path(file_path_ + "." + std::to_string(i));
-            const auto to = std::filesystem::path(file_path_ + "." + std::to_string(i + 1));
+            const auto from = aiagent::platform::FromUtf8(file_path_ + "." + std::to_string(i));
+            const auto to = aiagent::platform::FromUtf8(file_path_ + "." + std::to_string(i + 1));
             std::error_code error;
             std::filesystem::remove(to, error);
             if (std::filesystem::exists(from)) {
                 std::filesystem::rename(from, to, error);
             }
         }
-        const auto rotated = std::filesystem::path(file_path_ + ".1");
+        const auto rotated = aiagent::platform::FromUtf8(file_path_ + ".1");
         std::error_code error;
         std::filesystem::remove(rotated, error);
         std::filesystem::rename(path, rotated, error);
-        file_stream_.open(file_path_, std::ios::trunc);
+        file_stream_.open(path, std::ios::trunc | std::ios::binary);
     }
 
     mutable std::mutex mutex_;

@@ -297,9 +297,14 @@ std::unique_ptr<ChildProcess> ChildProcess::Start(const ProcessOptions& options,
             stderr_write = nul;
             break;
         }
-        case StderrMode::kInherit:
+        case StderrMode::kInherit: {
             stderr_write = GetStdHandle(STD_ERROR_HANDLE);
-            if (stderr_write == nullptr || stderr_write == INVALID_HANDLE_VALUE) {
+            DWORD inherited_flags = 0;
+            const bool inheritable =
+                    stderr_write != nullptr && stderr_write != INVALID_HANDLE_VALUE &&
+                    GetHandleInformation(stderr_write, &inherited_flags) != 0 &&
+                    (inherited_flags & HANDLE_FLAG_INHERIT) != 0;
+            if (!inheritable) {
                 SECURITY_ATTRIBUTES attributes{};
                 attributes.nLength = sizeof(attributes);
                 attributes.bInheritHandle = TRUE;
@@ -309,6 +314,7 @@ std::unique_ptr<ChildProcess> ChildProcess::Start(const ProcessOptions& options,
                 stderr_write = nul;
             }
             break;
+        }
     }
 
     std::wstring command_line;

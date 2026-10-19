@@ -1,5 +1,7 @@
 #include "aiagent/agent/sub_agent.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -60,7 +62,7 @@ BackgroundState TerminalStateFor(const SubAgentResult& result) {
 }
 
 bool ReadTextFile(const std::string& path, std::string* content, std::string* error) {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(aiagent::platform::FromUtf8(path), std::ios::binary);
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open agent prompt file: " + path;

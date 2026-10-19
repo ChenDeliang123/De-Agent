@@ -43,7 +43,8 @@ jobs:
           }
           Push-Location $env:RUNNER_TEMP
           try {
-            & (Join-Path $root "vcpkg.exe") install "curl[core,ssl]:x64-windows-static"
+            & (Join-Path $root "vcpkg.exe") install "curl[core,ssl]:x64-windows-static" 2>&1 |
+              Tee-Object -FilePath "$env:RUNNER_TEMP\vcpkg.log"
             if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
           } finally {
             Pop-Location
@@ -73,6 +74,28 @@ jobs:
             Tee-Object -FilePath build-release/windows-a2a/test.log
           $code = $LASTEXITCODE
           if ($code -ne 0) { exit $code }
+
+
+      - name: Emit failure annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $emitted = 0
+          $logs = @("build-release/windows-a2a/build.log", "build-release/windows-a2a/test.log", "$env:RUNNER_TEMP\vcpkg.log")
+          foreach ($log in $logs) {
+            if (-not (Test-Path $log)) { continue }
+            $lines = Get-Content $log -Tail 200 | Where-Object {
+              $_ -match '(?i)\berror\b|LNK\d+|C\d{4}|FAILED|错误|失败'
+            }
+            if (-not $lines) { $lines = Get-Content $log -Tail 5 }
+            foreach ($line in $lines) {
+              if ($emitted -ge 10) { break }
+              $text = ($line -replace "`r", "")
+              if ($text.Length -gt 350) { $text = $text.Substring(0, 350) }
+              Write-Output "::error::$text"
+              $emitted++
+            }
+          }
 
       - name: Upload logs
         if: failure()
@@ -126,6 +149,28 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 0) { exit $code }
 
+
+      - name: Emit failure annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $emitted = 0
+          $logs = @("build-release/windows-root/build.log", "build-release/windows-root/test.log")
+          foreach ($log in $logs) {
+            if (-not (Test-Path $log)) { continue }
+            $lines = Get-Content $log -Tail 200 | Where-Object {
+              $_ -match '(?i)\berror\b|LNK\d+|C\d{4}|FAILED|错误|失败'
+            }
+            if (-not $lines) { $lines = Get-Content $log -Tail 5 }
+            foreach ($line in $lines) {
+              if ($emitted -ge 10) { break }
+              $text = ($line -replace "`r", "")
+              if ($text.Length -gt 350) { $text = $text.Substring(0, 350) }
+              Write-Output "::error::$text"
+              $emitted++
+            }
+          }
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -166,6 +211,28 @@ jobs:
             Tee-Object -FilePath build-release/full-app/build.log
           $code = $LASTEXITCODE
           if ($code -ne 0) { exit $code }
+
+
+      - name: Emit failure annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $emitted = 0
+          $logs = @("build-release/full-app/build.log")
+          foreach ($log in $logs) {
+            if (-not (Test-Path $log)) { continue }
+            $lines = Get-Content $log -Tail 200 | Where-Object {
+              $_ -match '(?i)\berror\b|LNK\d+|C\d{4}|FAILED|错误|失败'
+            }
+            if (-not $lines) { $lines = Get-Content $log -Tail 5 }
+            foreach ($line in $lines) {
+              if ($emitted -ge 10) { break }
+              $text = ($line -replace "`r", "")
+              if ($text.Length -gt 350) { $text = $text.Substring(0, 350) }
+              Write-Output "::error::$text"
+              $emitted++
+            }
+          }
 
       - name: Upload build log
         if: failure()

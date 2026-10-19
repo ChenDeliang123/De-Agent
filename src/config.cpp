@@ -1,5 +1,7 @@
 #include "aiagent/config.hpp"
 
+#include "aiagent/platform/paths.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -167,7 +169,7 @@ std::optional<DeepSeekConfig> ParseDeepSeekConfig(const std::string& content,
 
 std::optional<DeepSeekConfig> LoadDeepSeekConfigFile(const std::string& path,
                                                      std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -259,7 +261,7 @@ std::optional<MCPConfig> ParseMCPConfig(const std::string& content, std::string*
 }
 
 std::optional<MCPConfig> LoadMCPConfigFile(const std::string& path, std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -339,7 +341,7 @@ std::optional<LogConfig> ParseLogConfig(const std::string& content, std::string*
 }
 
 std::optional<LogConfig> LoadLogConfigFile(const std::string& path, std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -470,7 +472,7 @@ std::optional<CompactionConfig> ParseCompactionConfig(const std::string& content
 
 std::optional<CompactionConfig> LoadCompactionConfigFile(const std::string& path,
                                                          std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -578,7 +580,7 @@ std::optional<InstructionsConfig> ParseInstructionsConfig(const std::string& con
 
 std::optional<InstructionsConfig> LoadInstructionsConfigFile(const std::string& path,
                                                              std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -646,7 +648,7 @@ std::optional<ToolsConfig> ParseToolsConfig(const std::string& content,
 
 std::optional<ToolsConfig> LoadToolsConfigFile(const std::string& path,
                                                std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -700,7 +702,7 @@ std::optional<StorageConfig> ParseStorageConfig(const std::string& content,
 
 std::optional<StorageConfig> LoadStorageConfigFile(const std::string& path,
                                                    std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -772,7 +774,7 @@ std::optional<PermissionsConfig> ParsePermissionsConfig(const std::string& conte
 
 std::optional<PermissionsConfig> LoadPermissionsConfigFile(const std::string& path,
                                                            std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;
@@ -913,7 +915,7 @@ std::optional<AgentsConfig> ParseAgentsConfig(const std::string& content, std::s
 }
 
 std::optional<AgentsConfig> LoadAgentsConfigFile(const std::string& path, std::string* error) {
-    std::ifstream input(path);
+    std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
             *error = "cannot open config file: " + path;

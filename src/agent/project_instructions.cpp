@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "aiagent/log.hpp"
+#include "aiagent/platform/paths.hpp"
 
 namespace aiagent::agent {
 namespace {
@@ -33,7 +34,7 @@ fs::path NormalizeDirectory(const std::string& value) {
     }
 
     std::error_code ec;
-    fs::path path(value);
+    fs::path path = aiagent::platform::FromUtf8(value);
     if (!path.is_absolute()) {
         path = fs::absolute(path, ec);
         if (ec) {
@@ -184,7 +185,7 @@ bool ProjectInstructionsLoader::ReadFileCached(const fs::path& path, std::string
         return false;
     }
 
-    const std::string key = path.string();
+    const std::string key = aiagent::platform::ToUtf8(path);
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const auto it = cache_.find(key);
@@ -242,13 +243,15 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         if (ec || !fs::exists(symlink_status)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kDebug, "instructions",
-                    "event=instructions_skip path=" + path.string() + " reason=missing");
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) + " reason=missing");
             continue;
         }
         if (fs::is_symlink(symlink_status) && !config_.agents_md_follow_symlinks) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() + " reason=symlink");
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) + " reason=symlink");
             continue;
         }
 
@@ -257,7 +260,9 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         if (ec || !fs::is_regular_file(status)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() + " reason=not_regular_file");
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) +
+                            " reason=not_regular_file");
             continue;
         }
 
@@ -266,9 +271,11 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         bool cache_hit = false;
         std::string read_error;
         if (!ReadFileCached(path, &content, &binary, &cache_hit, &read_error)) {
-            aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
-                                         "event=instructions_skip path=" + path.string() +
-                                                 " reason=read_error error=" + read_error);
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "instructions",
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) +
+                            " reason=read_error error=" + read_error);
             continue;
         }
         if (cache_hit) {
@@ -279,13 +286,15 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         if (binary) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() + " reason=binary");
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) + " reason=binary");
             continue;
         }
         if (content.empty()) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kDebug, "instructions",
-                    "event=instructions_skip path=" + path.string() + " reason=empty");
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) + " reason=empty");
             continue;
         }
 
@@ -295,7 +304,9 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         if (remaining == 0) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" + path.string() + " reason=total_bytes_limit");
+                    "event=instructions_skip path=" +
+                            aiagent::platform::ToUtf8(path) +
+                            " reason=total_bytes_limit");
             continue;
         }
 
@@ -306,7 +317,7 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
             content = TruncateUtf8(content, limit);
             truncated = true;
             aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
-                                         "event=instructions_truncate path=" + path.string() +
+                                         "event=instructions_truncate path=" + aiagent::platform::ToUtf8(path) +
                                                  " limit=" + std::to_string(limit) +
                                                  " actual=" + std::to_string(original_size));
             content += "\n[... truncated: " + std::to_string(original_size - content.size()) +
@@ -317,7 +328,7 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         }
 
         used_bytes += content.size();
-        files.push_back(InstructionFile{path.string(), content, truncated});
+        files.push_back(InstructionFile{aiagent::platform::ToUtf8(path), content, truncated});
     }
 
     if (files.empty()) {
@@ -332,7 +343,7 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
     loaded.rendered = RenderInstructions(loaded, config_.agents_md_file_name);
 
     aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "instructions",
-                                 "event=instructions_load cwd=" + start.string() +
+                                 "event=instructions_load cwd=" + aiagent::platform::ToUtf8(start) +
                                          " files=" + std::to_string(loaded.files.size()) +
                                          " bytes=" + std::to_string(loaded.total_bytes) +
                                          " cache_hits=" + std::to_string(loaded.cache_hits) +
