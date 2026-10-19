@@ -1,32 +1,28 @@
 #include "aiagent/tools/run_command.hpp"
+
 #include "aiagent/log.hpp"
+#include "aiagent/platform/paths.hpp"
+#include "aiagent/platform/process.hpp"
 
-#include <cerrno>
+#include <algorithm>
 #include <chrono>
-#include <csignal>
-#include <cstring>
 #include <string>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#include <poll.h>
 
 namespace aiagent::tools {
 namespace {
 
-constexpr size_t kMaxCaptureBytes = 4 * 1024 * 1024;  // 内存累积上限，防无限输出
-constexpr size_t kMaxTailBytes = 50 * 1024;           // 回传模型的尾部截断上限
+constexpr std::size_t kMaxCaptureBytes = 4 * 1024 * 1024;  // 内存累积上限，防无限输出
+constexpr std::size_t kMaxTailBytes = 50 * 1024;           // 回传模型的尾部截断上限
 constexpr int kMaxTailLines = 2000;
 
 // 只保留尾部若干行；超出再按字节截断（不切半个 UTF-8 序列）。
 std::string TruncateTail(const std::string& text) {
-    size_t line_count = 0;
-    size_t keep_start = 0;  // 默认保留全部
-    for (size_t i = text.size(); i > 0; --i) {
+    std::size_t line_count = 0;
+    std::size_t keep_start = 0;  // 默认保留全部
+    for (std::size_t i = text.size(); i > 0; --i) {
         if (text[i - 1] == '\n') {
             ++line_count;
-            if (line_count > static_cast<size_t>(kMaxTailLines)) {
+            if (line_count > static_cast<std::size_t>(kMaxTailLines)) {
                 keep_start = i;
                 break;
             }
@@ -34,13 +30,28 @@ std::string TruncateTail(const std::string& text) {
     }
     std::string tail = text.substr(keep_start);
     if (tail.size() > kMaxTailBytes) {
-        size_t start = tail.size() - kMaxTailBytes;
-        while (start < tail.size() && (static_cast<unsigned char>(tail[start]) & 0xC0) == 0x80) {
+        std::size_t start = tail.size() - kMaxTailBytes;
+        while (start < tail.size() &&
+               (static_cast<unsigned char>(tail[start]) & 0xC0) == 0x80) {
             ++start;
         }
         tail = "..." + tail.substr(start);
     }
     return tail;
+}
+
+platform::ProcessOptions ShellOptions(const std::string& command) {
+    platform::ProcessOptions options;
+#ifdef _WIN32
+    // cmd 的 /s + 外层引号规则：命令原文交给 cmd 解析，避免逐参数转义破坏
+    // &&、|、>、%VAR% 等语法。
+    options.argv = {"cmd.exe"};
+    options.raw_command_line = "cmd.exe /d /s /c " + command;
+#else
+    options.argv = {"/bin/sh", "-c", command};
+#endif
+    options.stderr_mode = platform::StderrMode::kMergeToStdout;
+    return options;
 }
 
 }  // namespace
@@ -54,36 +65,19 @@ CommandResult RunCommand(const std::string& command, const std::string& cwd,
             "tool=bash event=start command_bytes=" + std::to_string(command.size()) +
                     " cwd=" + cwd + " timeout=" + std::to_string(timeout_seconds));
 
-    int pipe_fds[2];
-    if (pipe(pipe_fds) != 0) {
-        result.error = "failed to create pipe: " + std::string(std::strerror(errno));
+    platform::ProcessOptions options = ShellOptions(command);
+    options.cwd = cwd;
+
+    std::string start_error;
+    std::unique_ptr<platform::ChildProcess> process =
+            platform::ChildProcess::Start(options, &start_error);
+    if (!process) {
+        result.error = start_error;
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kError, "tools",
+                "tool=bash event=end ok=false error=" + start_error);
         return result;
     }
-
-    const pid_t pid = fork();
-    if (pid < 0) {
-        close(pipe_fds[0]);
-        close(pipe_fds[1]);
-        result.error = "failed to fork: " + std::string(std::strerror(errno));
-        return result;
-    }
-
-    if (pid == 0) {
-        // 子进程：独立进程组（便于超时整组清理），stdout/stderr 都汇入管道。
-        setpgid(0, 0);
-        if (!cwd.empty()) {
-            (void)chdir(cwd.c_str());
-        }
-        dup2(pipe_fds[1], STDOUT_FILENO);
-        dup2(pipe_fds[1], STDERR_FILENO);
-        close(pipe_fds[0]);
-        close(pipe_fds[1]);
-        execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
-        _exit(127);
-    }
-
-    close(pipe_fds[1]);
-    const int read_fd = pipe_fds[0];
 
     std::string output;
     bool capture = true;
@@ -94,73 +88,61 @@ CommandResult RunCommand(const std::string& command, const std::string& cwd,
                           std::chrono::seconds(has_timeout ? timeout_seconds : 0);
 
     while (true) {
-        int poll_timeout_ms = -1;
+        int read_timeout_ms = -1;
         if (has_timeout) {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining.count() <= 0) {
                 timed_out = true;
                 break;
             }
-            poll_timeout_ms = static_cast<int>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count());
-        }
-
-        pollfd descriptor{read_fd, POLLIN, 0};
-        const int poll_result = poll(&descriptor, 1, poll_timeout_ms);
-        if (poll_result < 0) {
-            if (errno == EINTR) {
-                continue;
+            read_timeout_ms = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(remaining)
+                            .count());
+            if (read_timeout_ms < 1) {
+                read_timeout_ms = 1;
             }
-            read_error = "poll failed: " + std::string(std::strerror(errno));
-            break;
-        }
-        if (poll_result == 0) {
-            timed_out = true;
-            break;
         }
 
         char buffer[65536];
-        const ssize_t count = read(read_fd, buffer, sizeof(buffer));
-        if (count == 0) {
-            break;  // EOF：子进程已关闭 stdout
-        }
-        if (count < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            read_error = "read failed: " + std::string(std::strerror(errno));
+        std::size_t count = 0;
+        const platform::ReadStatus status = process->Read(
+                buffer, sizeof(buffer), read_timeout_ms, &count, &read_error);
+        if (status == platform::ReadStatus::kTimeout) {
+            timed_out = true;
+            read_error.clear();
             break;
         }
+        if (status == platform::ReadStatus::kError) {
+            break;
+        }
+        if (status == platform::ReadStatus::kEof) {
+            break;
+        }
+
         if (capture) {
-            const size_t remaining_capacity = kMaxCaptureBytes - output.size();
-            if (static_cast<size_t>(count) > remaining_capacity) {
+            const std::size_t remaining_capacity = kMaxCaptureBytes - output.size();
+            if (count > remaining_capacity) {
                 output.append(buffer, remaining_capacity);
                 capture = false;  // 已达内存上限，后续只排空管道
             } else {
-                output.append(buffer, static_cast<size_t>(count));
+                output.append(buffer, count);
             }
         }
     }
 
     if (timed_out) {
-        kill(-pid, SIGKILL);
-    }
-
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR) {
-            continue;
-        }
-        break;
+        process->Terminate();
     }
 
     int exit_code = -1;
-    if (WIFEXITED(status)) {
-        exit_code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        exit_code = 128 + WTERMSIG(status);
+    std::string wait_error;
+    if (!process->WaitForExit(-1, &exit_code, &wait_error) &&
+        read_error.empty()) {
+        read_error = wait_error;
     }
     result.exit_code = exit_code;
+
+    output = platform::DecodeConsoleOutput(output);
 
     if (!read_error.empty()) {
         result.ok = false;

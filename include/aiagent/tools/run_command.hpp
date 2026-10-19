@@ -11,7 +11,8 @@ struct CommandResult {
     std::string error;    // 失败描述（超时 / 无法启动等）
 };
 
-// 在指定工作目录下用 /bin/sh -c 执行命令，合并 stdout/stderr，尾部截断。
+// 在指定工作目录下用平台 shell 执行命令（POSIX: /bin/sh -c；
+// Windows: cmd.exe /d /s /c），合并 stdout/stderr，尾部截断。
 // timeout_seconds <= 0 表示不设超时。
 CommandResult RunCommand(const std::string& command, const std::string& cwd,
                          long timeout_seconds);

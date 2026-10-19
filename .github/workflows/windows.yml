@@ -41,7 +41,7 @@ jobs:
             & (Join-Path $root "bootstrap-vcpkg.bat") -disableMetrics
             if ($LASTEXITCODE -ne 0) { throw "bootstrap-vcpkg failed: $LASTEXITCODE" }
           }
-          & (Join-Path $root "vcpkg.exe") install "curl[core,schannel]:x64-windows-static"
+          & (Join-Path $root "vcpkg.exe") install "curl[core,ssl]:x64-windows-static"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
 
       - name: Configure
@@ -92,13 +92,13 @@ jobs:
       - name: Build portable targets
         run: >
           cmake --build build-release/windows-root --config Release --parallel
-          --target aiagent_log aiagent_llm m0_smoke_test version_test llm_client_test
+          --target aiagent_log aiagent_llm aiagent_platform m0_smoke_test version_test llm_client_test process_test
 
       - name: Test portable targets
         shell: pwsh
         run: |
           ctest --test-dir build-release/windows-root -C Release --output-on-failure `
-            -R '^(aiagent_m0_smoke|aiagent_version|aiagent_llm_client)$'
+            -R '^(aiagent_m0_smoke|aiagent_version|aiagent_llm_client|aiagent_process)$'
 
       - name: Upload test log
         if: failure()
@@ -107,3 +107,27 @@ jobs:
           name: root-portable-windows-test-log
           path: build-release/windows-root/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
+
+  # P2 平台层落地后，根项目应能在 Windows 上编译/链接。
+  # 测试仍含 POSIX 依赖，因此本 job 只验证构建（AIAGENT_BUILD_TESTS=OFF）。
+  full-app-windows:
+    name: full app (MSVC x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build-release/full-app -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DAIAGENT_BUILD_TESTS=OFF `
+            -DAIAGENT_BUILD_EXAMPLES=OFF
+
+      - name: Build aiagent_app
+        run: cmake --build build-release/full-app --config Release --parallel --target aiagent_app

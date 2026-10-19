@@ -93,6 +93,26 @@ else()
   target_compile_options(aiagent_log PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# 平台层：UTF-8 路径/环境变量 + 子进程（POSIX/Windows 各一份实现）。
+if(WIN32)
+  set(AIAGENT_PLATFORM_PROCESS_SOURCE src/platform/process_win.cpp)
+else()
+  set(AIAGENT_PLATFORM_PROCESS_SOURCE src/platform/process_posix.cpp)
+endif()
+
+add_library(aiagent_platform STATIC
+  src/platform/paths.cpp
+  ${AIAGENT_PLATFORM_PROCESS_SOURCE}
+)
+target_include_directories(aiagent_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(aiagent_platform PUBLIC Threads::Threads)
+
+if(MSVC)
+  target_compile_options(aiagent_platform PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(aiagent_platform PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(aiagent_llm STATIC
   src/config.cpp
   src/llm/deepseek_client.cpp
@@ -131,7 +151,7 @@ add_library(aiagent_agent STATIC
   src/tools/sub_agent_tool.cpp
 )
 target_include_directories(aiagent_agent PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(aiagent_agent PUBLIC aiagent_llm a2a::a2a)
+target_link_libraries(aiagent_agent PUBLIC aiagent_llm aiagent_platform a2a::a2a)
 
 if(MSVC)
   target_compile_options(aiagent_agent PRIVATE /W4 /permissive-)
@@ -141,7 +161,7 @@ endif()
 
 add_library(aiagent_mcp STATIC src/mcp/mcp_client_bridge.cpp)
 target_include_directories(aiagent_mcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(aiagent_mcp PUBLIC aiagent_llm a2a::a2a Threads::Threads)
+target_link_libraries(aiagent_mcp PUBLIC aiagent_llm aiagent_platform a2a::a2a Threads::Threads)
 
 if(MSVC)
   target_compile_options(aiagent_mcp PRIVATE /W4 /permissive-)
@@ -204,6 +224,10 @@ if(AIAGENT_BUILD_TESTS)
   target_compile_definitions(version_test PRIVATE
                              AIAGENT_EXPECTED_VERSION="${PROJECT_VERSION}")
   add_test(NAME aiagent_version COMMAND version_test)
+
+  add_executable(process_test tests/process_test.cpp)
+  target_link_libraries(process_test PRIVATE aiagent_platform)
+  add_test(NAME aiagent_process COMMAND process_test)
 
   # 安装布局冒烟测试：只安装 deagent 组件，校验产物路径。
   add_test(

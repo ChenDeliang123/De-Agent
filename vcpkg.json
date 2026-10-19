@@ -4,8 +4,7 @@
   "dependencies": [
     {
       "name": "curl",
-      "features": ["schannel"],
-      "default-features": false,
+      "features": ["ssl"],
       "platform": "windows"
     }
   ]
