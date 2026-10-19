@@ -111,7 +111,7 @@ CMake 配置阶段会自动获取 `cpp-httplib` 与 SQLite，需要可用的网�
 ```bash
 git submodule update --init --recursive
 scripts/package-portable.sh
-# → dist/de-agent-<version>-linux-<arch>.tar.gz（附 .sha256）
+# → dist/v<version>/de-agent-<version>-linux-<arch>.tar.gz（附 .sha256）
 ```
 
 在目标机器上：
@@ -145,8 +145,8 @@ cmake --build vendor/mcp-extension-platform/build -j
 
 # 2) 出主包 + MCP 可选包
 scripts/package-portable.sh --with-mcp
-# → dist/de-agent-...tar.gz          （1.8 MB）
-# → dist/de-agent-mcp-...tar.gz      （~10 MB，只含 share/de/mcp/）
+# → dist/v<version>/de-agent-...tar.gz          （约 2 MB）
+# → dist/v<version>/de-agent-mcp-...tar.gz      （约 10 MB，只含 share/de/mcp/）
 ```
 
 把可选包解到**主包根目录**即生效（不必重新打主包）：
@@ -171,8 +171,8 @@ tar xzf de-agent-mcp-<version>-linux-<arch>.tar.gz \
 
 ```bash
 scripts/package-deb-rpm.sh
-# → dist/de-agent_<version>_amd64.deb
-# → dist/de-agent-<version>-<release>.<arch>.rpm   （需构建机装 rpm-build）
+# → dist/v<version>/de-agent_<version>_amd64.deb
+# → dist/v<version>/de-agent-<version>-<release>.<arch>.rpm   （需构建机装 rpm-build）
 ```
 
 安装 / 卸载：

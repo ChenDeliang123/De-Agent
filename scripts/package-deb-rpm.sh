@@ -5,9 +5,10 @@
 # 用法：
 #   scripts/package-deb-rpm.sh [--build-dir DIR] [--clean]
 #
-# 产物（dist/）：
-#   de-agent_<version>-<release>_<arch>.deb
+# 产物（dist/v<version>/）：
+#   de-agent_<version>_<arch>.deb
 #   de-agent-<version>-<release>.<arch>.rpm
+#   SHA256SUMS（与 tar 包共用；脚本会重新生成）
 #
 # 说明：
 #   - 只包含 deagent 组件（bin/de、bin/aiagent_app、lib/de/cli、share/de/conf）。
@@ -31,6 +32,14 @@ ROOT_DIR="$(cd -P "$(dirname "${SCRIPT_SOURCE}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build-release"
 DIST_DIR="${ROOT_DIR}/dist"
 CLEAN=0
+
+VERSION="$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9][0-9.]*\).*/\1/p' \
+  "${ROOT_DIR}/CMakeLists.txt" | head -1)"
+if [ -z "${VERSION}" ]; then
+  echo "cannot determine version from CMakeLists.txt" >&2
+  exit 1
+fi
+OUT_DIR="${DIST_DIR}/v${VERSION}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -87,9 +96,24 @@ cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
   "${FETCH_ARGS[@]}"
 cmake --build "${BUILD_DIR}" -j
 
-mkdir -p "${DIST_DIR}"
-cpack --config "${BUILD_DIR}/CPackConfig.cmake" -G "${GENERATOR_LIST}" -B "${DIST_DIR}"
+# 版本目录按当前 CMake VERSION 创建/复用；已有目录不删除（RELEASE.md 等保留）。
+mkdir -p "${OUT_DIR}"
+if [ ! -f "${OUT_DIR}/RELEASE.md" ]; then
+  echo "warn: ${OUT_DIR}/RELEASE.md not found; write release notes before publishing" >&2
+fi
+cpack --config "${BUILD_DIR}/CPackConfig.cmake" -G "${GENERATOR_LIST}" -B "${OUT_DIR}"
+
+# 与 tar 包共用同一份版本目录汇总校验和。
+(
+  cd "${OUT_DIR}"
+  find . -maxdepth 1 -type f \
+    \( -name 'de-agent-*.tar.gz' -o -name 'de-agent_*.deb' -o -name 'de-agent-*.rpm' \) \
+    -printf '%f\n' | sort | xargs -r sha256sum > SHA256SUMS
+)
+# CPack 的 staging 目录不是发布产物，清掉以保持版本目录干净。
+rm -rf "${OUT_DIR}/_CPack_Packages"
 
 echo
-echo "packages in ${DIST_DIR}:"
-ls -1 "${DIST_DIR}"/*.deb "${DIST_DIR}"/*.rpm 2>/dev/null || true
+echo "packages in ${OUT_DIR}:"
+ls -1 "${OUT_DIR}"/*.deb "${OUT_DIR}"/*.rpm 2>/dev/null || true
+echo "checksums: ${OUT_DIR}/SHA256SUMS"
