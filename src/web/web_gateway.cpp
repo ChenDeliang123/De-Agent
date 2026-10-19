@@ -1,6 +1,16 @@
 #include "aiagent/web/web_gateway.hpp"
 
 #include <httplib.h>
+
+// Windows SDK 的 winuser.h 会把 SendMessage/GetMessage 定义为宏；
+// a2a 的公开 API 使用了这两个名字，这里在声明前取消宏。
+#ifdef SendMessage
+#undef SendMessage
+#endif
+#ifdef GetMessage
+#undef GetMessage
+#endif
+
 #include <json.hpp>
 
 #include <algorithm>
