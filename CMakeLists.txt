@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   ai-agent-cpp
-  VERSION 0.1.0
+  VERSION 0.1.1
   DESCRIPTION "AI Agent runtime in C++, reusing a2a-protocol and mcp-extension-platform"
   LANGUAGES C CXX
 )

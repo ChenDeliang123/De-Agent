@@ -179,11 +179,11 @@ scripts/package-deb-rpm.sh
 
 ```bash
 # Debian / Ubuntu
-sudo apt install ./de-agent_0.1.0_amd64.deb   # 自动带 libcurl4 / nodejs(>=18) / curl
+sudo apt install ./de-agent_0.1.1_amd64.deb   # 自动带 libcurl4 / nodejs(>=18) / curl
 sudo apt remove  de-agent
 
 # RHEL / Fedora / openSUSE
-sudo dnf install ./de-agent-0.1.0-1.x86_64.rpm
+sudo dnf install ./de-agent-0.1.1-1.x86_64.rpm
 sudo dnf remove  de-agent
 ```
 

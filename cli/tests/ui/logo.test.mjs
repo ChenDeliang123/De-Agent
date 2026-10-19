@@ -5,7 +5,7 @@ import { renderStartupLogo } from "../../src/ui/logo.mjs";
 import { makeStyler, PALETTES } from "../../src/ui/theme.mjs";
 import { stripAnsi, visibleWidth } from "../../src/ui/text.mjs";
 
-const TITLES = ["de agent", "v0.1.0"];
+const TITLES = ["de agent", "v0.1.1"];
 const INFO = ["backend=127.0.0.1:18081", "~/proj (main)"];
 const HINT = "/help 查看命令 · Esc 中断当前回复 · Ctrl+D 退出";
 
@@ -102,7 +102,7 @@ test("every line is centered within the terminal width", () => {
 test("narrow terminals fall back to a text title without block art", () => {
   const out = stripAnsi(render("truecolor", 50));
   assert.ok(!out.includes("█"), "block art must not render when narrow");
-  assert.ok(out.includes("de agent v0.1.0"));
+  assert.ok(out.includes("de agent v0.1.1"));
   for (const { width } of visibleLines(render("truecolor", 50))) {
     assert.ok(width <= 50, `line wider than 50 columns: ${width}`);
   }
