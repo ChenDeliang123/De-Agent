@@ -323,6 +323,19 @@ test("renderer prints the full root task result", () => {
   renderer.endReply();
 });
 
+test("renderer keeps full task report lines on non-TTY", () => {
+  const out = fakeOut(false);
+  out.columns = 20;
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+  const long = `report ${"x".repeat(100)}`;
+
+  renderer.startReply();
+  renderer.toolStart("call-1", "task", { tasks: [] });
+  renderer.toolEnd(true, long, "", "call-1");
+  assert.ok(out.text().includes(long), "non-TTY should not clip task report lines");
+  renderer.endReply();
+});
+
 test("renderer tracks sub-agent status rows", () => {
   const out = fakeOut(true);
   const region = fakeRegion();

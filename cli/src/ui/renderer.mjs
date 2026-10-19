@@ -498,16 +498,24 @@ export class TranscriptRenderer {
     }
     const lines = source.split("\n");
     const shown = lines.slice(0, MAX_TASK_RESULT_LINES);
+    // TTY 下按终端宽度裁剪；管道/日志没有“终端宽度”概念，保留整行，避免报告被截断。
+    const writeLine = (line) => {
+      if (this.#out.isTTY) {
+        this.#writeClipped(`  ${line}`);
+      } else {
+        this.#write(`  ${line}\n`);
+      }
+    };
     for (const line of shown) {
       if (line === "") {
         this.#write("\n");
       } else {
-        this.#writeClipped(`  ${line}`);
+        writeLine(line);
       }
     }
     const hidden = lines.length - shown.length;
     if (hidden > 0) {
-      this.#writeClipped(`  … (+${hidden} lines)`);
+      writeLine(`… (+${hidden} lines)`);
     }
   }
 
