@@ -243,6 +243,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(llm_client_test tests/llm_client_test.cpp)
   target_link_libraries(llm_client_test PRIVATE aiagent_llm Threads::Threads)
   target_include_directories(llm_client_test PRIVATE ${AIAGENT_HTTPLIB_INCLUDE_DIR})
+  if(WIN32)
+    # 测试直接包含 httplib.h；显式补 winsock，避免依赖传递细节。
+    target_link_libraries(llm_client_test PRIVATE ws2_32)
+  endif()
   add_test(NAME aiagent_llm_client COMMAND llm_client_test)
 
   add_executable(agent_runtime_test tests/agent_runtime_test.cpp)

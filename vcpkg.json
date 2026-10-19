@@ -1,0 +1,12 @@
+{
+  "name": "ai-agent-cpp",
+  "version-string": "0.1.1",
+  "dependencies": [
+    {
+      "name": "curl",
+      "features": ["schannel"],
+      "default-features": false,
+      "platform": "windows"
+    }
+  ]
+}

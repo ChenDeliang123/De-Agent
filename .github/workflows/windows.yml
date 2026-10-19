@@ -1,0 +1,109 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_DEFAULT_TRIPLET: x64-windows-static
+
+jobs:
+  # a2a-protocol 已具备 Windows 分支；先把它作为 Windows 基线。
+  # 根项目的 MCP bridge / bash 工具仍依赖 POSIX，待 P2/P3 平台层落地后
+  # 再把完整 aiagent_app 加入本 workflow。
+  a2a-windows:
+    name: a2a-protocol (MSVC x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install curl via vcpkg
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) {
+            throw "VCPKG_INSTALLATION_ROOT is not set on this runner"
+          }
+          if (-not (Test-Path (Join-Path $root "vcpkg.exe"))) {
+            & (Join-Path $root "bootstrap-vcpkg.bat") -disableMetrics
+            if ($LASTEXITCODE -ne 0) { throw "bootstrap-vcpkg failed: $LASTEXITCODE" }
+          }
+          & (Join-Path $root "vcpkg.exe") install "curl[core,schannel]:x64-windows-static"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S vendor/a2a-protocol -B build-release/windows-a2a -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DA2A_BUILD_TESTS=ON `
+            -DA2A_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build-release/windows-a2a --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build-release/windows-a2a -C Release --output-on-failure
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2a-windows-test-log
+          path: build-release/windows-a2a/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  # 根项目中当前已可移植的部分：日志、LLM 客户端、版本与 M0 冒烟。
+  # 不构建 aiagent_app/aiagent_agent/aiagent_mcp，因为它们仍包含
+  # fork/exec/poll 等 POSIX 实现（见 docs/Windows适配规划.md P2/P3）。
+  portable-root-windows:
+    name: root portable targets (MSVC x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build-release/windows-root -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DAIAGENT_BUILD_TESTS=ON `
+            -DAIAGENT_BUILD_EXAMPLES=OFF
+
+      - name: Build portable targets
+        run: >
+          cmake --build build-release/windows-root --config Release --parallel
+          --target aiagent_log aiagent_llm m0_smoke_test version_test llm_client_test
+
+      - name: Test portable targets
+        shell: pwsh
+        run: |
+          ctest --test-dir build-release/windows-root -C Release --output-on-failure `
+            -R '^(aiagent_m0_smoke|aiagent_version|aiagent_llm_client)$'
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-portable-windows-test-log
+          path: build-release/windows-root/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
