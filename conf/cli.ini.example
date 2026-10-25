@@ -5,7 +5,9 @@
 ;                          ; 优先级：--editor > 本项 > $AIAGENT_EDITOR > $VISUAL > $EDITOR
 
 [editor]
-external = nano
+; 留空 = 按 --editor > 本项 > $AIAGENT_EDITOR > $VISUAL > $EDITOR > 平台默认
+; （Linux nano / Windows notepad）。也可填 `code --wait`、`vim` 等。
+external =
 
 ; UI 外观（可用 CLI 内 /theme 切换并写回本文件）
 [ui]

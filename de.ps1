@@ -420,6 +420,10 @@ function Start-Backend {
 
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $LaunchCwd | Out-Null
+    $dbDir = Split-Path -Parent $DbPath
+    if ($dbDir) {
+        New-Item -ItemType Directory -Force -Path $dbDir | Out-Null
+    }
 
     $effectiveLog = if ($LogFileArg) { $LogFileArg } else { $LogFile }
     $effectiveLogDir = Split-Path -Parent $effectiveLog
