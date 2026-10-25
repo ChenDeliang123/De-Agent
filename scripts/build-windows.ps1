@@ -1,4 +1,4 @@
-# Windows 本机构建入口（MinGW-w64 + Ninja + 静态 libcurl）。
+﻿# Windows 本机构建入口（MinGW-w64 + Ninja + 静态 libcurl）。
 #
 # 用法：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
