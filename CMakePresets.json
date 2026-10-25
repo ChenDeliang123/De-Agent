@@ -7,8 +7,32 @@
   },
   "configurePresets": [
     {
+      "name": "windows-mingw-debug",
+      "displayName": "Windows x64 Debug (MinGW-w64 + Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-mingw",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AIAGENT_BUILD_TESTS": "ON",
+        "AIAGENT_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "windows-mingw-release",
+      "displayName": "Windows x64 Release (MinGW-w64 + Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-mingw-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AIAGENT_BUILD_TESTS": "ON",
+        "AIAGENT_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
       "name": "windows-x64-release",
-      "displayName": "Windows x64 Release (MSVC + vcpkg static)",
+      "displayName": "Windows x64 Release (MSVC + vcpkg static, optional)",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build-release/windows",
@@ -22,12 +46,34 @@
   ],
   "buildPresets": [
     {
+      "name": "windows-mingw-debug",
+      "configurePreset": "windows-mingw-debug"
+    },
+    {
+      "name": "windows-mingw-release",
+      "configurePreset": "windows-mingw-release"
+    },
+    {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64-release",
       "configuration": "Release"
     }
   ],
   "testPresets": [
+    {
+      "name": "windows-mingw-debug",
+      "configurePreset": "windows-mingw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-mingw-release",
+      "configurePreset": "windows-mingw-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
     {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64-release",

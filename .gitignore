@@ -5,6 +5,9 @@ conf/conf.ini
 conf/cli.ini
 build/
 build-release/
+build-mingw/
+build-mingw-release/
+.tmp-cmake-test/
 dist/
 .cache/
 node_modules/
