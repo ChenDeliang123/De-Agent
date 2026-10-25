@@ -8,6 +8,14 @@ max_retries = 3
 
 [mcp]
 ; M3 使用；不填时 aiagent_app 会尝试 vendor 下的本地构建。
+; Linux 示例：
+;   binary = /absolute/path/to/mcp_server/mcp_server
+;   plugins = /absolute/path/to/mcp_server/plugins
+;   python_path = python3
+; Windows 示例（反斜杠需写成 \\，或直接用正斜杠）：
+;   binary = C:/Tools/mcp/mcp_server.exe
+;   plugins = C:/Tools/mcp/plugins
+;   python_path = python
 binary = /absolute/path/to/mcp_server/mcp_server
 plugins = /absolute/path/to/mcp_server/plugins
 python_path = python3
@@ -113,7 +121,9 @@ default_model =
 
 [storage]
 ; 用户级数据目录（权限等与用户相关的状态）。
-; 留空时按 DE_HOME > XDG_DATA_HOME/de > ~/.de 解析；目录按需创建。
+; Linux 留空：DE_HOME > XDG_DATA_HOME/de > ~/.de。
+; Windows 留空：DE_HOME > XDG_DATA_HOME/de > %USERPROFILE%\.de > %LOCALAPPDATA%\de。
+; 目录按需创建。
 data_dir =
 ; 权限文件；留空时用 <data_dir>/permissions.json。
 permissions_file =

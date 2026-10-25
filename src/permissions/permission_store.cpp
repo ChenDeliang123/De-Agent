@@ -88,7 +88,9 @@ void PermissionStore::Load() {
             }
             const auto mode = ParseMode(mode_text);
             if (mode.has_value()) {
-                modes_[it.key()] = *mode;
+                // Windows 文件系统大小写不敏感；读盘时也折叠键，
+                // 否则手写/旧版写入的 C:\Work 与 Resolve 的 c:\work 对不上。
+                modes_[platform::NormalizePathKey(it.key())] = *mode;
             }
         }
     } catch (const nlohmann::json::exception&) {

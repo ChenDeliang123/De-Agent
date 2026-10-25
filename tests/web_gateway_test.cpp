@@ -28,6 +28,8 @@
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/web/web_gateway.hpp"
 
+#include "test_support.hpp"
+
 namespace {
 
 int g_failures = 0;
@@ -439,11 +441,14 @@ int main() {
                     return true;
                 });
 
+        const std::string compact_project =
+                test_support::TempGenericPath("aiagent_gateway_compact");
         const auto compact = http.Post(
                 base + "/api/v1/sessions/ctx-compact/compact",
-                R"({"cwd":"/tmp/compact-project"})", "application/json");
+                nlohmann::json{{"cwd", compact_project}}.dump(),
+                "application/json");
         Expect(compact.IsSuccess(), "compact endpoint should succeed");
-        Expect(compact_cwd == "/tmp/compact-project",
+        Expect(compact_cwd == compact_project,
                "compact endpoint should forward cwd");
         Expect(nlohmann::json::parse(compact.body).value("compacted", false),
                "compact response should report success");
@@ -476,9 +481,9 @@ int main() {
                     if (id != session_id) {
                         return false;
                     }
-                    *cwd = "/tmp/stats-project";
+                    *cwd = test_support::TempGenericPath("aiagent_gateway_stats");
                     instructions->push_back(aiagent::web::InstructionSourceInfo{
-                            "/tmp/stats-project/AGENTS.md", 32, false});
+                            *cwd + "/AGENTS.md", 32, false});
                     return true;
                 });
         gateway.SetDeleteHandler([&](const std::string& id, std::string* error) {
@@ -582,14 +587,17 @@ int main() {
         });
 
         httplib::Client perm(base);
+        const std::string permission_path =
+                test_support::TempGenericPath("aiagent_gateway_perm");
         const auto perm_put = perm.Put(
                 "/api/v1/permissions",
-                R"({"path":"/tmp/permission-test","mode":"workspace"})",
+                nlohmann::json{{"path", permission_path}, {"mode", "workspace"}}
+                        .dump(),
                 "application/json");
         Expect(perm_put && perm_put->status == 200, "PUT permissions should succeed");
 
         const auto perm_eff =
-                perm.Get("/api/v1/permissions/effective?path=/tmp/permission-test");
+                perm.Get("/api/v1/permissions/effective?path=" + permission_path);
         Expect(perm_eff && perm_eff->status == 200,
                "effective endpoint should succeed");
         const auto perm_eff_json = nlohmann::json::parse(perm_eff->body);
@@ -599,7 +607,7 @@ int main() {
                "effective source should be exact");
 
         const auto perm_inherited = perm.Get(
-                "/api/v1/permissions/effective?path=/tmp/permission-test/sub");
+                "/api/v1/permissions/effective?path=" + permission_path + "/sub");
         Expect(perm_inherited && perm_inherited->status == 200,
                "inherited effective endpoint should succeed");
         Expect(nlohmann::json::parse(perm_inherited->body).value("source",
@@ -607,15 +615,16 @@ int main() {
                        "inherited",
                "child path should inherit");
 
-        const auto perm_default =
-                perm.Get("/api/v1/permissions/effective?path=/tmp/other-perm");
+        const auto perm_default = perm.Get(
+                "/api/v1/permissions/effective?path=" +
+                test_support::TempGenericPath("aiagent_gateway_other_perm"));
         Expect(nlohmann::json::parse(perm_default->body).value("source", std::string()) ==
                        "default",
                "unset path should report default");
 
         const auto perm_bad = perm.Put(
                 "/api/v1/permissions",
-                R"({"path":"/tmp/permission-test","mode":"bogus"})",
+                nlohmann::json{{"path", permission_path}, {"mode", "bogus"}}.dump(),
                 "application/json");
         Expect(perm_bad && perm_bad->status == 400, "invalid mode should return 400");
 
@@ -626,11 +635,11 @@ int main() {
                "list should include default mode");
 
         const auto perm_del =
-                perm.Delete("/api/v1/permissions?path=/tmp/permission-test");
+                perm.Delete("/api/v1/permissions?path=" + permission_path);
         Expect(perm_del && perm_del->status == 200,
                "DELETE permissions should succeed");
         const auto perm_after =
-                perm.Get("/api/v1/permissions/effective?path=/tmp/permission-test");
+                perm.Get("/api/v1/permissions/effective?path=" + permission_path);
         Expect(nlohmann::json::parse(perm_after->body).value("source", std::string()) ==
                        "default",
                "after delete, path falls back to default");
@@ -688,7 +697,8 @@ int main() {
         Expect(stats_json.value("assistant_messages", 0) == 1,
                "stats assistant messages should be 1");
         Expect(stats_json.contains("compaction"), "stats should include compaction");
-        Expect(stats_json.value("cwd", std::string()) == "/tmp/stats-project",
+        Expect(stats_json.value("cwd", std::string()) ==
+                       test_support::TempGenericPath("aiagent_gateway_stats"),
                "stats should include the session cwd");
         Expect(stats_json.contains("instructions") &&
                        stats_json["instructions"].is_array() &&

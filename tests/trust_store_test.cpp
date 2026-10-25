@@ -3,9 +3,10 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 
 #include "aiagent/permissions/trust_store.hpp"
+
+#include "test_support.hpp"
 
 namespace {
 
@@ -40,19 +41,20 @@ void TestMemoryStore() {
 
 void TestPersistence() {
     const auto dir = std::filesystem::temp_directory_path() /
-                     ("aiagent_trust_" + std::to_string(::getpid()));
+                     ("aiagent_trust_" + std::to_string(test_support::Pid()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     const auto file = dir / "trust.json";
 
+    const std::string project = test_support::TempPath("aiagent_trust_project");
     {
         TrustStore store(file.string());
-        store.Set("/tmp/proj", true);
+        store.Set(project, true);
     }
     {
         TrustStore reloaded(file.string());
-        Expect(reloaded.IsTrusted("/tmp/proj"), "trust survives reload");
-        Expect(reloaded.IsTrusted("/tmp/proj/sub"), "inheritance survives reload");
+        Expect(reloaded.IsTrusted(project), "trust survives reload");
+        Expect(reloaded.IsTrusted(project + "/sub"), "inheritance survives reload");
     }
 
     std::filesystem::remove_all(dir);

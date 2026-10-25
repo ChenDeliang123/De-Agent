@@ -350,8 +350,12 @@ ToolExecutionResult RunGlob(const std::string& root, const std::string& pattern,
     const std::string normalized_pattern = NormalizeGlobPattern(pattern);
     std::regex expression;
     try {
-        expression.assign(GlobToRegexSource(normalized_pattern),
-                          std::regex_constants::ECMAScript);
+        std::regex::flag_type flags = std::regex_constants::ECMAScript;
+#ifdef _WIN32
+        // Windows 文件系统大小写不敏感；glob 也要对齐，否则 *.CPP 匹配不到 a.cpp。
+        flags |= std::regex_constants::icase;
+#endif
+        expression.assign(GlobToRegexSource(normalized_pattern), flags);
     } catch (const std::regex_error& regex_error) {
         result.error = "invalid glob pattern: " + pattern + " (" + regex_error.what() + ")";
         return result;
@@ -443,8 +447,11 @@ ToolExecutionResult RunGrep(const std::string& root, const std::string& pattern,
     if (!include.empty()) {
         include_on_basename = include.find('/') == std::string::npos;
         try {
-            include_expression.assign(GlobToRegexSource(include),
-                                      std::regex_constants::ECMAScript);
+            std::regex::flag_type include_flags = std::regex_constants::ECMAScript;
+#ifdef _WIN32
+            include_flags |= std::regex_constants::icase;
+#endif
+            include_expression.assign(GlobToRegexSource(include), include_flags);
         } catch (const std::regex_error& regex_error) {
             result.error =
                     "invalid include pattern: " + include + " (" + regex_error.what() + ")";

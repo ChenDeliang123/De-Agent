@@ -15,7 +15,11 @@ std::string EnvOrEmpty(const char* name) {
 }
 
 std::string JoinPath(const std::string& base, const std::string& child) {
-    return platform::ToUtf8(platform::FromUtf8(base) / platform::FromUtf8(child));
+    // lexically_normal 把 "conf/conf.ini" 里的 '/' 归一成平台分隔符；
+    // 否则 Windows 上会得到 `...\cwd\conf/conf.ini` 这种混合形式。
+    return platform::ToUtf8(
+            (platform::FromUtf8(base) / platform::FromUtf8(child))
+                    .lexically_normal());
 }
 
 // 支持形如 "~" / "~/xxx" / "~\xxx" 的路径；其余原样返回。

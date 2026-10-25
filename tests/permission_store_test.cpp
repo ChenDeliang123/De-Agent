@@ -5,9 +5,10 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 
 #include "aiagent/permissions/permission_store.hpp"
+
+#include "test_support.hpp"
 
 namespace {
 
@@ -22,7 +23,7 @@ void Expect(bool condition, const std::string& message) {
 
 std::filesystem::path TempDir() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_perm_store_" + std::to_string(::getpid()));
+                      ("aiagent_perm_store_" + std::to_string(test_support::Pid()));
     std::filesystem::remove_all(path);
     std::filesystem::create_directories(path);
     return path;

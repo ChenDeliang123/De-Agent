@@ -1,5 +1,6 @@
 #include "aiagent/agent/project_instructions.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,11 @@ void Expect(bool condition, const std::string& message) {
         std::cerr << "FAILED: " << message << '\n';
         ++g_failures;
     }
+}
+
+std::string GenericPath(std::string path) {
+    std::replace(path.begin(), path.end(), '\\', '/');
+    return path;
 }
 
 class TempDir {
@@ -146,9 +152,11 @@ void TestLoadOrderAndPriority() {
     const auto loaded = loader.Load(sub.string(), {});
     Expect(loaded.files.size() == 2, "loader should load root and nested AGENTS.md");
     if (loaded.files.size() == 2) {
-        Expect(loaded.files[0].path.find("repo/AGENTS.md") != std::string::npos,
+        Expect(GenericPath(loaded.files[0].path).find("repo/AGENTS.md") !=
+                       std::string::npos,
                "root AGENTS.md should be rendered first");
-        Expect(loaded.files[1].path.find("sub/AGENTS.md") != std::string::npos,
+        Expect(GenericPath(loaded.files[1].path).find("sub/AGENTS.md") !=
+                       std::string::npos,
                "nested AGENTS.md should be rendered last");
     }
     const std::size_t root_pos = loaded.rendered.find("root-rule");

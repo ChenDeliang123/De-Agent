@@ -4,11 +4,12 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 #include "aiagent/config.hpp"
 #include "aiagent/log.hpp"
+
+#include "test_support.hpp"
 
 namespace {
 
@@ -30,7 +31,7 @@ std::string ReadAll(const std::filesystem::path& path) {
 
 void TestLevelAndFile() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_logging_" + std::to_string(::getpid()) + ".log");
+                      ("aiagent_logging_" + std::to_string(test_support::Pid()) + ".log");
     aiagent::Logger logger;
     logger.Configure("debug", path.string(), false);
     logger.Log(aiagent::LogLevel::kTrace, "test", "should-not-appear");
@@ -47,6 +48,8 @@ void TestLevelAndFile() {
     Expect(content.find("[test]") != std::string::npos,
            "log line should contain the module");
 
+    // Windows 不允许删除仍被进程打开的文件；先关掉日志流。
+    logger.Configure("off", "", false);
     std::filesystem::remove(path);
 }
 
@@ -65,7 +68,7 @@ void TestParseConfig() {
 
 void TestConcurrentWrites() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_logging_thread_" + std::to_string(::getpid()) + ".log");
+                      ("aiagent_logging_thread_" + std::to_string(test_support::Pid()) + ".log");
     aiagent::Logger logger;
     logger.Configure("info", path.string(), false);
 
@@ -88,13 +91,16 @@ void TestConcurrentWrites() {
     while (std::getline(input, line)) {
         ++count;
     }
+    input.close();
     Expect(count == 200, "all concurrent log lines should be written");
+    // Windows 不允许删除仍被进程打开的文件；先关掉日志流。
+    logger.Configure("off", "", false);
     std::filesystem::remove(path);
 }
 
 void TestRedaction() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_logging_redact_" + std::to_string(::getpid()) + ".log");
+                      ("aiagent_logging_redact_" + std::to_string(test_support::Pid()) + ".log");
     aiagent::Logger logger;
     logger.Configure("info", path.string(), false);
     const std::string secret = "sk-1234567890abcdef1234567890abcdef";
@@ -106,12 +112,14 @@ void TestRedaction() {
            "api key should be redacted");
     Expect(content.find(secret) == std::string::npos,
            "raw api key must not be written");
+    // Windows 不允许删除仍被进程打开的文件；先关掉日志流。
+    logger.Configure("off", "", false);
     std::filesystem::remove(path);
 }
 
 void TestRotation() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_logging_rotate_" + std::to_string(::getpid()) + ".log");
+                      ("aiagent_logging_rotate_" + std::to_string(test_support::Pid()) + ".log");
     aiagent::Logger logger;
     logger.Configure("info", path.string(), false, 80, 2);
     const std::string payload(200, 'x');
@@ -122,6 +130,8 @@ void TestRotation() {
 
     Expect(std::filesystem::exists(path.string() + ".1"),
            "rotated log file should exist");
+    // Windows 不允许删除仍被进程打开的文件；先关掉日志流。
+    logger.Configure("off", "", false);
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".1");
     std::filesystem::remove(path.string() + ".2");
@@ -129,7 +139,7 @@ void TestRotation() {
 
 void TestThreadRequestId() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_logging_req_" + std::to_string(::getpid()) + ".log");
+                      ("aiagent_logging_req_" + std::to_string(test_support::Pid()) + ".log");
     aiagent::Logger logger;
     logger.Configure("info", path.string(), false);
     aiagent::SetThreadRequestId("req-abc");
@@ -139,6 +149,8 @@ void TestThreadRequestId() {
     const std::string content = ReadAll(path);
     Expect(content.find("req=req-abc") != std::string::npos,
            "thread request id should be included");
+    // Windows 不允许删除仍被进程打开的文件；先关掉日志流。
+    logger.Configure("off", "", false);
     std::filesystem::remove(path);
 }
 

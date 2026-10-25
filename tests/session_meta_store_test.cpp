@@ -6,6 +6,8 @@
 
 #include "aiagent/agent/session_meta_store.hpp"
 
+#include "test_support.hpp"
+
 namespace {
 
 int g_failures = 0;
@@ -27,8 +29,10 @@ int main() {
             Expect(!store.GetTitle("s1").has_value(), "empty store should have no title");
             store.SetTitle("s1", "hello");
             Expect(store.GetTitle("s1").value_or("") == "hello", "title should round-trip");
-            store.SetCwd("s1", "/tmp/project");
-            Expect(store.GetCwd("s1").value_or("") == "/tmp/project",
+            const std::string project =
+                    test_support::TempPath("aiagent_session_meta_mem/project");
+            store.SetCwd("s1", project);
+            Expect(store.GetCwd("s1").value_or("") == project,
                    "cwd should round-trip");
             Expect(store.Size() == 1, "size should count titles");
             store.Remove("s1");
@@ -50,8 +54,8 @@ int main() {
             aiagent::agent::SessionMetaStore store(path);
             store.SetTitle("s1", "first");
             store.SetTitle("s2", "second");
-            store.SetCwd("s1", "/tmp/project-a");
-            store.SetCwd("s2", "/tmp/project-b");
+            store.SetCwd("s1", test_support::TempPath("aiagent_session_meta_a"));
+            store.SetCwd("s2", test_support::TempPath("aiagent_session_meta_b"));
         }
         {
             aiagent::agent::SessionMetaStore reloaded(path);
@@ -59,9 +63,11 @@ int main() {
                    "title should persist across instances");
             Expect(reloaded.GetTitle("s2").value_or("") == "second",
                    "second title should persist");
-            Expect(reloaded.GetCwd("s1").value_or("") == "/tmp/project-a",
+            Expect(reloaded.GetCwd("s1").value_or("") ==
+                           test_support::TempPath("aiagent_session_meta_a"),
                    "cwd should persist across instances");
-            Expect(reloaded.GetCwd("s2").value_or("") == "/tmp/project-b",
+            Expect(reloaded.GetCwd("s2").value_or("") ==
+                           test_support::TempPath("aiagent_session_meta_b"),
                    "second cwd should persist across instances");
             Expect(reloaded.Size() == 2, "persisted size should match");
             reloaded.Remove("s1");
@@ -74,7 +80,8 @@ int main() {
                    "removed cwd should stay removed after reload");
             Expect(reloaded.GetTitle("s2").value_or("") == "second",
                    "other titles should survive removal");
-            Expect(reloaded.GetCwd("s2").value_or("") == "/tmp/project-b",
+            Expect(reloaded.GetCwd("s2").value_or("") ==
+                           test_support::TempPath("aiagent_session_meta_b"),
                    "other cwd should survive removal");
             reloaded.Clear();
             Expect(reloaded.Size() == 0, "clear should empty the store");

@@ -57,7 +57,8 @@ void TrustStore::Load() {
         }
         for (auto it = json["trust"].begin(); it != json["trust"].end(); ++it) {
             if (it.value().is_boolean()) {
-                decisions_[it.key()] = it.value().get<bool>();
+                decisions_[platform::NormalizePathKey(it.key())] =
+                        it.value().get<bool>();
             }
         }
     } catch (const nlohmann::json::exception&) {

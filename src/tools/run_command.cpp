@@ -43,10 +43,11 @@ std::string TruncateTail(const std::string& text) {
 platform::ProcessOptions ShellOptions(const std::string& command) {
     platform::ProcessOptions options;
 #ifdef _WIN32
-    // cmd 的 /s + 外层引号规则：命令原文交给 cmd 解析，避免逐参数转义破坏
-    // &&、|、>、%VAR% 等语法。
+    // cmd 的 /s 规则：/c 后必须把整条命令用一对引号包住，否则以引号开头的
+    // 命令（如 "C:\Program Files\x.exe" arg）会被 cmd 误解析。内层引号保留，
+    // &&、|、>、%VAR% 等语法仍由 cmd 解释。
     options.argv = {"cmd.exe"};
-    options.raw_command_line = "cmd.exe /d /s /c " + command;
+    options.raw_command_line = "cmd.exe /d /s /c \"" + command + "\"";
 #else
     options.argv = {"/bin/sh", "-c", command};
 #endif

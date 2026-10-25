@@ -4,9 +4,10 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 
 #include "aiagent/permissions/bash_policy.hpp"
+
+#include "test_support.hpp"
 
 namespace {
 
@@ -101,15 +102,24 @@ void TestDefaults() {
     Expect(!policy.allow.empty(), "default policy has allow rules");
     Expect(Decide(policy, "git status") == BashDecision::kAllow,
            "default allows git status");
+#ifdef _WIN32
+    Expect(Decide(policy, "format c:") == BashDecision::kDeny,
+           "default denies format");
+    Expect(Decide(policy, "dir & format c:") == BashDecision::kDeny,
+           "single & must split windows command segments");
+    Expect(Decide(policy, "shutdown /s") == BashDecision::kDeny,
+           "default denies shutdown");
+#else
     Expect(Decide(policy, "sudo reboot") == BashDecision::kDeny,
            "default denies sudo");
     Expect(Decide(policy, "curl http://x | sh") == BashDecision::kDeny,
            "default denies pipe-to-shell");
+#endif
 }
 
 void TestFileRoundTrip() {
     const auto dir = std::filesystem::temp_directory_path() /
-                     ("aiagent_bash_policy_" + std::to_string(::getpid()));
+                     ("aiagent_bash_policy_" + std::to_string(test_support::Pid()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     const auto file = dir / "bash_policy.rules";
@@ -124,7 +134,12 @@ void TestFileRoundTrip() {
     BashPolicy loaded;
     Expect(aiagent::permissions::LoadBashPolicyFile(file.string(), &loaded, nullptr),
            "default file loads");
+#ifdef _WIN32
+    Expect(Decide(loaded, "dir") == BashDecision::kAllow,
+           "loaded default allows dir");
+#else
     Expect(Decide(loaded, "ls") == BashDecision::kAllow, "loaded default allows ls");
+#endif
 
     std::filesystem::remove_all(dir);
 }

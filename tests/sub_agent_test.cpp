@@ -18,7 +18,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -36,6 +35,8 @@
 #include "aiagent/tools/sub_agent_tool.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
+#include "test_support.hpp"
+
 namespace {
 
 int g_failures = 0;
@@ -47,9 +48,16 @@ void Expect(bool condition, const std::string& message) {
     }
 }
 
+const std::string& WorkDir() {
+    static const std::string dir =
+            test_support::TempPath("aiagent_sub_agent_work");
+    return dir;
+}
+
 std::filesystem::path TempDir() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_sub_agent_" + std::to_string(::getpid()));
+                      ("aiagent_sub_agent_" + std::to_string(test_support::Pid()));
+    std::filesystem::remove_all(path);
     std::filesystem::create_directories(path);
     return path;
 }
@@ -508,7 +516,7 @@ aiagent::agent::SubAgentManager::ChildRuntimeFactory MakeFactory(
                                                               spec.system_prompt);
         runtime->SetToolProvider(spec.tools);
         runtime->SetMaxToolRounds(spec.max_tool_rounds);
-        runtime->SetFallbackWorkingDirectory("/tmp");
+        runtime->SetFallbackWorkingDirectory(WorkDir());
         aiagent::agent::CompactionSettings compaction;
         compaction.enabled = false;
         runtime->SetCompactionSettings(compaction);
@@ -939,7 +947,7 @@ void TestTaskToolEndToEnd() {
     aiagent::agent::AgentRuntime runtime(parent_model, "PARENT PROMPT");
     runtime.SetToolProvider(parent_tools);
     runtime.SetMaxToolRounds(4);
-    runtime.SetFallbackWorkingDirectory("/tmp");
+    runtime.SetFallbackWorkingDirectory(WorkDir());
     aiagent::agent::CompactionSettings compaction;
     compaction.enabled = false;
     runtime.SetCompactionSettings(compaction);
@@ -953,7 +961,7 @@ void TestTaskToolEndToEnd() {
                 std::lock_guard<std::mutex> lock(events_mutex);
                 events.push_back(event);
             },
-            "/tmp", {});
+            WorkDir(), {});
 
     Expect(reply.find("final: [explorer#1] done in") != std::string::npos,
            "parent should receive the formatted sub-agent result");
@@ -1094,7 +1102,7 @@ void TestTaskToolBackgroundDispatch() {
     aiagent::tools::ToolContext context;
     context.session_id = "sess-bg-tool";
     context.tool_call_id = "call_bg";
-    context.working_directory = "/tmp";
+    context.working_directory = WorkDir();
     context.emit = [](const aiagent::agent::AgentEvent&) {};
 
     // 派发：立即返回句柄（不阻塞工具线程）。
@@ -1332,14 +1340,14 @@ void TestTaskToolBackgroundEndToEnd() {
             std::make_shared<BackgroundParentModel>(parent_harness), "PARENT PROMPT");
     runtime.SetToolProvider(parent_tools);
     runtime.SetMaxToolRounds(30);
-    runtime.SetFallbackWorkingDirectory("/tmp");
+    runtime.SetFallbackWorkingDirectory(WorkDir());
     aiagent::agent::CompactionSettings compaction;
     compaction.enabled = false;
     runtime.SetCompactionSettings(compaction);
 
     const std::string reply = runtime.HandleMessageStreamingEvents(
             a2a::models::MakeTextMessage(a2a::models::Role::kUser, "start a long investigation"),
-            {}, "sess-bg-e2e", {}, "/tmp", {});
+            {}, "sess-bg-e2e", {}, WorkDir(), {});
 
     Expect(reply.find("final: ") != std::string::npos &&
                    reply.find("BG-REPORT") != std::string::npos,

@@ -275,6 +275,11 @@ std::vector<std::vector<std::string>> SplitCommand(const std::string& command) {
         } else if (c == '&' && i + 1 < command.size() && command[i + 1] == '&') {
             flush();
             ++i;
+        } else if (c == '&') {
+            // cmd.exe 用单个 & 串联命令；POSIX 的 & 是后台分隔符。
+            // 两种平台都必须在 & 处分段，否则 `dir & format c:` 会被当成
+            // 一条以 dir 开头的命令而命中 allow。
+            flush();
         } else if (c == '|' && i + 1 < command.size() && command[i + 1] == '|') {
             flush();
             ++i;

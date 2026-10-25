@@ -9,7 +9,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -19,6 +18,8 @@
 #include "aiagent/tools/local_tools.hpp"
 #include "aiagent/tools/tool_context.hpp"
 #include "aiagent/tools/tool_provider.hpp"
+
+#include "test_support.hpp"
 
 namespace {
 
@@ -33,7 +34,8 @@ void Expect(bool condition, const std::string& message) {
 
 std::filesystem::path TempDir() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_local_tools_" + std::to_string(::getpid()));
+                      ("aiagent_local_tools_" + std::to_string(test_support::Pid()));
+    std::filesystem::remove_all(path);
     std::filesystem::create_directories(path);
     return path;
 }
@@ -210,13 +212,23 @@ void TestBash() {
     Expect(result.ok, "bash echo should succeed");
     Expect(result.text.find("hello") != std::string::npos, "bash should capture stdout");
 
+#ifdef _WIN32
+    result = tools.Execute("bash", {{"command", "exit /b 3"}}, context);
+#else
     result = tools.Execute("bash", {{"command", "exit 3"}}, context);
+#endif
     Expect(!result.ok, "bash non-zero exit should fail");
     Expect(result.error.find("code 3") != std::string::npos,
            "bash should report the exit code");
 
-    // 超时：sleep 5s，timeout 1s。
+    // 超时：5s 命令，timeout 1s。
+#ifdef _WIN32
+    result = tools.Execute("bash",
+                           {{"command", "ping -n 6 127.0.0.1 >NUL"}, {"timeout", 1}},
+                           context);
+#else
     result = tools.Execute("bash", {{"command", "sleep 5"}, {"timeout", 1}}, context);
+#endif
     Expect(!result.ok, "bash timeout should fail");
     Expect(result.error.find("timed out") != std::string::npos,
            "bash should report timeout");
@@ -335,7 +347,11 @@ void TestWorkingDirectoryOverride() {
     Expect(result.ok && result.text == "from-b",
            "per-request working_directory should override default cwd");
 
+#ifdef _WIN32
+    result = tools.Execute("bash", {{"command", "cd"}}, FullContext(dir_b.string()));
+#else
     result = tools.Execute("bash", {{"command", "pwd"}}, FullContext(dir_b.string()));
+#endif
     Expect(result.ok && result.text.find(dir_b.string()) != std::string::npos,
            "bash should run in per-request working_directory");
 
@@ -382,9 +398,11 @@ void TestLsGlobGrep() {
     WriteFile(root / "misc" / "special" / "a+b[1].txt", "x\n");
     WriteFile(root / "misc" / "long" / "line.txt",
               "LONGTOKEN" + std::string(590, 'y') + "\n");
-    for (int i = 0; i < 300; ++i) {
+    // 文件名同时受 Windows MAX_PATH 约束：相对根路径约 85 字符，
+    // 这里用 120 字符名 + 500 个文件，既不超过 260，又能稳定超过 50KB。
+    for (int i = 0; i < 500; ++i) {
         WriteFile(root / "misc" / "wide" /
-                          (std::string(170, 'w') + std::to_string(1000 + i) + ".txt"),
+                          (std::string(120, 'w') + std::to_string(1000 + i) + ".txt"),
                   "x\n");
     }
     // 目录符号链接：不进入、也不按目录列出来。
@@ -622,6 +640,57 @@ void TestLsGlobGrep() {
     std::filesystem::remove_all(parent);
 }
 
+// 中文路径 / 中文输出 / 含空格参数：P3 的 UTF-8 边界回归。
+void TestUtf8PathsAndShellOutput() {
+    const auto dir = TempDir();
+    const auto cn_dir = dir / aiagent::platform::FromUtf8("中文 目录");
+    std::filesystem::create_directories(cn_dir);
+    WriteFile(cn_dir / aiagent::platform::FromUtf8("说明.txt"), "中文内容\n");
+
+    aiagent::tools::LocalCodingTools tools(dir.string());
+    const auto context = FullContext();
+
+    auto result = tools.Execute(
+            "read", {{"path", "中文 目录/说明.txt"}}, context);
+    Expect(result.ok && result.text.find("中文内容") != std::string::npos,
+           "read should handle UTF-8 path and content");
+
+    result = tools.Execute("write",
+                           {{"path", "中文 目录/新文件.txt"}, {"content", "新数据"}},
+                           context);
+    Expect(result.ok, "write should handle UTF-8 path");
+    Expect(ReadAll(cn_dir / aiagent::platform::FromUtf8("新文件.txt")) == "新数据",
+           "write should persist UTF-8 path/content");
+
+    result = tools.Execute("ls", {{"path", "."}}, context);
+    Expect(result.ok && result.text.find("中文 目录/") != std::string::npos,
+           "ls should render UTF-8 directory names");
+
+    result = tools.Execute("grep", {{"pattern", "中文内容"}}, context);
+    Expect(result.ok && result.text.find("说明.txt") != std::string::npos,
+           "grep should match UTF-8 content");
+
+#ifdef _WIN32
+    // chcp 65001 让子命令输出 UTF-8，避免依赖当前 OEM 代码页；
+    // 同时覆盖 && 与 > 重定向。
+    result = tools.Execute(
+            "bash", {{"command", "chcp 65001 >NUL && echo 中文输出"}}, context);
+    Expect(result.ok && result.text.find("中文输出") != std::string::npos,
+           "bash should decode UTF-8 output on Windows");
+
+    result = tools.Execute("bash", {{"command", "echo \"a b\""}}, context);
+    Expect(result.ok && result.text.find("a b") != std::string::npos,
+           "bash should preserve quoted arguments with spaces");
+#else
+    result = tools.Execute(
+            "bash", {{"command", "printf '%s' '中文输出'"}}, context);
+    Expect(result.ok && result.text.find("中文输出") != std::string::npos,
+           "bash should pass through UTF-8 output");
+#endif
+
+    std::filesystem::remove_all(dir);
+}
+
 }  // namespace
 
 int main() {
@@ -631,6 +700,7 @@ int main() {
     TestSandbox();
     TestWorkingDirectoryOverride();
     TestLsGlobGrep();
+    TestUtf8PathsAndShellOutput();
 
     if (g_failures != 0) {
         std::cerr << "local tools test failed with " << g_failures << " failure(s)\n";

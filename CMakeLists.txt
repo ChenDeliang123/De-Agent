@@ -231,21 +231,24 @@ if(AIAGENT_BUILD_TESTS)
   add_test(NAME aiagent_process COMMAND process_test)
 
   # 安装布局冒烟测试：只安装 deagent 组件，校验产物路径。
-  add_test(
-    NAME aiagent_packaging_install
-    COMMAND
-      ${CMAKE_COMMAND} -DAIAGENT_BUILD_DIR=${CMAKE_BINARY_DIR}
-      -DAIAGENT_INSTALL_STAGE=${CMAKE_BINARY_DIR}/install-stage
-      -DAIAGENT_INSTALL_BINDIR=${CMAKE_INSTALL_BINDIR}
-      -DAIAGENT_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
-      -DAIAGENT_INSTALL_DATADIR=${CMAKE_INSTALL_DATADIR} -P
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/packaging_install_test.cmake)
+  # Windows 的安装布局与启动器在 P6 落地，届时换成 ZIP/PowerShell 断言。
+  if(UNIX)
+    add_test(
+      NAME aiagent_packaging_install
+      COMMAND
+        ${CMAKE_COMMAND} -DAIAGENT_BUILD_DIR=${CMAKE_BINARY_DIR}
+        -DAIAGENT_INSTALL_STAGE=${CMAKE_BINARY_DIR}/install-stage
+        -DAIAGENT_INSTALL_BINDIR=${CMAKE_INSTALL_BINDIR}
+        -DAIAGENT_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
+        -DAIAGENT_INSTALL_DATADIR=${CMAKE_INSTALL_DATADIR} -P
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/packaging_install_test.cmake)
 
-  # de 启动器脚本冒烟测试：安装到临时 prefix，校验 init/doctor/布局。
-  add_test(
-    NAME aiagent_de_script
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/de_script_test.sh
-            ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+    # de 启动器脚本冒烟测试：安装到临时 prefix，校验 init/doctor/布局。
+    add_test(
+      NAME aiagent_de_script
+      COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/de_script_test.sh
+              ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+  endif()
 
   # CPack DEB 冒烟测试（仅当本机同时有 cpack 与 dpkg-deb）。
   find_program(AIAGENT_CPACK_EXECUTABLE cpack)
@@ -354,6 +357,9 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(web_gateway_test tests/web_gateway_test.cpp)
   target_link_libraries(web_gateway_test PRIVATE aiagent_web aiagent_agent)
   target_include_directories(web_gateway_test PRIVATE ${AIAGENT_HTTPLIB_INCLUDE_DIR})
+  if(WIN32)
+    target_link_libraries(web_gateway_test PRIVATE ws2_32)
+  endif()
   add_test(NAME aiagent_web_gateway COMMAND web_gateway_test)
 endif()
 

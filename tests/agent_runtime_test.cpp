@@ -9,7 +9,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <unistd.h>
 
 #include "a2a/core/version.hpp"
 #include "a2a/models/agent_card.hpp"
@@ -23,6 +22,8 @@
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/log.hpp"
 
+#include "test_support.hpp"
+
 namespace {
 
 int g_failures = 0;
@@ -32,6 +33,18 @@ void Expect(bool condition, const std::string& message) {
         std::cerr << "FAILED: " << message << '\n';
         ++g_failures;
     }
+}
+
+const std::string& WorkDir() {
+    static const std::string dir =
+            test_support::TempPath("aiagent_runtime_work");
+    return dir;
+}
+
+const std::string& TightenProject() {
+    static const std::string dir =
+            test_support::TempPath("aiagent_project_tighten");
+    return dir;
 }
 
 class FakeModel final : public aiagent::llm::IModelClient {
@@ -1086,7 +1099,7 @@ int main() {
         runtime.HandleMessageStreamingEvents(
                 user, {user}, "ctx-channels",
                 [&](const aiagent::agent::AgentEvent& event) { events.push_back(event); },
-                "/tmp", []() { return false; });
+                WorkDir(), []() { return false; });
 
         Expect(tools->executions == 1, "tool should execute once");
         Expect(tools->session_id == "ctx-channels",
@@ -1645,11 +1658,11 @@ int main() {
             aiagent::agent::PermissionSettings settings;
             settings.default_mode = PermissionMode::kWorkspace;
             runtime.SetPermissionSettings(settings);
-            runtime.SetFallbackWorkingDirectory("/tmp/aiagent-project-tighten");
+            runtime.SetFallbackWorkingDirectory(TightenProject());
             auto store = std::make_shared<aiagent::permissions::PermissionStore>();
-            store->Set("/tmp/aiagent-project-tighten", PermissionMode::kConfirm);
+            store->Set(TightenProject(), PermissionMode::kConfirm);
             auto project = std::make_shared<aiagent::permissions::ProjectConfig>();
-            project->root = "/tmp/aiagent-project-tighten";
+            project->root = TightenProject();
             project->permissions = store;
             project->trusted = false;
             runtime.SetProjectConfigProvider([project](const std::string&) {
@@ -1718,8 +1731,8 @@ int main() {
         }
         // M5a：回合收尾后到达的 steer 记为未投递（日志可查），且之后 Push 被拒。
         {
-            const std::string log_path =
-                    "/tmp/aiagent_steer_test_" + std::to_string(::getpid()) + ".log";
+            const std::string log_path = test_support::TempPathWithPid(
+                    "aiagent_steer_test_", ".log");
             std::remove(log_path.c_str());
             aiagent::ConfigureDefaultLogger("info", log_path);
             auto inbox = std::make_shared<aiagent::agent::MessageInbox>();

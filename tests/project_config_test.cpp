@@ -1,12 +1,15 @@
 // 项目级 `.de/` 只读分层配置的单元测试：项目根探测、加载与缓存。
 
+#include <json.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 
 #include "aiagent/permissions/project_config.hpp"
+
+#include "test_support.hpp"
 
 namespace {
 
@@ -21,7 +24,7 @@ void Expect(bool condition, const std::string& message) {
 
 std::filesystem::path TempDir() {
     const auto path = std::filesystem::temp_directory_path() /
-                      ("aiagent_project_cfg_" + std::to_string(::getpid()));
+                      ("aiagent_project_cfg_" + std::to_string(test_support::Pid()));
     std::filesystem::remove_all(path);
     std::filesystem::create_directories(path);
     return path;
@@ -67,9 +70,11 @@ void TestCacheLoadAndTighten() {
     std::filesystem::create_directories(proj / ".de");
     const std::string root = std::filesystem::weakly_canonical(proj).string();
 
+    // 用 nlohmann::json 生成，避免 Windows 路径反斜杠破坏 JSON 转义。
     WriteFile(proj / ".de" / "permissions.json",
-              "{\"version\":1,\"paths\":{\"" + root +
-                      "\":{\"mode\":\"confirm\"}}}");
+              nlohmann::json{{"version", 1},
+                             {"paths", {{root, {{"mode", "confirm"}}}}}}
+                      .dump());
     WriteFile(proj / ".de" / "bash_policy.rules",
               "deny badcmd\nallow git status\n");
 
