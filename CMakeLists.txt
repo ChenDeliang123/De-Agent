@@ -354,6 +354,11 @@ if(AIAGENT_BUILD_TESTS)
                              AIAGENT_FAKE_MCP_BINARY="$<TARGET_FILE:fake_mcp_server>")
   add_test(NAME aiagent_mcp_bridge COMMAND mcp_bridge_test)
 
+  # 真实 mcp_server 的端到端冒烟；未设置环境变量时测试内部跳过。
+  add_executable(mcp_real_bridge_test tests/mcp_real_bridge_test.cpp)
+  target_link_libraries(mcp_real_bridge_test PRIVATE aiagent_mcp aiagent_agent)
+  add_test(NAME aiagent_mcp_real_bridge COMMAND mcp_real_bridge_test)
+
   add_executable(web_gateway_test tests/web_gateway_test.cpp)
   target_link_libraries(web_gateway_test PRIVATE aiagent_web aiagent_agent)
   target_include_directories(web_gateway_test PRIVATE ${AIAGENT_HTTPLIB_INCLUDE_DIR})
