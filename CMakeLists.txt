@@ -248,6 +248,13 @@ if(AIAGENT_BUILD_TESTS)
       NAME aiagent_de_script
       COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/de_script_test.sh
               ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+  elseif(WIN32)
+    # Windows 启动器：source/package/installed 三种布局 + init/doctor/start/stop。
+    add_test(
+      NAME aiagent_de_script
+      COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+              -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/de_script_test.ps1
+              -BackendExe $<TARGET_FILE:aiagent_app>)
   endif()
 
   # CPack DEB 冒烟测试（仅当本机同时有 cpack 与 dpkg-deb）。
@@ -387,9 +394,16 @@ install(TARGETS aiagent_app
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT deagent)
 
-install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/de"
-        DESTINATION ${CMAKE_INSTALL_BINDIR}
-        COMPONENT deagent)
+if(WIN32)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/de.ps1"
+                "${CMAKE_CURRENT_SOURCE_DIR}/de.cmd"
+          DESTINATION ${CMAKE_INSTALL_BINDIR}
+          COMPONENT deagent)
+else()
+  install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/de"
+          DESTINATION ${CMAKE_INSTALL_BINDIR}
+          COMPONENT deagent)
+endif()
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cli/"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/de/cli

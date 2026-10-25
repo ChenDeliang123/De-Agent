@@ -95,9 +95,9 @@ DeepSeek 进行对话、按需调用 MCP 与内置文件/命令工具，并以 A
 
 ## 环境要求
 
-- Linux（当前开发与测试环境）
+- Linux，或 Windows 10 1809+ / Windows 11 x64
 - CMake ≥ 3.21
-- 支持 C++20 的编译器（GCC 11+ / Clang 14+）
+- 支持 C++20 的编译器（GCC 11+ / Clang 14+ / MSVC v143+；Windows 本机基线为 MinGW-w64）
 - libcurl 开发库
 - Node.js ≥ 18（运行终端 CLI 时）
 - Python 3（可选，MCP Python 插件需要）
@@ -164,6 +164,52 @@ tar xzf de-agent-mcp-<version>-linux-<arch>.tar.gz \
 
 > Python 插件需要目标机器有 `python3`；`native` / `shell` 等插件不需要。
 > 也可在你的 `conf/conf.ini` 的 `[mcp]` 段显式指定 `binary` / `plugins` 覆盖默认发现。
+
+## Windows（MinGW-w64 + PowerShell 启动器）
+
+Windows 使用 `de.cmd`（三行 shim）+ `de.ps1`，命令与 POSIX `de` 对齐：
+
+```powershell
+# 1) 构建（MinGW + Ninja + 静态 libcurl，见 Windows适配规划 P0）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+
+# 2) 初始化 / 检查 / 启动
+.\de.cmd init      # 源码树写入 conf/conf.ini；安装态写入 %USERPROFILE%\.de\conf
+.\de.cmd doctor
+.\de.cmd           # 启动后端并进入 CLI
+.\de.cmd status
+.\de.cmd stop
+.\de.cmd logs backend
+.\de.cmd logs cli
+```
+
+Windows 命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `de.cmd init` | 复制 `app.ini.example`/`cli.ini.example`，不覆盖已有文件 |
+| `de.cmd doctor` | 检查后端、CLI、Node、curl、数据目录、端口 |
+| `de.cmd [options]` | 启动后端（若未运行）并进入终端 CLI |
+| `de.cmd stop` / `status` / `restart` | 进程管理（PID 文件在 runtime 目录） |
+| `de.cmd logs [backend\|cli]` | `Get-Content -Wait` 跟踪日志 |
+| `de.cmd purge [--yes]` | 删除用户数据目录 |
+| `de.cmd --no-backend -- ...` | 只运行 CLI（参数透传） |
+
+布局自动识别：**源码树**（`<repo>\de.cmd`，后端 `build-mingw\aiagent_app.exe`，
+数据/日志在仓库 `.runtime` 与 `build-mingw\db`）、**绿色包**（`<pkg>\de.cmd` +
+`bin\aiagent_app.exe`）、**安装态**（`<prefix>\bin\de.cmd`）。安装态数据目录为
+`%USERPROFILE%\.de`（`%LOCALAPPDATA%\de` 兜底）。可用 `de.cmd doctor` 查看解析结果。
+
+可选 MCP：构建到根目录 `build-mcp\` 后，源码树启动会自动发现
+`build-mcp\mcp_server\mcp_server.exe`；安装包则放在
+`<prefix>\share\de\mcp\{mcp_server.exe,plugins\}`。
+
+已知限制（v1）：
+
+- 默认 shell 是 `cmd.exe /d /s /c`，不是 bash；模型提示词/工具描述已按平台切换。
+- 推荐 Windows Terminal；经典 conhost 的颜色/光标/宽字符能力有限。
+- `system_monitor` Python 插件在 Windows 明确返回 unsupported（不要依赖 `/proc`）。
+- ARM64 暂不支持；长路径/UNC 的企业环境需后续硬化。
 
 ### 系统包（deb / rpm）
 

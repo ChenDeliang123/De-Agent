@@ -71,7 +71,25 @@ test("resolveDataDir follows DE_HOME > XDG_DATA_HOME/de > ~/.de", () => {
     resolveDataDir({ XDG_DATA_HOME: "/x/xdg", HOME: "/home/u" }),
     join("/x/xdg", "de"),
   );
-  assert.equal(resolveDataDir({ HOME: "/home/u" }), join("/home/u", ".de"));
+  if (process.platform === "win32") {
+    // Windows 与后端一致，不把 HOME 当数据目录来源。
+    assert.equal(resolveDataDir({ HOME: "/home/u" }), null);
+  } else {
+    assert.equal(resolveDataDir({ HOME: "/home/u" }), join("/home/u", ".de"));
+  }
+  if (process.platform === "win32") {
+    assert.equal(
+      resolveDataDir({
+        USERPROFILE: "C:\\Users\\u",
+        LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+      }),
+      join("C:\\Users\\u", ".de"),
+    );
+    assert.equal(
+      resolveDataDir({ LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" }),
+      join("C:\\Users\\u\\AppData\\Local", "de"),
+    );
+  }
   assert.equal(resolveDataDir({}), null);
 });
 

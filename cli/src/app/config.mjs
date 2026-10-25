@@ -8,7 +8,8 @@
 // 查找顺序：
 //   --cli-config <file> > $AIAGENT_CLI_CONFIG > ./conf/cli.ini > <repo>/conf/cli.ini
 //   > <data_dir>/conf/cli.ini > $AIAGENT_SHARE_DIR/conf/cli.ini
-// 其中 data_dir 与后端一致（$DE_HOME > $XDG_DATA_HOME/de > ~/.de）。
+// 其中 data_dir 与后端一致：Linux 为 $DE_HOME > $XDG_DATA_HOME/de > ~/.de；
+// Windows 为 $DE_HOME > $XDG_DATA_HOME/de > %USERPROFILE%\.de > %LOCALAPPDATA%\de。
 // 找不到文件不报错，返回空配置。
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -37,6 +38,16 @@ export function resolveDataDir(env = process.env) {
   }
   if (typeof env.XDG_DATA_HOME === "string" && env.XDG_DATA_HOME.trim() !== "") {
     return join(env.XDG_DATA_HOME.trim(), "de");
+  }
+  if (process.platform === "win32") {
+    // 与后端 ResolveAppPaths 对齐：Windows 不把 HOME 当数据目录来源。
+    if (typeof env.USERPROFILE === "string" && env.USERPROFILE.trim() !== "") {
+      return join(env.USERPROFILE.trim(), ".de");
+    }
+    if (typeof env.LOCALAPPDATA === "string" && env.LOCALAPPDATA.trim() !== "") {
+      return join(env.LOCALAPPDATA.trim(), "de");
+    }
+    return null;
   }
   if (typeof env.HOME === "string" && env.HOME.trim() !== "") {
     return join(env.HOME.trim(), ".de");

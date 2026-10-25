@@ -35,7 +35,7 @@ test("gitBranch reads .git/HEAD from an ancestor directory", () => {
 });
 
 test("formatStatusLine composes cwd, branch, mode and session", () => {
-  const home = process.env.HOME;
+  const home = process.env.HOME || process.env.USERPROFILE;
   const line = formatStatusLine(
     {
       cwd: path.join(home, "proj"),

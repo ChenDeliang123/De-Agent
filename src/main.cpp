@@ -635,10 +635,15 @@ int main(int argc, char** argv) {
                         aiagent::platform::ToUtf8(aiagent::platform::FromUtf8(share_dir) /
                                                   "mcp" / "plugins"));
             }
+            // Windows 源码树通常把 MCP 构建在根目录的 build-mcp/ 下；
+            // Linux/旧布局仍回退到子项目的 build/。
+            binary_candidates.push_back("build-mcp/mcp_server/mcp_server.exe");
+            binary_candidates.push_back("build-mcp/mcp_server/mcp_server");
             binary_candidates.push_back(
                     "vendor/mcp-extension-platform/build/mcp_server/mcp_server");
             binary_candidates.push_back(
                     "vendor/mcp-extension-platform/build/mcp_server/mcp_server.exe");
+            plugin_candidates.push_back("build-mcp/mcp_server/plugins");
             plugin_candidates.push_back(
                     "vendor/mcp-extension-platform/mcp_server/plugins");
 

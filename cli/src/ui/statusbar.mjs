@@ -15,18 +15,26 @@ import { clipToWidth, displayWidth } from "./text.mjs";
 
 export const PROMPT_LABEL = "❯ ";
 
-export function shortCwd(cwd, home = process.env.HOME) {
+export function shortCwd(
+  cwd,
+  home = process.env.HOME || (process.platform === "win32" ? process.env.USERPROFILE : undefined),
+) {
   if (!cwd) {
     return "";
   }
   if (!home) {
     return cwd;
   }
-  if (cwd === home) {
+  // Windows 的 path.join 产出反斜杠，状态行统一显示为 '/'，避免
+  // `~\proj` 与实际拼接判断不一致。
+  const normalize = (value) => String(value).replace(/[\\/]+/g, "/");
+  const normalizedCwd = normalize(cwd);
+  const normalizedHome = normalize(home);
+  if (normalizedCwd === normalizedHome) {
     return "~";
   }
-  if (cwd.startsWith(`${home}/`)) {
-    return `~${cwd.slice(home.length)}`;
+  if (normalizedCwd.startsWith(`${normalizedHome}/`)) {
+    return `~${normalizedCwd.slice(normalizedHome.length)}`;
   }
   return cwd;
 }
