@@ -2,8 +2,10 @@
 
 #include "aiagent/platform/paths.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -17,7 +19,13 @@
 namespace aiagent {
 namespace {
 
-thread_local std::string g_request_id;
+// 注意：这里刻意用扁平字符数组而不是 `thread_local std::string`。
+// MinGW-w64 16.2 + UCRT 上，非平凡 thread_local 对象在短生命周期线程退出时
+// 会在 TLS 回调里触发堆损坏（可复现：8 线程 × 100 轮反复赋值后 join，
+// 进程以 0xc0000374 退出）。日志是每个子 Agent worker 都会走的热路径，
+// 所以把 TLS 状态保持为平凡可析构类型。
+constexpr std::size_t kMaxRequestIdBytes = 255;
+thread_local char g_request_id[kMaxRequestIdBytes + 1] = {};
 
 const char* LevelName(LogLevel level) {
     switch (level) {
@@ -116,10 +124,13 @@ public:
         }
 
         RotateIfNeeded();
+        const std::string request_suffix =
+                g_request_id[0] == '\0'
+                        ? std::string()
+                        : " req=" + std::string(g_request_id) + " ";
         std::ostringstream line;
         line << FormatTime() << ' ' << LevelName(level) << " [" << module << "] "
-             << (g_request_id.empty() ? std::string() : " req=" + g_request_id + " ")
-             << RedactSecrets(message) << '\n';
+             << request_suffix << RedactSecrets(message) << '\n';
         if (file_stream_.is_open()) {
             file_stream_ << line.str();
             file_stream_.flush();
@@ -218,7 +229,13 @@ void ConfigureDefaultLogger(const std::string& level, const std::string& file_pa
     DefaultLogger().Configure(level, file_path, console, max_size_bytes, max_files);
 }
 
-void SetThreadRequestId(const std::string& request_id) { g_request_id = request_id; }
-void ClearThreadRequestId() { g_request_id.clear(); }
+void SetThreadRequestId(const std::string& request_id) {
+    const std::size_t count =
+            std::min(request_id.size(), kMaxRequestIdBytes);
+    std::memcpy(g_request_id, request_id.data(), count);
+    g_request_id[count] = '\0';
+}
+
+void ClearThreadRequestId() { g_request_id[0] = '\0'; }
 
 }  // namespace aiagent

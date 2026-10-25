@@ -72,17 +72,26 @@ void TestConcurrentWrites() {
     aiagent::Logger logger;
     logger.Configure("info", path.string(), false);
 
-    std::vector<std::thread> threads;
-    for (int t = 0; t < 4; ++t) {
-        threads.emplace_back([&logger, t] {
-            for (int i = 0; i < 50; ++i) {
-                logger.Log(aiagent::LogLevel::kInfo, "thread",
-                           "thread-" + std::to_string(t) + "-" + std::to_string(i));
-            }
-        });
-    }
-    for (auto& thread : threads) {
-        thread.join();
+    // 反复创建/销毁短生命周期线程：每条线程都会触达 logger 的 thread_local
+    // request id。MinGW-w64 16.2 + UCRT 上，非平凡 thread_local 析构会在
+    // 线程退出时损坏堆（0xc0000374），这里把线程退出次数放大到足以回归。
+    constexpr int kRounds = 16;
+    constexpr int kThreads = 4;
+    constexpr int kLines = 50;
+    for (int round = 0; round < kRounds; ++round) {
+        std::vector<std::thread> threads;
+        for (int t = 0; t < kThreads; ++t) {
+            threads.emplace_back([&logger, t] {
+                for (int i = 0; i < kLines; ++i) {
+                    logger.Log(aiagent::LogLevel::kInfo, "thread",
+                               "thread-" + std::to_string(t) + "-" +
+                                       std::to_string(i));
+                }
+            });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
     }
 
     std::size_t count = 0;
@@ -92,7 +101,8 @@ void TestConcurrentWrites() {
         ++count;
     }
     input.close();
-    Expect(count == 200, "all concurrent log lines should be written");
+    Expect(count == static_cast<std::size_t>(kRounds * kThreads * kLines),
+           "all concurrent log lines should be written");
     // Windows 不允许删除仍被进程打开的文件；先关掉日志流。
     logger.Configure("off", "", false);
     std::filesystem::remove(path);
