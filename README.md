@@ -204,6 +204,35 @@ Windows 命令：
 `build-mcp\mcp_server\mcp_server.exe`；安装包则放在
 `<prefix>\share\de\mcp\{mcp_server.exe,plugins\}`。
 
+### Windows 本地回归
+
+一条命令覆盖 a2a、根项目、CLI、MCP（加 `-Package` 时再加 ZIP 打包）：
+
+```powershell
+# 日常回归
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1
+
+# Release 配置
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1 -Configuration Release
+
+# 最终验收：额外构建并校验 Windows ZIP/MCP ZIP
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1 -Package
+```
+
+前置与 `build-windows.ps1` 相同；a2a 测试还需要缓存
+`<AIAGENT_DEPS_DIR>\googletest-1.15.2`。脚本分段执行，某段失败不会掩盖后续段；
+日志在 `build-mingw\smoke\{a2a,root,cli,mcp,package}.log`。
+
+预期显式 `SKIP`：
+
+- 无创建符号链接权限时，根项目 4 个 symlink 用例跳过；
+- 未配置 DashScope key 时，`test_rag_embedding.py` 跳过；
+- `test_rag_integration.py` 在 Windows 因依赖 bash 管道跳过。
+
+`scripts/test-windows.ps1` 会把 `SKIP:` 行汇总到终端；除这些明确项外，平台差异
+不允许静默跳过。Linux 回归在 Ubuntu 虚拟机执行，命令见
+`docs/Windows适配规划.md` 的 P7 段。
+
 ### Windows 绿色 ZIP
 
 ```powershell
