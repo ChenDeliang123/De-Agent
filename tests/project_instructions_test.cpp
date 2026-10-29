@@ -228,6 +228,8 @@ void TestLimitsAndSkipRules() {
         const auto followed =
                 aiagent::agent::ProjectInstructionsLoader(follow).Load(sub.string(), {});
         Expect(followed.files.size() == 2, "follow_symlinks=true should load symlinked AGENTS.md");
+    } else {
+        std::cout << "SKIP: AGENTS.md symlink checks: " << symlink_error.message() << "\n";
     }
 }
 

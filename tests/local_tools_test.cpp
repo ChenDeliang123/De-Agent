@@ -306,6 +306,8 @@ void TestSandbox() {
     if (!ec) {
         result = guarded.Execute("read", {{"path", "link.txt"}}, restricted);
         Expect(!result.ok, "sandbox should block symlink escape");
+    } else {
+        std::cout << "SKIP: symlink escape check: " << ec.message() << "\n";
     }
 
     // full 策略不限制范围（allow_outside）。
@@ -408,6 +410,9 @@ void TestLsGlobGrep() {
     // 目录符号链接：不进入、也不按目录列出来。
     std::error_code ec;
     std::filesystem::create_directory_symlink(root / "docs", root / "misc" / "link", ec);
+    if (ec) {
+        std::cout << "SKIP: directory symlink checks: " << ec.message() << "\n";
+    }
 
     aiagent::tools::LocalCodingTools tools(root.string());
     const auto context = FullContext();

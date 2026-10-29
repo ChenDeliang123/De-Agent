@@ -136,8 +136,9 @@ void TestSymlinkCanonicalization() {
     std::error_code ec;
     std::filesystem::create_directory_symlink(real, link, ec);
     if (ec) {
+        std::cout << "SKIP: symlink canonicalization: " << ec.message() << "\n";
         std::filesystem::remove_all(dir);
-        return;  // 平台不支持符号链接则跳过
+        return;
     }
     PermissionStore store;
     store.Set(link.string(), PermissionMode::kWorkspace);

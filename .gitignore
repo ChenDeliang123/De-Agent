@@ -9,6 +9,7 @@ build-mingw/
 build-mingw-release/
 build-mcp/
 build-mcp-release/
+build-a2a/
 .tmp-cmake-test/
 logs/
 dist/
