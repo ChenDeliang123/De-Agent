@@ -88,6 +88,25 @@ test("renderHelp is generated from the registry", () => {
   assert.ok(help.includes("Local:"));
 });
 
+test("renderHelp never glues usage to its description", () => {
+  const help = renderHelp();
+  for (const command of commands) {
+    const arg = command.argHint ? ` ${command.argHint}` : "";
+    const aliases =
+      (command.aliases ?? []).length > 0
+        ? ` (${command.aliases.map((alias) => `/${alias}`).join(", ")})`
+        : "";
+    const usage = `    /${command.name}${arg}${aliases}`;
+    const index = help.indexOf(usage);
+    assert.ok(index >= 0, `help missing usage for /${command.name}`);
+    const after = help.slice(index + usage.length);
+    assert.ok(
+      after.startsWith(" ") || after.startsWith("\n"),
+      `usage and description are glued for /${command.name}: ${JSON.stringify(after.slice(0, 20))}`,
+    );
+  }
+});
+
 test("suggestCommand proposes the closest name", () => {
   assert.equal(suggestCommand("hepl"), "help");
   assert.equal(suggestCommand("quitt"), "quit");

@@ -89,7 +89,15 @@ export function renderHelp(registry = commands) {
           ? ` (${command.aliases.map((alias) => `/${alias}`).join(", ")})`
           : "";
       const usage = `    /${command.name}${arg}${aliases}`;
-      lines.push(`${usage.padEnd(34)}${command.description}`);
+      // 固定描述列；超长 usage（/permissions、/agents）把描述换到下一行，
+      // 避免与 usage 粘在一起或把整行推出终端宽度。
+      const descriptionColumn = 36;
+      if (usage.length + 2 <= descriptionColumn) {
+        lines.push(`${usage.padEnd(descriptionColumn)}${command.description}`);
+      } else {
+        lines.push(usage);
+        lines.push(`${" ".repeat(descriptionColumn)}${command.description}`);
+      }
     }
   }
   lines.push("");
