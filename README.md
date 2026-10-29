@@ -204,6 +204,44 @@ Windows 命令：
 `build-mcp\mcp_server\mcp_server.exe`；安装包则放在
 `<prefix>\share\de\mcp\{mcp_server.exe,plugins\}`。
 
+### Windows 绿色 ZIP
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -WithMcp
+# → dist/v<version>/de-agent-<version>-windows-x64.zip
+# → dist/v<version>/de-agent-mcp-...zip          （-WithMcp）
+# → dist/v<version>/SHA256SUMS、RELEASE.md
+```
+
+主包解压后直接运行 `bin` 旁的 `de.cmd`：
+
+```powershell
+Expand-Archive de-agent-<version>-windows-x64.zip -DestinationPath .
+cd de-agent-<version>-windows-x64
+.\de.cmd init
+notepad "$env:USERPROFILE\.de\conf\conf.ini"   # 或按 de.cmd doctor 打印的路径
+.\de.cmd doctor
+.\de.cmd
+```
+
+MCP 可选包根为 `share/de/mcp/`，解到主包根即可：
+
+```powershell
+Expand-Archive de-agent-mcp-<version>-windows-x64.zip -DestinationPath .
+.\de.cmd restart     # 重新加载 MCP
+```
+
+ZIP 内的 EXE/DLL 已静态链接 MinGW 运行时（不依赖 libstdc++/libgcc/winpthread DLL），
+目标机只需 Windows 10 1809+ 与 Node.js。校验用 PowerShell：
+
+```powershell
+Get-FileHash .\de-agent-<version>-windows-x64.zip -Algorithm SHA256
+```
+
+> Git/MSYS 的 `sha256sum -c` 在 Windows 上对大文件存在误报，`SHA256SUMS` 以
+> PowerShell `Get-FileHash` 校验为准。
+
 已知限制（v1）：
 
 - 默认 shell 是 `cmd.exe /d /s /c`，不是 bash；模型提示词/工具描述已按平台切换。

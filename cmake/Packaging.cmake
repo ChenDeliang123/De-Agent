@@ -26,8 +26,18 @@ set(CPACK_PACKAGE_DESCRIPTION
     "零 npm 依赖的终端客户端。接入 DeepSeek，支持 MCP 工具、权限模式与会话持久化。")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://gitee.com/chen_dl/ai-agent-cpp")
 
-# 安装到系统前缀（deb/rpm 不应装到 /usr/local）。
-set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+# 安装前缀：deb/rpm 装到 /usr；Windows ZIP 以包根为前缀。
+# 注意：ZIP 归档生成器不按 CPack 组件过滤（a2a 子项目的 Unspecified 安装物
+# 也会被带入）。发布请使用 scripts/package-windows.ps1，它会精确安装 deagent
+# 组件并校验布局；这里的 CPack ZIP 配置仅作为标准入口保留。
+if(WIN32)
+  set(CPACK_GENERATOR "ZIP")
+  set(CPACK_PACKAGING_INSTALL_PREFIX "")
+  set(CPACK_PACKAGE_FILE_NAME
+      "de-agent-${PROJECT_VERSION}-windows-x64")
+else()
+  set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+endif()
 
 # 只打 deagent 组件；忽略 Unspecified（a2a 子项目产物）。
 set(CPACK_COMPONENTS_ALL deagent)

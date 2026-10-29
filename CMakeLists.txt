@@ -205,6 +205,12 @@ else()
   target_compile_options(aiagent_app PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(WIN32 AND NOT MSVC)
+  # Windows ZIP 绿色包不携带 MinGW 运行时；主程序不加载原生插件，
+  # 全静态链接 libgcc/libstdc++/winpthread。
+  target_link_options(aiagent_app PRIVATE -static)
+endif()
+
 # ---------------------------------------------------------------------------
 # 测试
 # ---------------------------------------------------------------------------

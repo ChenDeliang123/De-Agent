@@ -16,9 +16,11 @@ max_retries = 3
 ;   binary = C:/Tools/mcp/mcp_server.exe
 ;   plugins = C:/Tools/mcp/plugins
 ;   python_path = python
-binary = /absolute/path/to/mcp_server/mcp_server
-plugins = /absolute/path/to/mcp_server/plugins
-python_path = python3
+; python_path 留空/注释时使用平台默认（Linux python3 / Windows python）。
+; python_path =
+; 留空 = 自动发现安装包/源码树内的 MCP；需要固定路径时再填。
+binary =
+plugins =
 transport = stdio
 request_timeout_seconds = 60
 
