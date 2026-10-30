@@ -233,6 +233,13 @@ void TestBash() {
     Expect(result.error.find("timed out") != std::string::npos,
            "bash should report timeout");
 
+    // 读 stdin 的命令必须立即收到 EOF，不能挂到超时。
+    // 修复前父进程保留 stdin 写端，sort 会一直等到 timeout。
+    result = tools.Execute("bash", {{"command", "sort"}, {"timeout", 2}}, context);
+    Expect(result.ok, "bash should close child stdin so stdin readers exit");
+    Expect(result.error.find("timed out") == std::string::npos,
+           "bash stdin reader should not time out");
+
     std::filesystem::remove_all(dir);
 }
 

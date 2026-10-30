@@ -80,6 +80,10 @@ CommandResult RunCommand(const std::string& command, const std::string& cwd,
         return result;
     }
 
+    // bash 工具是非交互的：父进程若继续持有 stdin 写端，`sort`/`cat` 等读
+    // stdin 的命令会一直阻塞到超时。启动后立即关闭，让子进程读到 EOF。
+    process->CloseStdin();
+
     std::string output;
     bool capture = true;
     bool timed_out = false;
