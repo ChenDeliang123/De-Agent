@@ -592,6 +592,105 @@ std::optional<InstructionsConfig> LoadInstructionsConfigFile(const std::string& 
     return ParseInstructionsConfig(content.str(), error);
 }
 
+std::optional<SkillsConfig> ParseSkillsConfig(const std::string& content, std::string* error) {
+    SkillsConfig config;
+    bool in_skills = false;
+
+    auto parse_size = [error](const std::string& key, const std::string& value,
+                              std::size_t min_value, std::size_t max_value, std::size_t* output) {
+        if (!value.empty() && value.front() == '-') {
+            if (error != nullptr) {
+                *error = key + " must be between " + std::to_string(min_value) + " and " +
+                         std::to_string(max_value);
+            }
+            return false;
+        }
+        try {
+            const unsigned long long parsed = std::stoull(value);
+            if (parsed < min_value || parsed > max_value) {
+                if (error != nullptr) {
+                    *error = key + " must be between " + std::to_string(min_value) + " and " +
+                             std::to_string(max_value);
+                }
+                return false;
+            }
+            *output = static_cast<std::size_t>(parsed);
+            return true;
+        } catch (const std::exception&) {
+            if (error != nullptr) {
+                *error = "invalid " + key + ": " + value;
+            }
+            return false;
+        }
+    };
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_skills = (section == "skills");
+            continue;
+        }
+        if (!in_skills) {
+            continue;
+        }
+
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "enabled") {
+            config.enabled = Lower(value) == "true" || value == "1";
+        } else if (key == "project") {
+            config.project = Lower(value) == "true" || value == "1";
+        } else if (key == "user") {
+            config.user = Lower(value) == "true" || value == "1";
+        } else if (key == "builtin") {
+            config.builtin = Lower(value) == "true" || value == "1";
+        } else if (key == "extra_roots") {
+            config.extra_roots = SplitList(value);
+        } else if (key == "max_skills") {
+            if (!parse_size(key, value, 1, 512, &config.max_skills)) {
+                return std::nullopt;
+            }
+        } else if (key == "max_catalog_bytes") {
+            if (!parse_size(key, value, 1, 65536, &config.max_catalog_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "max_skill_bytes") {
+            if (!parse_size(key, value, 1, 1048576, &config.max_skill_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "follow_symlinks") {
+            config.follow_symlinks = Lower(value) == "true" || value == "1";
+        }
+    }
+
+    return config;
+}
+
+std::optional<SkillsConfig> LoadSkillsConfigFile(const std::string& path, std::string* error) {
+    std::ifstream input(aiagent::platform::FromUtf8(path));
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseSkillsConfig(content.str(), error);
+}
+
 std::optional<ToolsConfig> ParseToolsConfig(const std::string& content,
                                             std::string* error) {
     (void)error;

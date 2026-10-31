@@ -2,20 +2,18 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
 #include <sstream>
 #include <system_error>
 #include <utility>
 
 #include "aiagent/log.hpp"
 #include "aiagent/platform/paths.hpp"
+#include "aiagent/platform/text_file.hpp"
 
 namespace aiagent::agent {
 namespace {
 
 namespace fs = std::filesystem;
-
-constexpr std::size_t kBinaryProbeBytes = 8192;
 
 std::string JoinPaths(const std::vector<InstructionFile>& files) {
     std::string result;
@@ -104,38 +102,6 @@ std::vector<fs::path> CollectDirectories(const fs::path& start, const Instructio
     return directories;
 }
 
-bool ReadFile(const fs::path& path, std::string* content, std::string* error) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        *error = "cannot open file";
-        return false;
-    }
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    if (input.bad()) {
-        *error = "failed while reading file";
-        return false;
-    }
-    *content = buffer.str();
-    return true;
-}
-
-std::string TruncateUtf8(const std::string& content, std::size_t limit) {
-    if (limit >= content.size()) {
-        return content;
-    }
-    std::size_t end = limit;
-    while (end > 0 && (static_cast<unsigned char>(content[end]) & 0xC0) == 0x80) {
-        --end;
-    }
-    return content.substr(0, end);
-}
-
-bool LooksBinary(const std::string& content) {
-    const std::size_t probe = std::min(content.size(), kBinaryProbeBytes);
-    return content.substr(0, probe).find('\0') != std::string::npos;
-}
-
 std::string RenderInstructions(const LoadedInstructions& loaded, const std::string& file_name) {
     std::ostringstream output;
     output << "<project-instructions>\n"
@@ -197,10 +163,10 @@ bool ProjectInstructionsLoader::ReadFileCached(const fs::path& path, std::string
         }
     }
 
-    if (!ReadFile(path, content, error)) {
+    if (!aiagent::platform::ReadFile(path, content, error)) {
         return false;
     }
-    *binary = LooksBinary(*content);
+    *binary = aiagent::platform::LooksBinary(*content);
     *cache_hit = false;
 
     auto cached = std::make_shared<CachedFile>();
@@ -314,7 +280,7 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
         bool truncated = false;
         if (content.size() > limit) {
             const std::size_t original_size = content.size();
-            content = TruncateUtf8(content, limit);
+            content = aiagent::platform::TruncateUtf8(content, limit);
             truncated = true;
             aiagent::DefaultLogger().Log(aiagent::LogLevel::kWarning, "instructions",
                                          "event=instructions_truncate path=" + aiagent::platform::ToUtf8(path) +

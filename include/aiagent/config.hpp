@@ -124,6 +124,20 @@ struct InstructionsConfig {
     std::size_t agents_md_max_depth = 16;
 };
 
+// Skill 加载配置（[skills]）。
+// 语义见 docs/planning/agent/Skill加载规划.md §4。
+struct SkillsConfig {
+    bool enabled = true;
+    bool project = true;
+    bool user = true;
+    bool builtin = true;
+    std::vector<std::string> extra_roots;
+    std::size_t max_skills = 64;
+    std::size_t max_catalog_bytes = 8192;
+    std::size_t max_skill_bytes = 65536;
+    bool follow_symlinks = false;
+};
+
 // 解析 INI 文本中的 [deepseek] 段。api_key 缺失或为占位值时，
 // 若环境变量 DEEPSEEK_API_KEY 存在则回退使用。
 std::optional<DeepSeekConfig> ParseDeepSeekConfig(const std::string& content,
@@ -192,6 +206,13 @@ std::optional<InstructionsConfig> ParseInstructionsConfig(
 std::optional<InstructionsConfig> LoadInstructionsConfigFile(
         const std::string& path,
         std::string* error = nullptr);
+
+// 解析 INI 文本中的 [skills] 段；没有该段时返回默认值。
+std::optional<SkillsConfig> ParseSkillsConfig(const std::string& content,
+                                              std::string* error = nullptr);
+
+std::optional<SkillsConfig> LoadSkillsConfigFile(const std::string& path,
+                                                 std::string* error = nullptr);
 
 // 返回实际请求地址：base_url 已带 /chat/completions 时原样使用，否则补全。
 std::string DeepSeekChatEndpoint(const DeepSeekConfig& config);

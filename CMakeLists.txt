@@ -145,6 +145,7 @@ add_library(aiagent_agent STATIC
   src/permissions/permission_store.cpp
   src/permissions/project_config.cpp
   src/permissions/trust_store.cpp
+  src/skills/skill_loader.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
@@ -341,6 +342,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(project_instructions_test tests/project_instructions_test.cpp)
   target_link_libraries(project_instructions_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_project_instructions COMMAND project_instructions_test)
+
+  add_executable(skill_loader_test tests/skill_loader_test.cpp)
+  target_link_libraries(skill_loader_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_skill_loader COMMAND skill_loader_test)
 
   add_executable(local_tools_test tests/local_tools_test.cpp)
   target_link_libraries(local_tools_test PRIVATE aiagent_agent)
