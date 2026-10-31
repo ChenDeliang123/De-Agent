@@ -3,10 +3,12 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "aiagent/config.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
@@ -409,6 +411,105 @@ void TestStreamUsageEvent() {
     local.Stop();
 }
 
+// 回归：长回答的流式传输不能因为总时长超过 timeout_seconds 被掐断。
+// 服务端每 350ms 发一帧、共 4 帧（总时长约 1.4s），timeout_seconds=1：
+// 旧的 CURLOPT_TIMEOUT 总超时语义会在 1s 处中断；正确语义是「空闲 1s 才超时」，
+// 只要数据持续到达，整次请求可以超过 timeout_seconds。
+void TestStreamOutlivesTimeout() {
+    LocalServer local;
+    std::vector<std::string> frames;
+    for (const char content : std::string("abcd")) {
+        frames.push_back(
+                "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" +
+                std::string(1, content) + "\"},\"finish_reason\":null}]}\n\n");
+    }
+    local.server.Post("/chat/completions",
+                      [&](const httplib::Request&, httplib::Response& response) {
+                          local.hits.fetch_add(1);
+                          response.set_chunked_content_provider(
+                                  "text/event-stream",
+                                  [frames, step = std::size_t{0}](
+                                          std::size_t, httplib::DataSink& sink) mutable {
+                                      if (step >= frames.size()) {
+                                          sink.done();
+                                          return false;
+                                      }
+                                      std::this_thread::sleep_for(
+                                              std::chrono::milliseconds(350));
+                                      sink.write(frames[step].data(), frames[step].size());
+                                      ++step;
+                                      if (step == frames.size()) {
+                                          sink.done();
+                                          return false;
+                                      }
+                                      return true;
+                                  });
+                      });
+    if (!local.Start()) {
+        Expect(false, "long stream server should bind");
+        return;
+    }
+
+    try {
+        auto config = TestConfig(local.BaseUrl());
+        config.timeout_seconds = 1;
+        aiagent::llm::DeepSeekClient client(config);
+        std::string text;
+        client.ChatStream({}, {}, [&](const aiagent::llm::StreamEvent& event) {
+            text += event.content;
+        });
+        Expect(text == "abcd", "stream should deliver all frames past timeout_seconds");
+        Expect(local.hits.load() == 1, "long stream should not be retried");
+    } catch (const std::exception& e) {
+        Expect(false, std::string("long stream should not throw: ") + e.what());
+    }
+    local.Stop();
+}
+
+// 回归：没有数据到达时仍必须按空闲超时中断，不能因为移除总超时而永久挂起。
+void TestStreamStalledBeyondTimeoutFails() {
+    LocalServer local;
+    local.server.Post("/chat/completions",
+                      [&](const httplib::Request&, httplib::Response& response) {
+                          local.hits.fetch_add(1);
+                          response.set_chunked_content_provider(
+                                  "text/event-stream",
+                                  [sent = false](std::size_t, httplib::DataSink& sink) mutable {
+                                      if (sent) {
+                                          sink.done();
+                                          return false;
+                                      }
+                                      sent = true;
+                                      const std::string frame =
+                                              "data: {\"id\":\"c\",\"choices\":[{\"index\":0,"
+                                              "\"delta\":{\"content\":\"x\"},"
+                                              "\"finish_reason\":null}]}\n\n";
+                                      sink.write(frame.data(), frame.size());
+                                      // 之后静默 3s；timeout_seconds=1 时客户端应中断。
+                                      // 留出富余是因为进度回调按秒级周期采样。
+                                      std::this_thread::sleep_for(
+                                              std::chrono::milliseconds(3000));
+                                      return true;
+                                  });
+                      });
+    if (!local.Start()) {
+        Expect(false, "stalled stream server should bind");
+        return;
+    }
+
+    try {
+        auto config = TestConfig(local.BaseUrl());
+        config.timeout_seconds = 1;
+        aiagent::llm::DeepSeekClient client(config);
+        client.ChatStream({}, {}, [](const aiagent::llm::StreamEvent&) {});
+        Expect(false, "stalled stream should throw after idle timeout");
+    } catch (const std::exception& e) {
+        Expect(std::string(e.what()).find("idle timeout") != std::string::npos,
+               std::string("stalled stream error should mention idle timeout: ") + e.what());
+    }
+    local.Stop();
+}
+
 }  // namespace
 
 int main() {
@@ -419,6 +520,8 @@ int main() {
     TestNoRetryOnClientError();
     TestNoRetryWhenDisabled();
     TestStreamUsageEvent();
+    TestStreamOutlivesTimeout();
+    TestStreamStalledBeyondTimeoutFails();
 
     if (g_failures != 0) {
         std::cerr << "llm client test failed with " << g_failures << " failure(s)\n";

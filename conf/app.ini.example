@@ -3,6 +3,8 @@ api_key = your-deepseek-api-key
 base_url = https://api.deepseek.com
 model = deepseek-v4-flash
 reasoning_model = deepseek-v4-pro
+; 非流式请求的总超时；流式请求按空闲超时处理：持续收到 token 时单次请求
+; 可以超过该值（长代码生成不会被 60s 掐断），连续这么久没有数据才中断。
 timeout_seconds = 60
 max_retries = 3
 

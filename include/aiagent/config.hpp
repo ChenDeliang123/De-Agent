@@ -12,6 +12,8 @@ struct DeepSeekConfig {
     std::string base_url = "https://api.deepseek.com";
     std::string model = "deepseek-v4-flash";
     std::string reasoning_model = "deepseek-v4-pro";
+    // 非流式请求的总超时；流式请求为连接/空闲超时——只要持续收到 token，
+    // 单次请求可以超过该值，连续这么久没有数据才中断。
     long timeout_seconds = 60;
     int max_retries = 3;
 };
