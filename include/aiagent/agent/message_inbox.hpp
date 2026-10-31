@@ -9,7 +9,7 @@
 namespace aiagent::agent {
 
 // steer 消息在模型上下文里的标记（日志/CLI 展示共用同一措辞，见
-// docs/子Agent纠偏Steer规划.md 决策记录 ②）。
+// docs/planning/agent/子Agent纠偏Steer规划.md 决策记录 ②）。
 inline constexpr const char* kSteerMarker = "[steer]";
 
 // 文本是否为空或纯空白（与 Push() 的 kTooLarge 判定同源，供上层生成错误文案）。

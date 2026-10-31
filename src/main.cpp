@@ -691,7 +691,7 @@ int main(int argc, char** argv) {
 
         // 多 Agent 协同（[agents]）：装载子 Agent 定义并注册 task 工具。
         // 内置 general/explorer；提示词来自 <share>/prompts 或源码树 prompts/
-        // （见 docs/多Agent协同规划.md §3.4）。
+        // （见 docs/planning/agent/多Agent协同规划.md §3.4）。
         aiagent::AgentsConfig agents_config;
         std::string agents_error;
         if (const auto parsed_agents = aiagent::LoadAgentsConfigFile(config_path, &agents_error);

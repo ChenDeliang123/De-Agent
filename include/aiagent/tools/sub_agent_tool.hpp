@@ -23,8 +23,8 @@ inline constexpr const char* kTaskResultToolName = "task_result";
 inline constexpr int kMaxTaskBatch = 8;
 
 // `task`（前台阻塞 / background=true 后台派发）与 `task_result`（查询/收取）
-// 两个工具：把工具调用派发为子 Agent 运行（见 docs/多Agent协同规划.md、
-// docs/子Agent后台化与可干预规划.md §3.2）。
+// 两个工具：把工具调用派发为子 Agent 运行（见 docs/planning/agent/多Agent协同规划.md、
+// docs/planning/agent/子Agent后台化与可干预规划.md §3.2）。
 //
 // depth = 归属深度：根 Agent 注册的 task 工具 depth=0；某个子 Agent 内嵌的
 // task 工具 depth=1，以此类推。深度上限由 SubAgentManager 的 max_depth 强制执行。

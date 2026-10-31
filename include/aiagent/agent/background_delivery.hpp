@@ -13,7 +13,7 @@
 
 namespace aiagent::agent {
 
-// 后台结果 → 会话历史注入（docs/子Agent后台化与可干预规划.md §3.3 路径 2）。
+// 后台结果 → 会话历史注入（docs/planning/agent/子Agent后台化与可干预规划.md §3.3 路径 2）。
 //
 // 语义与不变式：
 // - 一条后台结果只注入一次：调用方在收敛通知里对每条任务调用一次 Deliver()；

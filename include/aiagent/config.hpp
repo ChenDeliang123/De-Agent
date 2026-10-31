@@ -94,7 +94,7 @@ struct AgentDefinitionConfig {
 };
 
 // 多 Agent 协同配置（[agents] 与 [agents.<name>]）。
-// 语义见 docs/多Agent协同规划.md §3.4。
+// 语义见 docs/planning/agent/多Agent协同规划.md §3.4。
 struct AgentsConfig {
     bool enabled = true;
     int max_depth = 1;        // 0=禁用派生；1=子 Agent 不可再派生

@@ -84,7 +84,7 @@ sandbox_roots =
 
 [agents]
 ; 多 Agent 协同：父 Agent 可用 task 工具把自包含子任务派给子 Agent（独立上下文，
-; 只回传压缩后的结果）。规划与语义见 docs/多Agent协同规划.md。
+; 只回传压缩后的结果）。规划与语义见 docs/planning/agent/多Agent协同规划.md。
 ; 内置两个定义：general（继承父工具集）与 explorer（只读 read/grep/glob/ls）；
 ; 提示词从 <share>/prompts 或源码树 prompts/ 读取，找不到会直接报错（不做静默降级）。
 enabled = true

@@ -7,7 +7,7 @@ namespace aiagent::permissions {
 
 // Agent 在某个工作路径下的权限档位。
 //
-// 与需求约定（docs/权限模式规划.md）：
+// 与需求约定（docs/planning/platform/权限模式规划.md）：
 //   - confirm   : 写文件与执行命令都需要人工确认（默认）
 //   - workspace : 工作目录内可自由读写，执行命令需确认
 //   - full      : 关闭路径沙箱，读写与命令全部放行（危险）

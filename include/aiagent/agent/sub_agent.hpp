@@ -76,7 +76,7 @@ struct SubAgentStats {
     long long cache_hit_tokens = 0;
 };
 
-// 后台任务状态机（见 docs/子Agent后台化与可干预规划.md §3.1）：
+// 后台任务状态机（见 docs/planning/agent/子Agent后台化与可干预规划.md §3.1）：
 // running → done / failed / cancelled / timed_out，终态后不再变化。
 enum class BackgroundState { kRunning, kDone, kFailed, kCancelled, kTimedOut };
 
@@ -112,7 +112,7 @@ enum class BackgroundStopOutcome { kRequested, kNotFound, kFinished };
 enum class BackgroundSteerOutcome { kAccepted, kNotFound, kFinished, kFull, kTooLarge };
 
 // 后台任务生命周期通知：派发成功（父/CLI 立刻可见）、收敛（结果送达的触发点）、
-// 纠偏消息已投递到子 Agent 的上下文（M5b，见 docs/子Agent纠偏Steer规划.md §3.4）。
+// 纠偏消息已投递到子 Agent 的上下文（M5b，见 docs/planning/agent/子Agent纠偏Steer规划.md §3.4）。
 enum class BackgroundNotificationKind { kStarted, kFinished, kSteered };
 
 struct BackgroundNotification {
@@ -130,7 +130,7 @@ using BackgroundNotifyCallback = std::function<void(const BackgroundNotification
 // 多 Agent 协同的核心：定义装载、并发闸门、深度控制、超时/取消、结果截断、
 // 事件归属转发。
 //
-// 不变式（见 docs/多Agent协同规划.md §3.6）：
+// 不变式（见 docs/planning/agent/多Agent协同规划.md §3.6）：
 // - 所有派发都经过 Run()；未来并列远程后端只替换这一处；
 // - 对外只暴露「按定义跑一次子任务，返回结果文本 + 元数据」，不泄漏
 //   in-process 细节（不返回 AgentRuntime、不暴露线程语义）。
@@ -193,7 +193,7 @@ public:
     BackgroundStopOutcome Stop(const std::string& id, std::string* message = nullptr);
 
     // 向运行中的后台任务投递一句纠偏（M5b）：进它的收件箱，子 Agent 在下一个回合
-    // 边界读到（见 docs/子Agent纠偏Steer规划.md）。id 为 bg-N 或 agent_id；
+    // 边界读到（见 docs/planning/agent/子Agent纠偏Steer规划.md）。id 为 bg-N 或 agent_id；
     // 只对后台任务生效（前台子 Agent 没有对外句柄，与父回合同生命周期）。
     // message 非空时写入人类可读结果（与 Stop 一致，接口层直接回给调用方）。
     BackgroundSteerOutcome Steer(const std::string& id, const std::string& text,

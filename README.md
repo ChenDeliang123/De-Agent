@@ -170,7 +170,7 @@ tar xzf de-agent-mcp-<version>-linux-<arch>.tar.gz \
 Windows 使用 `de.cmd`（三行 shim）+ `de.ps1`，命令与 POSIX `de` 对齐：
 
 ```powershell
-# 1) 构建（MinGW + Ninja + 静态 libcurl，见 Windows适配规划 P0）
+# 1) 构建（MinGW + Ninja + 静态 libcurl，见 docs/planning/platform/Windows适配规划.md P0）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 
 # 2) 初始化 / 检查 / 启动
@@ -231,7 +231,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1 -Pa
 
 `scripts/test-windows.ps1` 会把 `SKIP:` 行汇总到终端；除这些明确项外，平台差异
 不允许静默跳过。Linux 回归在 Ubuntu 虚拟机执行，命令见
-`docs/Windows适配规划.md` 的 P7 段。
+`docs/planning/platform/Windows适配规划.md` 的 P7 段。
 
 ### Windows 绿色 ZIP
 
@@ -801,7 +801,7 @@ allow_full_access = true
 
 > 字符串匹配不是安全边界（`$IFS`、引号、别名等可绕过）；真正的安全靠
 > `confirm`/`workspace` 的逐次确认或进程级沙箱。完整建议清单见
-> `docs/权限模式规划.md` 附录。
+> `docs/planning/platform/权限模式规划.md` 附录。
 
 ### 项目级配置（`.de/`）
 
