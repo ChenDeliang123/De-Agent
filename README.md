@@ -791,8 +791,10 @@ follow_symlinks = false
 ```
 
 终端用 `/skills` 查看当前工作目录实际加载的技能；后端接口为
-`GET /api/v1/skills?path=<cwd>`。默认不跟随符号链接，正文/资源超过
-`max_skill_bytes` 时截断并提示原文件路径。
+`GET /api/v1/skills?path=<cwd>`。`skill` 工具只在当前工作目录存在技能时才会
+出现在模型工具表与 `/tools` 中；没有技能时不会多出该工具。默认不跟随符号链接，
+正文/资源超过 `max_skill_bytes` 时截断，并在结果尾部提示调大该配置（不再承诺可
+直接 `read` 全文）。
 
 ## 权限模式
 

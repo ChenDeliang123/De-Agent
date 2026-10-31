@@ -90,8 +90,9 @@ export async function sessionStats(backendUrl, sessionId) {
   return body;
 }
 
-export async function listTools(backendUrl) {
-  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/tools`);
+export async function listTools(backendUrl, cwd) {
+  const query = cwd ? `?path=${encodeURIComponent(cwd)}` : "";
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/tools${query}`);
   if (!response.ok) {
     throw new Error(`failed to list tools: HTTP ${response.status}`);
   }

@@ -32,6 +32,20 @@ std::vector<llm::ToolSpec> FilteredToolProvider::ListTools() {
     return tools;
 }
 
+std::vector<llm::ToolSpec> FilteredToolProvider::ListToolsFor(
+        const std::string& working_directory) {
+    if (!inner_) {
+        return {};
+    }
+    std::vector<llm::ToolSpec> tools;
+    for (auto& spec : inner_->ListToolsFor(working_directory)) {
+        if (Allows(spec.name)) {
+            tools.push_back(std::move(spec));
+        }
+    }
+    return tools;
+}
+
 ToolExecutionResult FilteredToolProvider::Execute(const std::string& name,
                                                   const nlohmann::json& arguments,
                                                   const ToolContext& context) {

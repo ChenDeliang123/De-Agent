@@ -70,8 +70,33 @@ void TestToolSpec() {
         Expect(tools[0].parameters["required"] == nlohmann::json::array({"name"}),
                "name should be the only required field");
     }
+    Expect(provider.ListToolsFor("/tmp").empty(),
+           "a provider without a loader should expose no skill for a cwd");
     Expect(aiagent::tools::MakeSkillToolProvider(nullptr) != nullptr,
            "factory should return a provider");
+}
+
+void TestDynamicExposure() {
+    TempDir temp;
+    const fs::path root = temp.path() / "skills";
+    WriteSkill(root, "alpha", SkillText("alpha", "alpha skill"));
+    aiagent::SkillsConfig config;
+    config.project = false;
+    auto loader = std::make_shared<aiagent::skills::SkillLoader>(
+            config, std::vector<std::string>{root.string()}, std::vector<std::string>{});
+    aiagent::tools::SkillToolProvider provider(loader);
+    Expect(provider.ListToolsFor(temp.path().string()).size() == 1,
+           "skill should be exposed when the cwd has a skill");
+
+    const fs::path empty = temp.path() / "empty-skills";
+    fs::create_directories(empty);
+    auto empty_loader = std::make_shared<aiagent::skills::SkillLoader>(
+            config, std::vector<std::string>{empty.string()}, std::vector<std::string>{});
+    aiagent::tools::SkillToolProvider empty_provider(empty_loader);
+    Expect(empty_provider.ListToolsFor(temp.path().string()).empty(),
+           "empty catalog should expose no skill for the cwd");
+    Expect(empty_provider.ListTools().size() == 1,
+           "legacy ListTools should still describe the provider capability");
 }
 
 void TestExecuteBodyAndResource() {
@@ -186,6 +211,7 @@ void TestFallbackAndTruncation() {
 
 int main() {
     TestToolSpec();
+    TestDynamicExposure();
     TestExecuteBodyAndResource();
     TestExecuteErrors();
     TestFallbackAndTruncation();

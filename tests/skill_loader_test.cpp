@@ -349,6 +349,8 @@ void TestLimitsAndTruncation() {
         Expect(content.truncated, "oversized body should be marked truncated");
         Expect(content.body.find("truncated") != std::string::npos,
                "oversized body should carry a truncation marker");
+        Expect(content.body.find("Raise [skills] max_skill_bytes") != std::string::npos,
+               "truncation marker should point at the actionable limit");
     }
 }
 

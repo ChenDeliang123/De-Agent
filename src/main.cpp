@@ -1205,10 +1205,11 @@ int main(int argc, char** argv) {
                                     target);
                     return true;
                 });
-        // 工具清单：内置 coding 工具 + MCP 工具。
-        web_gateway.SetToolsHandler([&]() {
+        // 工具清单：内置 coding 工具 + MCP 工具；按请求 cwd 过滤技能等动态工具。
+        web_gateway.SetToolsHandler([&](const std::string& cwd) {
+            const std::string directory = cwd.empty() ? fallback_working_directory : cwd;
             std::vector<aiagent::web::ToolInfo> tools_info;
-            for (const auto& spec : tools->ListTools()) {
+            for (const auto& spec : tools->ListToolsFor(directory)) {
                 tools_info.push_back({spec.name, spec.description});
             }
             return tools_info;
@@ -1563,7 +1564,7 @@ int main(int argc, char** argv) {
         }
         PrintStartupBanner(config->model, options.port, options.web_port,
                            aiagent::platform::ToUtf8(db_path), log_config.file,
-                           tools->ListTools().size(), banner_info);
+                           tools->ListToolsFor(fallback_working_directory).size(), banner_info);
 
         while (!g_stop_requested) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));

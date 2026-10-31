@@ -1,7 +1,6 @@
 #pragma once
 
 #include <json.hpp>
-
 #include <string>
 #include <vector>
 
@@ -22,8 +21,15 @@ public:
     virtual ~IToolProvider() = default;
 
     virtual std::vector<llm::ToolSpec> ListTools() = 0;
-    virtual ToolExecutionResult Execute(const std::string& name,
-                                        const nlohmann::json& arguments,
+
+    // 按本次请求的工作目录列出工具。默认忽略 cwd，保持旧行为；
+    // 技能等依赖 cwd 的工具覆盖它，实现“无技能时不暴露工具”。
+    virtual std::vector<llm::ToolSpec> ListToolsFor(const std::string& working_directory) {
+        (void)working_directory;
+        return ListTools();
+    }
+
+    virtual ToolExecutionResult Execute(const std::string& name, const nlohmann::json& arguments,
                                         const ToolContext& context) = 0;
 };
 

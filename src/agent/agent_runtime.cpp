@@ -415,8 +415,10 @@ void AgentRuntime::AppendSkillCatalog(std::string& content,
         return;
     }
 
+    const std::string load_directory =
+            working_directory.empty() ? fallback_working_directory_ : working_directory;
     bool has_skill_tool = false;
-    for (const auto& tool : tools_->ListTools()) {
+    for (const auto& tool : tools_->ListToolsFor(load_directory)) {
         if (tool.name == tools::kSkillToolName) {
             has_skill_tool = true;
             break;
@@ -426,8 +428,6 @@ void AgentRuntime::AppendSkillCatalog(std::string& content,
         return;
     }
 
-    const std::string load_directory =
-            working_directory.empty() ? fallback_working_directory_ : working_directory;
     const skills::SkillCatalog catalog = skill_loader_->LoadCatalog(load_directory);
     const std::string rendered = skills::SkillLoader::RenderCatalog(catalog);
     if (!rendered.empty()) {
@@ -727,10 +727,11 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
         }
         // steer（M5a）：回合边界投递（同步路径与流式同一语义）。
         DeliverSteers(inbox, chat_messages, run_id, context_id, round);
-        MaybeCompactBeforeCall(chat_messages, last_usage_tokens,
-                               last_usage_message_count, last_compacted_size,
-                               gain_retry_at_tokens, run_id, context_id);
-        const std::vector<llm::ToolSpec> tool_specs = tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
+        MaybeCompactBeforeCall(chat_messages, last_usage_tokens, last_usage_message_count,
+                               last_compacted_size, gain_retry_at_tokens, run_id, context_id);
+        const std::vector<llm::ToolSpec> tool_specs =
+                tools_ ? tools_->ListToolsFor(fallback_working_directory_)
+                       : std::vector<llm::ToolSpec>();
         const std::size_t messages_at_call = chat_messages.size();
         try {
             result = model_->Chat(chat_messages, tool_specs);
@@ -966,13 +967,13 @@ std::string AgentRuntime::RunStreaming(
         // 投递后本轮照常压缩/组装工具表/调模型。
         DeliverSteers(inbox, chat_messages, run_id, context_id, round);
         if (const auto record = MaybeCompactBeforeCall(
-                    chat_messages, last_usage_tokens, last_usage_message_count,
-                    last_compacted_size, gain_retry_at_tokens, run_id, context_id);
+                    chat_messages, last_usage_tokens, last_usage_message_count, last_compacted_size,
+                    gain_retry_at_tokens, run_id, context_id);
             record.has_value()) {
             EmitCompactionEvent(*record, on_event);
         }
         const std::vector<llm::ToolSpec> tool_specs =
-                tools_ ? tools_->ListTools() : std::vector<llm::ToolSpec>();
+                tools_ ? tools_->ListToolsFor(working_directory) : std::vector<llm::ToolSpec>();
         std::vector<llm::ToolCall> streamed_tool_calls;
         std::string round_reply;
         std::string finish_reason;

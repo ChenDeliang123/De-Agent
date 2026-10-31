@@ -25,11 +25,25 @@ std::vector<llm::ToolSpec> CompositeToolProvider::ListTools() {
     return merged;
 }
 
+std::vector<llm::ToolSpec> CompositeToolProvider::ListToolsFor(
+        const std::string& working_directory) {
+    std::vector<llm::ToolSpec> merged;
+    std::set<std::string> seen;
+    for (const auto& provider : providers_) {
+        for (llm::ToolSpec spec : provider->ListToolsFor(working_directory)) {
+            if (!spec.name.empty() && seen.insert(spec.name).second) {
+                merged.push_back(std::move(spec));
+            }
+        }
+    }
+    return merged;
+}
+
 ToolExecutionResult CompositeToolProvider::Execute(const std::string& name,
                                                    const nlohmann::json& arguments,
                                                    const ToolContext& context) {
     for (const auto& provider : providers_) {
-        const auto tools = provider->ListTools();
+        const auto tools = provider->ListToolsFor(context.working_directory);
         for (const auto& tool : tools) {
             if (tool.name == name) {
                 return provider->Execute(name, arguments, context);

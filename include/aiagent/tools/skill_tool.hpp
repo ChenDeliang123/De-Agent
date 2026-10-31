@@ -21,6 +21,7 @@ public:
                       std::string fallback_working_directory = {});
 
     std::vector<llm::ToolSpec> ListTools() override;
+    std::vector<llm::ToolSpec> ListToolsFor(const std::string& working_directory) override;
     ToolExecutionResult Execute(const std::string& name, const nlohmann::json& arguments,
                                 const ToolContext& context) override;
 

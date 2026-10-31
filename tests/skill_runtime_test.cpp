@@ -63,13 +63,15 @@ void WriteSkill(const fs::path& root, const std::string& directory, const std::s
 class CapturingModel final : public aiagent::llm::IModelClient {
 public:
     std::string system_content;
+    std::vector<aiagent::llm::ToolSpec> last_tools;
     int calls = 0;
 
     aiagent::llm::ChatResult Chat(const std::vector<aiagent::llm::ChatMessage>& messages,
-                                  const std::vector<aiagent::llm::ToolSpec>&,
+                                  const std::vector<aiagent::llm::ToolSpec>& tools,
                                   const std::optional<std::string>&) override {
         ++calls;
         Capture(messages);
+        last_tools = tools;
         aiagent::llm::ChatResult result;
         aiagent::llm::ChatChoice choice;
         choice.role = "assistant";
@@ -81,10 +83,11 @@ public:
 
     void ChatStream(
             const std::vector<aiagent::llm::ChatMessage>& messages,
-            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::vector<aiagent::llm::ToolSpec>& tools,
             const std::function<void(const aiagent::llm::StreamEvent&)>& on_event) override {
         ++calls;
         Capture(messages);
+        last_tools = tools;
         aiagent::llm::StreamEvent event;
         event.content = "plain";
         event.finish_reason = "stop";
@@ -185,6 +188,15 @@ std::shared_ptr<aiagent::skills::SkillLoader> MakeLoader(const fs::path& root) {
             config, std::vector<std::string>{root.string()}, std::vector<std::string>{});
 }
 
+bool HasSkillTool(const std::vector<aiagent::llm::ToolSpec>& tools) {
+    for (const auto& tool : tools) {
+        if (tool.name == aiagent::tools::kSkillToolName) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void TestCatalogInjection() {
     TempDir temp;
     const fs::path root = temp.path() / "skills";
@@ -205,6 +217,8 @@ void TestCatalogInjection() {
            "catalog should include name and description");
     Expect(model->system_content.find("DO NOT SHOW IN CATALOG") == std::string::npos,
            "catalog must not include the skill body");
+    Expect(HasSkillTool(model->last_tools),
+           "sync path should expose the skill tool when the cwd has skills");
 
     auto stream_model = std::make_shared<CapturingModel>();
     aiagent::agent::AgentRuntime stream_runtime(stream_model);
@@ -215,6 +229,8 @@ void TestCatalogInjection() {
                                                 temp.path().string());
     Expect(stream_model->system_content.find("Skills:") != std::string::npos,
            "streaming path should inject the skill catalog");
+    Expect(HasSkillTool(stream_model->last_tools),
+           "streaming path should expose the skill tool when the cwd has skills");
 }
 
 void TestCatalogGuards() {
@@ -233,16 +249,19 @@ void TestCatalogGuards() {
         runtime.HandleMessage(user, {user}, "ctx-no-skill-tool");
         Expect(model->system_content.find("Skills:") == std::string::npos,
                "catalog must stay hidden when the tool list lacks skill");
+        Expect(!HasSkillTool(model->last_tools),
+               "skill tool must stay absent when the provider lacks it");
     }
 
     {
         auto model = std::make_shared<CapturingModel>();
         aiagent::agent::AgentRuntime runtime(model);
-        runtime.SetToolProvider(aiagent::tools::MakeSkillToolProvider(loader));
+        runtime.SetToolProvider(aiagent::tools::MakeSkillToolProvider(nullptr));
         runtime.SetFallbackWorkingDirectory(temp.path().string());
         runtime.HandleMessage(user, {user}, "ctx-no-loader");
         Expect(model->system_content.find("Skills:") == std::string::npos,
                "catalog must stay hidden without a skill loader");
+        Expect(!HasSkillTool(model->last_tools), "skill tool must stay absent without a loader");
     }
 
     {
@@ -257,6 +276,7 @@ void TestCatalogGuards() {
         runtime.HandleMessage(user, {user}, "ctx-empty-catalog");
         Expect(model->system_content.find("Skills:") == std::string::npos,
                "empty catalog should not add an empty block");
+        Expect(!HasSkillTool(model->last_tools), "empty catalog should not expose the skill tool");
     }
 }
 

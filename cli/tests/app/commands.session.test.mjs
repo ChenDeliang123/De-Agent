@@ -35,7 +35,7 @@ function startBackend() {
     if (request.url === "/health") {
       return send(200, { status: "ok" });
     }
-    if (request.url === "/api/v1/tools") {
+    if (request.url.startsWith("/api/v1/tools")) {
       return send(200, [
         { name: "read", description: "Read a file" },
         { name: "bash", description: "Run a command" },

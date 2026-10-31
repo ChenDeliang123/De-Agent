@@ -22,6 +22,7 @@ public:
                          std::vector<std::string> deny = {});
 
     std::vector<llm::ToolSpec> ListTools() override;
+    std::vector<llm::ToolSpec> ListToolsFor(const std::string& working_directory) override;
     ToolExecutionResult Execute(const std::string& name, const nlohmann::json& arguments,
                                 const ToolContext& context) override;
 

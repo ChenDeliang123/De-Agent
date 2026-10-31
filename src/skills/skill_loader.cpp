@@ -483,12 +483,13 @@ std::vector<std::string> ListSkillResources(const fs::path& directory, bool foll
     return resources;
 }
 
-void AppendTruncationMarker(SkillContent* content, const std::string& path, std::size_t limit) {
+void AppendTruncationMarker(SkillContent* content, std::size_t limit) {
     if (content == nullptr || !content->truncated) {
         return;
     }
-    content->body += "\n[... truncated at " + std::to_string(limit) + " bytes; read " + path +
-                     " for the full text]";
+    content->body += "\n[... truncated at " + std::to_string(limit) +
+                     " bytes; content continues beyond this limit. Raise [skills] "
+                     "max_skill_bytes to load more.]";
     content->bytes = content->body.size();
 }
 
@@ -867,7 +868,7 @@ bool SkillLoader::Impl::LoadContent(const std::string& name, const std::string& 
         content->resources = ListSkillResources(skill_path.parent_path(), config.follow_symlinks);
         content->truncated = parsed.truncated;
         content->bytes = content->body.size();
-        AppendTruncationMarker(content, entry->path, config.max_skill_bytes);
+        AppendTruncationMarker(content, config.max_skill_bytes);
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kDebug, "skills",
                 "event=skill_load name=" + entry->name +
@@ -952,7 +953,7 @@ bool SkillLoader::Impl::LoadContent(const std::string& name, const std::string& 
     content->body = std::move(raw);
     content->truncated = truncated;
     content->bytes = content->body.size();
-    AppendTruncationMarker(content, aiagent::platform::ToUtf8(target), config.max_skill_bytes);
+    AppendTruncationMarker(content, config.max_skill_bytes);
     aiagent::DefaultLogger().Log(aiagent::LogLevel::kDebug, "skills",
                                  "event=skill_load name=" + entry->name + " file=" + file +
                                          " bytes=" + std::to_string(content->bytes) +

@@ -83,6 +83,19 @@ std::vector<llm::ToolSpec> SkillToolProvider::ListTools() {
     return {spec};
 }
 
+std::vector<llm::ToolSpec> SkillToolProvider::ListToolsFor(const std::string& working_directory) {
+    if (loader_ == nullptr) {
+        return {};
+    }
+    const std::string directory =
+            working_directory.empty() ? fallback_working_directory_ : working_directory;
+    const skills::SkillCatalog catalog = loader_->LoadCatalog(directory);
+    if (catalog.entries.empty()) {
+        return {};
+    }
+    return ListTools();
+}
+
 ToolExecutionResult SkillToolProvider::Execute(const std::string& name,
                                                const nlohmann::json& arguments,
                                                const ToolContext& context) {

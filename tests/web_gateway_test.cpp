@@ -569,9 +569,11 @@ int main() {
                     }
                     return true;
                 });
-        gateway.SetToolsHandler([]() {
+        std::string tools_cwd;
+        gateway.SetToolsHandler([&tools_cwd](const std::string& cwd) {
+            tools_cwd = cwd;
             return std::vector<aiagent::web::ToolInfo>{{"read", "Read a file"},
-                                                      {"bash", "Run a command"}};
+                                                       {"bash", "Run a command"}};
         });
 
         // ---- 权限模式 REST ----
@@ -751,10 +753,11 @@ int main() {
         Expect(http.Get(base + "/api/v1/sessions/" + cloned_id + "/stats").IsSuccess(),
                "cloned session should have stats");
 
-        const auto tools_result = http.Get(base + "/api/v1/tools");
+        const auto tools_result = http.Get(base + "/api/v1/tools?path=%2Ftmp%2Ftools");
         Expect(tools_result.IsSuccess(), "tools endpoint should succeed");
         Expect(nlohmann::json::parse(tools_result.body).size() == 2,
                "tools endpoint should return two tools");
+        Expect(tools_cwd == "/tmp/tools", "tools endpoint should forward the path param");
 
         const auto deleted = raw.Delete(("/api/v1/sessions/" + session_id).c_str());
         Expect(deleted && deleted->status == 200, "delete endpoint should succeed");

@@ -159,12 +159,11 @@ public:
             std::function<bool(const std::string& session_id, std::string* error)>;
 
     // 复制会话（POST /api/v1/sessions/:id/clone）。成功时写入新会话 id。
-    using CloneHandler = std::function<bool(const std::string& source_id,
-                                            std::string* new_id,
+    using CloneHandler = std::function<bool(const std::string& source_id, std::string* new_id,
                                             std::string* error)>;
 
-    // 工具清单（GET /api/v1/tools）。
-    using ToolsHandler = std::function<std::vector<ToolInfo>()>;
+    // 工具清单（GET /api/v1/tools?path=）。cwd 为空时由装配方使用默认目录。
+    using ToolsHandler = std::function<std::vector<ToolInfo>(const std::string& cwd)>;
 
     // 技能目录（GET /api/v1/skills?path=）。cwd 为空时由装配方使用默认目录。
     using SkillsHandler = std::function<SkillsSnapshot(const std::string& cwd)>;

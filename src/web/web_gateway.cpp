@@ -735,22 +735,22 @@ private:
                         response.set_content(payload.dump(), "application/json");
                     });
 
-        // 可用工具清单（/tools）：内置 coding 工具 + MCP 工具。
-        server_.Get("/api/v1/tools",
-                    [this](const httplib::Request&, httplib::Response& response) {
-                        if (!tools_handler_) {
-                            response.status = 501;
-                            response.set_content(R"({"error":"tools not available"})",
-                                                 "application/json");
-                            return;
-                        }
-                        nlohmann::json payload = nlohmann::json::array();
-                        for (const auto& tool : tools_handler_()) {
-                            payload.push_back({{"name", tool.name},
-                                               {"description", tool.description}});
-                        }
-                        response.set_content(payload.dump(), "application/json");
-                    });
+        // 可用工具清单（/tools）：内置 coding 工具 + MCP 工具；path 只影响按 cwd 暴露的工具。
+        server_.Get("/api/v1/tools", [this](const httplib::Request& request,
+                                            httplib::Response& response) {
+            if (!tools_handler_) {
+                response.status = 501;
+                response.set_content(R"({"error":"tools not available"})", "application/json");
+                return;
+            }
+            const std::string cwd =
+                    request.has_param("path") ? request.get_param_value("path") : std::string();
+            nlohmann::json payload = nlohmann::json::array();
+            for (const auto& tool : tools_handler_(cwd)) {
+                payload.push_back({{"name", tool.name}, {"description", tool.description}});
+            }
+            response.set_content(payload.dump(), "application/json");
+        });
 
         // 技能目录（/skills）：只读清单；cwd 为空时使用后端默认工作目录。
         server_.Get("/api/v1/skills", [this](const httplib::Request& request,
