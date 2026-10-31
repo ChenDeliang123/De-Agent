@@ -436,6 +436,10 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/prompts/"
         DESTINATION ${CMAKE_INSTALL_DATADIR}/de/prompts
         COMPONENT deagent)
 
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/de/skills
+        COMPONENT deagent)
+
 install(FILES
           "${CMAKE_CURRENT_SOURCE_DIR}/conf/app.ini.example"
           "${CMAKE_CURRENT_SOURCE_DIR}/conf/cli.ini.example"

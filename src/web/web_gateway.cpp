@@ -297,6 +297,10 @@ public:
         tools_handler_ = std::move(handler);
     }
 
+    void SetSkillsHandler(WebGateway::SkillsHandler handler) {
+        skills_handler_ = std::move(handler);
+    }
+
     void SetAgentsInfoHandler(WebGateway::AgentsInfoHandler handler) {
         agents_handler_ = std::move(handler);
     }
@@ -747,6 +751,27 @@ private:
                         }
                         response.set_content(payload.dump(), "application/json");
                     });
+
+        // 技能目录（/skills）：只读清单；cwd 为空时使用后端默认工作目录。
+        server_.Get("/api/v1/skills", [this](const httplib::Request& request,
+                                             httplib::Response& response) {
+            nlohmann::json payload = {
+                    {"enabled", false}, {"truncated", false}, {"skills", nlohmann::json::array()}};
+            if (skills_handler_) {
+                const std::string cwd =
+                        request.has_param("path") ? request.get_param_value("path") : std::string();
+                const SkillsSnapshot snapshot = skills_handler_(cwd);
+                payload["enabled"] = snapshot.enabled;
+                payload["truncated"] = snapshot.truncated;
+                for (const auto& skill : snapshot.skills) {
+                    payload["skills"].push_back({{"name", skill.name},
+                                                 {"description", skill.description},
+                                                 {"source", skill.source},
+                                                 {"path", skill.path}});
+                }
+            }
+            response.set_content(payload.dump(), "application/json");
+        });
 
         // 子 Agent 运行时快照（/agents）：定义清单 + 累计统计。
         // 未注入 handler（未启用多 Agent）时返回 enabled=false（200）。
@@ -1514,6 +1539,7 @@ private:
     WebGateway::DeleteHandler delete_handler_;
     WebGateway::CloneHandler clone_handler_;
     WebGateway::ToolsHandler tools_handler_;
+    WebGateway::SkillsHandler skills_handler_;
     WebGateway::AgentsInfoHandler agents_handler_;
     WebGateway::BackgroundStopHandler background_stop_handler_;
     WebGateway::BackgroundAckHandler background_ack_handler_;
@@ -1573,6 +1599,10 @@ void WebGateway::SetCloneHandler(WebGateway::CloneHandler handler) {
 
 void WebGateway::SetToolsHandler(WebGateway::ToolsHandler handler) {
     impl_->SetToolsHandler(std::move(handler));
+}
+
+void WebGateway::SetSkillsHandler(WebGateway::SkillsHandler handler) {
+    impl_->SetSkillsHandler(std::move(handler));
 }
 
 void WebGateway::SetAgentsInfoHandler(WebGateway::AgentsInfoHandler handler) {

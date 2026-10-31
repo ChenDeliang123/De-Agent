@@ -98,6 +98,16 @@ export async function listTools(backendUrl) {
   return response.json();
 }
 
+// 技能目录。cwd 用于项目级 .de/skills 的发现；为空时后端使用默认目录。
+export async function listSkills(backendUrl, cwd) {
+  const query = cwd ? `?path=${encodeURIComponent(cwd)}` : "";
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/skills${query}`);
+  if (!response.ok) {
+    throw new Error(`failed to list skills: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 // 子 Agent 总览。传 session_id 时只返回该会话的运行中/待补打任务（M4c 后台任务）。
 export async function getAgents(backendUrl, sessionId) {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";

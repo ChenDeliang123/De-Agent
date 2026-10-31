@@ -54,8 +54,10 @@
 #include "aiagent/permissions/trust_store.hpp"
 #include "aiagent/platform/console.hpp"
 #include "aiagent/platform/paths.hpp"
+#include "aiagent/skills/skill_loader.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
+#include "aiagent/tools/skill_tool.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
 #include "aiagent/version.hpp"
 #include "aiagent/web/web_gateway.hpp"
@@ -428,6 +430,54 @@ int main(int argc, char** argv) {
                 std::make_shared<aiagent::agent::ProjectInstructionsLoader>(
                         instructions_config);
         runtime.SetProjectInstructionsLoader(instructions_loader);
+
+        // 技能加载：[skills] 决定根开关/上限；loader 在启动时构造一次，
+        // 后续按每次请求的工作目录发现项目技能。
+        aiagent::SkillsConfig skills_config;
+        std::string skills_error;
+        const auto parsed_skills = aiagent::LoadSkillsConfigFile(config_path, &skills_error);
+        if (!parsed_skills.has_value()) {
+            std::cerr << "配置错误: " << skills_error << '\n';
+            return 1;
+        }
+        skills_config = *parsed_skills;
+        std::vector<std::string> skill_user_roots;
+        if (skills_config.user && !app_paths.data_dir.empty()) {
+            skill_user_roots.push_back(aiagent::platform::ToUtf8(
+                    aiagent::platform::FromUtf8(app_paths.data_dir) / "skills"));
+        }
+        std::vector<std::string> skill_builtin_roots;
+        if (skills_config.builtin) {
+            if (!share_dir.empty()) {
+                skill_builtin_roots.push_back(aiagent::platform::ToUtf8(
+                        aiagent::platform::FromUtf8(share_dir) / "skills"));
+            }
+            // 源码树回退；安装态若 share 不存在，loader 会静默跳过。
+            skill_builtin_roots.push_back("skills");
+        }
+        auto skill_loader = std::make_shared<aiagent::skills::SkillLoader>(
+                skills_config, skill_user_roots, skill_builtin_roots);
+        if (skills_config.enabled) {
+            runtime.SetSkillLoader(skill_loader);
+        }
+        aiagent::skills::SkillCatalog startup_skills;
+        if (skills_config.enabled) {
+            startup_skills = skill_loader->LoadCatalog(fallback_working_directory);
+        }
+        const std::string skills_info =
+                skills_config.enabled ? "skills: " + std::to_string(startup_skills.entries.size()) +
+                                                (startup_skills.truncated ? " (truncated)" : "")
+                                      : "skills off";
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "main",
+                "event=skills_config enabled=" +
+                        std::string(skills_config.enabled ? "true" : "false") +
+                        " project=" + std::string(skills_config.project ? "true" : "false") +
+                        " user_roots=" + std::to_string(skill_user_roots.size()) +
+                        " builtin_roots=" + std::to_string(skill_builtin_roots.size()) +
+                        " loaded=" + std::to_string(startup_skills.entries.size()) +
+                        " truncated=" + (startup_skills.truncated ? "true" : "false"));
+
         // 最近一次压缩记录（按会话），供 REST 查询/前端展示。
         std::map<std::string, aiagent::agent::CompactionRecord> compaction_records;
         std::mutex compaction_records_mutex;
@@ -603,6 +653,10 @@ int main(int argc, char** argv) {
         tools->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
                 aiagent::platform::ToUtf8(std::filesystem::current_path()),
                 tools_config.sandbox_roots));
+        if (skills_config.enabled) {
+            tools->Add(aiagent::tools::MakeSkillToolProvider(skill_loader,
+                                                             fallback_working_directory));
+        }
         runtime.SetToolProvider(tools);
 
         // MCP：优先读 [mcp] 配置；没有时依次尝试安装目录 share/de/mcp 与源码树
@@ -747,7 +801,8 @@ int main(int argc, char** argv) {
                     agents_config, agent_definitions,
                     [parent_model_config, permission_store, permission_settings, bash_policy,
                      project_config_cache, trust_store, compaction_settings,
-                     fallback_working_directory, approval_broker, &background_injector,
+                     fallback_working_directory, approval_broker, skill_loader,
+                     &background_injector,
                      timeout = permissions_config.approval_timeout_seconds](
                             const aiagent::agent::SubAgentManager::ChildRuntimeSpec& spec)
                             -> std::shared_ptr<aiagent::agent::AgentRuntime> {
@@ -769,6 +824,7 @@ int main(int argc, char** argv) {
                         child_runtime->SetMaxToolRounds(spec.max_tool_rounds);
                         child_runtime->SetDelegationEnabled(spec.delegation_enabled);
                         child_runtime->SetFallbackWorkingDirectory(fallback_working_directory);
+                        child_runtime->SetSkillLoader(skill_loader);
                         child_runtime->SetCompactionSettings(compaction_settings);
                         // 权限与父会话同源：同一存储、同一设置、同一工作目录 ⇒ 同一档位
                         // （子 Agent 只能靠工具白名单进一步收窄，不能提权）。
@@ -1116,6 +1172,24 @@ int main(int argc, char** argv) {
             }
             return tools_info;
         });
+        // 技能目录：供 CLI /skills 与调试使用；cwd 为空时用后端默认目录。
+        web_gateway.SetSkillsHandler([skill_loader, skills_config,
+                                      fallback_working_directory](const std::string& cwd) {
+            aiagent::web::SkillsSnapshot snapshot;
+            snapshot.enabled = skills_config.enabled;
+            if (!skills_config.enabled) {
+                return snapshot;
+            }
+            const std::string directory = cwd.empty() ? fallback_working_directory : cwd;
+            const aiagent::skills::SkillCatalog catalog = skill_loader->LoadCatalog(directory);
+            snapshot.truncated = catalog.truncated;
+            for (const auto& entry : catalog.entries) {
+                snapshot.skills.push_back({entry.name, entry.description,
+                                           aiagent::skills::SkillSourceName(entry.source),
+                                           entry.path});
+            }
+            return snapshot;
+        });
         // 权限模式：按工作路径查询/设置/重置，供 CLI /permissions 使用。
         web_gateway.SetPermissionsListHandler([&]() {
             aiagent::web::PermissionsSnapshot snapshot;
@@ -1440,6 +1514,9 @@ int main(int argc, char** argv) {
         aiagent::platform::InstallStopHandler(OnSignal);
 
         std::string banner_info = mcp_info;
+        if (skills_config.enabled) {
+            banner_info += "  ·  " + skills_info;
+        }
         if (!agents_info.empty() && agents_info != "agents off") {
             banner_info += "  ·  " + agents_info;
         }

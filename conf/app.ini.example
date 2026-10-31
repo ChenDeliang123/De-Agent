@@ -73,6 +73,26 @@ agents_md_follow_symlinks = false
 ; 没有 .git 根时最多向上查找的层数。
 agents_md_max_depth = 16
 
+[skills]
+; 技能加载：从 <root>/<skill>/SKILL.md 发现技能。系统提示只注入
+; name/description；正文由只读工具 skill 按需加载。
+enabled = true
+; 项目级：<project-root>/.de/skills；project-root 取最近 .git，找不到时用 cwd。
+project = true
+; 用户级：<data_dir>/skills（默认 ~/.de/skills）。
+user = true
+; 内置：<share>/skills，源码树回退 skills/。
+builtin = true
+; 额外根，逗号分隔；相对路径相对当前工作目录。可用来显式接入 .claude/skills。
+extra_roots =
+; 目录规模上限；超出后截断并写日志。
+max_skills = 64
+max_catalog_bytes = 8192
+; 单次加载正文/资源文件的上限；超出截断并提示原文件路径。
+max_skill_bytes = 65536
+; 是否跟随技能目录与 SKILL.md 的符号链接。
+follow_symlinks = false
+
 [tools]
 ; 文件工具（read/write/edit）沙箱：默认只允许访问本次请求的工作目录
 ; 及其子目录，`../`、绝对路径与指向外部的符号链接都会被拒绝。

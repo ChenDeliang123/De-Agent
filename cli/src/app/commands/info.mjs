@@ -10,6 +10,7 @@ import {
   initProjectPermissions,
   listPermissions,
   listSessions,
+  listSkills,
   listTools,
   resetPermission,
   setPermission,
@@ -134,6 +135,39 @@ export const infoCommands = [
         }
       } catch (error) {
         ctx.print(`tools failed: ${error.message}`);
+      }
+    },
+  },
+  {
+    name: "skills",
+    aliases: [],
+    description: "List skills available to the agent",
+    argHint: "",
+    category: "info",
+    handler: async (ctx) => {
+      try {
+        const snapshot = await listSkills(ctx.backend, ctx.state.cwd);
+        if (!snapshot.enabled) {
+          ctx.print("skills disabled ([skills] enabled=false)");
+          return;
+        }
+        const skills = Array.isArray(snapshot.skills) ? snapshot.skills : [];
+        if (skills.length === 0) {
+          ctx.print("(no skills)");
+          return;
+        }
+        ctx.print(`skills (${skills.length}):`);
+        for (const skill of skills) {
+          const name = String(skill.name ?? "").padEnd(18);
+          const source = String(skill.source ?? "").padEnd(8);
+          const description = String(skill.description ?? "").split("\n")[0];
+          ctx.print(`  ${name} ${source} ${description}`);
+        }
+        if (snapshot.truncated) {
+          ctx.print("  (catalog truncated)");
+        }
+      } catch (error) {
+        ctx.print(`skills failed: ${error.message}`);
       }
     },
   },

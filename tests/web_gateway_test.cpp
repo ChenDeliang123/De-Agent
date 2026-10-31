@@ -338,6 +338,41 @@ int main() {
         Expect(nlohmann::json::parse(agents_off.body).value("enabled", true) == false,
                "agents endpoint should report enabled=false without a handler");
 
+        // /skills：未注入 handler 时 enabled=false；注入后返回目录并透传 cwd。
+        const auto skills_off = http.Get(base + "/api/v1/skills");
+        Expect(skills_off.IsSuccess(), "skills endpoint should succeed when disabled");
+        const auto skills_off_json = nlohmann::json::parse(skills_off.body);
+        Expect(skills_off_json.value("enabled", true) == false && skills_off_json["skills"].empty(),
+               "skills endpoint should report enabled=false without a handler");
+
+        std::string skills_cwd;
+        gateway.SetSkillsHandler([&skills_cwd](const std::string& cwd) {
+            skills_cwd = cwd;
+            aiagent::web::SkillsSnapshot snapshot;
+            snapshot.enabled = true;
+            snapshot.truncated = true;
+            snapshot.skills.push_back(
+                    aiagent::web::SkillInfo{"release-notes", "Write release notes", "project",
+                                            "/repo/.de/skills/release-notes/SKILL.md"});
+            return snapshot;
+        });
+        const auto skills_on = http.Get(base + "/api/v1/skills?path=%2Ftmp%2Fproject");
+        Expect(skills_on.IsSuccess(), "skills endpoint should succeed when enabled");
+        const auto skills_json = nlohmann::json::parse(skills_on.body);
+        Expect(skills_json.value("enabled", false) == true,
+               "skills endpoint should report enabled=true");
+        Expect(skills_json.value("truncated", false) == true,
+               "skills endpoint should report catalog truncation");
+        Expect(skills_cwd == "/tmp/project", "skills endpoint should decode the path param");
+        Expect(skills_json["skills"].size() == 1 &&
+                       skills_json["skills"][0].value("name", std::string()) == "release-notes" &&
+                       skills_json["skills"][0].value("source", std::string()) == "project" &&
+                       skills_json["skills"][0].value("description", std::string()) ==
+                               "Write release notes" &&
+                       skills_json["skills"][0].value("path", std::string()) ==
+                               "/repo/.de/skills/release-notes/SKILL.md",
+               "skills endpoint should serialize the catalog entries");
+
         std::vector<std::string> agents_sessions;
         gateway.SetAgentsInfoHandler([&agents_sessions](const std::string& session_id) {
             agents_sessions.push_back(session_id);

@@ -743,6 +743,57 @@ agents_md_max_depth = 16
 - 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；同步 `/api/v1/chat`
   和 A2A `SendMessage` 暂不保证使用项目指令。
 
+## Skills
+
+技能是可复用的 Markdown 指令包。系统提示只注入技能目录（名称 + 描述），
+模型在任务匹配时调用只读工具 `skill(name, file?)` 按需加载正文或技能目录内的
+资源文件；正文不会预先塞进上下文。
+
+```text
+<skills-root>/
+└── release-notes/
+    ├── SKILL.md
+    └── reference.md
+```
+
+`SKILL.md` 至少包含 `name` 与 `description`：
+
+```markdown
+---
+name: release-notes
+description: Write release notes from git history. Use when asked to summarize commits for a release.
+---
+
+# Release notes
+...
+```
+
+发现根按优先级从高到低：
+
+1. 项目级 `<project-root>/.de/skills`
+2. `[skills] extra_roots`
+3. 用户级 `<data_dir>/skills`（默认 `~/.de/skills`）
+4. 内置 `<share>/de/skills`（源码树回退 `skills/`）
+
+同名技能高优先级胜出。配置：
+
+```ini
+[skills]
+enabled = true
+project = true
+user = true
+builtin = true
+extra_roots =
+max_skills = 64
+max_catalog_bytes = 8192
+max_skill_bytes = 65536
+follow_symlinks = false
+```
+
+终端用 `/skills` 查看当前工作目录实际加载的技能；后端接口为
+`GET /api/v1/skills?path=<cwd>`。默认不跟随符号链接，正文/资源超过
+`max_skill_bytes` 时截断并提示原文件路径。
+
 ## 权限模式
 
 Agent 在某个工作路径下的行为由「权限模式」决定。终端用 `/permissions`

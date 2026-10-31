@@ -28,6 +28,21 @@ struct ToolInfo {
     std::string description;
 };
 
+// 技能清单条目（GET /api/v1/skills）。
+struct SkillInfo {
+    std::string name;
+    std::string description;
+    std::string source;  // project / extra / user / builtin
+    std::string path;    // SKILL.md 绝对路径
+};
+
+// 技能目录快照（GET /api/v1/skills）。
+struct SkillsSnapshot {
+    bool enabled = false;
+    bool truncated = false;
+    std::vector<SkillInfo> skills;
+};
+
 // 权限条目（GET /api/v1/permissions）。
 struct PermissionInfo {
     std::string path;
@@ -151,6 +166,9 @@ public:
     // 工具清单（GET /api/v1/tools）。
     using ToolsHandler = std::function<std::vector<ToolInfo>()>;
 
+    // 技能目录（GET /api/v1/skills?path=）。cwd 为空时由装配方使用默认目录。
+    using SkillsHandler = std::function<SkillsSnapshot(const std::string& cwd)>;
+
     // 子 Agent 运行时快照（GET /api/v1/agents）。未设置时返回 enabled=false。
     // session_id 非空时，running[]/pending_results[] 只含该会话的后台任务。
     using AgentsInfoHandler = std::function<SubAgentSnapshot(const std::string& session_id)>;
@@ -261,6 +279,9 @@ public:
 
     // 注入工具清单处理逻辑。未设置时 /tools 接口返回 501。
     void SetToolsHandler(ToolsHandler handler);
+
+    // 注入技能目录处理逻辑。未设置时 /skills 返回 enabled=false。
+    void SetSkillsHandler(SkillsHandler handler);
 
     // 注入子 Agent 快照处理逻辑。未设置时 /agents 接口返回 enabled=false。
     void SetAgentsInfoHandler(AgentsInfoHandler handler);
