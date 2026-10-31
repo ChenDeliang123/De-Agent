@@ -30,6 +30,8 @@ constexpr std::size_t kMaxFrontmatterBytes = 8192;
 constexpr std::size_t kMaxNameBytes = 64;
 constexpr std::size_t kMaxDescriptionBytes = 1024;
 constexpr std::size_t kMaxListedFiles = 50;
+// 目录被截断时 RenderCatalog 会追加一行尾注；预算里预留它，避免实际文本超限。
+constexpr std::size_t kCatalogTruncationReserveBytes = 64;
 constexpr const char* kSkillFileName = "SKILL.md";
 
 constexpr const char* kCatalogHeader =
@@ -318,6 +320,11 @@ bool ParseDocument(const std::string& text, const std::string& directory_name, P
             *error = "invalid skill name";
         }
         return false;
+    }
+    if (name != directory_name) {
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "skills",
+                "event=skill_name_mismatch name=" + name + " directory=" + directory_name);
     }
 
     description = NormalizeOneLine(std::move(description));
@@ -661,7 +668,7 @@ SkillCatalog SkillLoader::Impl::LoadCatalog(const std::string& working_directory
     }
 
     std::unordered_map<std::string, std::string> seen_names;
-    std::size_t used_bytes = std::string(kCatalogHeader).size();
+    std::size_t used_bytes = std::string(kCatalogHeader).size() + kCatalogTruncationReserveBytes;
     std::size_t cache_hits = 0;
     std::size_t cache_misses = 0;
     bool stop = false;
@@ -951,6 +958,7 @@ bool SkillLoader::Impl::LoadContent(const std::string& name, const std::string& 
     content->entry = *entry;
     content->path = aiagent::platform::ToUtf8(target);
     content->body = std::move(raw);
+    content->resources.clear();
     content->truncated = truncated;
     content->bytes = content->body.size();
     AppendTruncationMarker(content, config.max_skill_bytes);

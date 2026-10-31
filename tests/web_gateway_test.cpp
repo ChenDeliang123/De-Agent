@@ -13,12 +13,14 @@
 
 #include <condition_variable>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
-#include <thread>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "aiagent/agent/agent_runtime.hpp"
@@ -26,6 +28,8 @@
 #include "aiagent/agent/session_meta_store.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/permissions/permission_store.hpp"
+#include "aiagent/platform/paths.hpp"
+#include "aiagent/skills/skill_loader.hpp"
 #include "aiagent/web/web_gateway.hpp"
 
 #include "test_support.hpp"
@@ -71,6 +75,13 @@ a2a::models::AgentCard BuildCard() {
     a2a::models::AgentCard card("web-test-agent", "Web gateway test", "0.1.0");
     card.WithDefaultInputModes({"text/plain"}).WithDefaultOutputModes({"text/plain"});
     return card;
+}
+
+void WriteTextFile(const std::filesystem::path& path, const std::string& content) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << content;
 }
 
 // 解析 SSE 响应体为 (event, data) 帧，便于按帧断言（不依赖 JSON 键序）。
@@ -372,6 +383,37 @@ int main() {
                        skills_json["skills"][0].value("path", std::string()) ==
                                "/repo/.de/skills/release-notes/SKILL.md",
                "skills endpoint should serialize the catalog entries");
+
+        // 真实 SkillLoader + WebGateway：确认接口不是只验证 stub 形状。
+        const auto gateway_skill_project = test_support::TempDir() / "gateway-skill-project";
+        WriteTextFile(gateway_skill_project / ".de" / "skills" / "alpha" / "SKILL.md",
+                      "---\nname: alpha\ndescription: gateway alpha\n---\n\n# Alpha\n");
+        aiagent::SkillsConfig gateway_skills_config;
+        gateway_skills_config.project = true;
+        gateway_skills_config.user = false;
+        gateway_skills_config.builtin = false;
+        auto gateway_skill_loader = std::make_shared<aiagent::skills::SkillLoader>(
+                gateway_skills_config, std::vector<std::string>{}, std::vector<std::string>{});
+        gateway.SetSkillsHandler([gateway_skill_loader](const std::string& cwd) {
+            aiagent::web::SkillsSnapshot snapshot;
+            snapshot.enabled = true;
+            const auto catalog = gateway_skill_loader->LoadCatalog(cwd);
+            snapshot.truncated = catalog.truncated;
+            for (const auto& entry : catalog.entries) {
+                snapshot.skills.push_back({entry.name, entry.description,
+                                           aiagent::skills::SkillSourceName(entry.source),
+                                           entry.path});
+            }
+            return snapshot;
+        });
+        const auto real_skills = http.Get(base + "/api/v1/skills?path=" +
+                                          aiagent::platform::ToGenericUtf8(gateway_skill_project));
+        Expect(real_skills.IsSuccess(), "real loader skills endpoint should succeed");
+        const auto real_skills_json = nlohmann::json::parse(real_skills.body);
+        Expect(real_skills_json["skills"].size() == 1 &&
+                       real_skills_json["skills"][0].value("name", std::string()) == "alpha" &&
+                       real_skills_json["skills"][0].value("source", std::string()) == "project",
+               "real loader should expose project skills through the gateway");
 
         std::vector<std::string> agents_sessions;
         gateway.SetAgentsInfoHandler([&agents_sessions](const std::string& session_id) {

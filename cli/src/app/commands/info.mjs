@@ -154,6 +154,9 @@ export const infoCommands = [
         const skills = Array.isArray(snapshot.skills) ? snapshot.skills : [];
         if (skills.length === 0) {
           ctx.print("(no skills)");
+          if (snapshot.truncated) {
+            ctx.print("  (catalog truncated)");
+          }
           return;
         }
         ctx.print(`skills (${skills.length}):`);

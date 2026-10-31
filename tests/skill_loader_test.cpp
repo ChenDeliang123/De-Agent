@@ -352,6 +352,22 @@ void TestLimitsAndTruncation() {
         Expect(content.body.find("Raise [skills] max_skill_bytes") != std::string::npos,
                "truncation marker should point at the actionable limit");
     }
+
+    const fs::path budget_root = temp.path() / "budget-skills";
+    const std::string long_description(100, 'd');
+    for (int i = 0; i < 5; ++i) {
+        WriteSkill(budget_root, "skill-" + std::to_string(i),
+                   SkillText("skill-" + std::to_string(i), long_description));
+    }
+    aiagent::SkillsConfig budget;
+    budget.project = false;
+    budget.max_catalog_bytes = 800;
+    aiagent::skills::SkillLoader budget_loader(budget, {budget_root.string()}, {});
+    const auto budget_catalog = budget_loader.LoadCatalog(temp.path().string());
+    Expect(budget_catalog.truncated, "tight catalog budget should truncate");
+    const std::string budget_rendered = aiagent::skills::SkillLoader::RenderCatalog(budget_catalog);
+    Expect(!budget_rendered.empty() && budget_rendered.size() <= budget.max_catalog_bytes,
+           "rendered catalog including truncation tail should respect max_catalog_bytes");
 }
 
 void TestCacheRefresh() {
@@ -417,6 +433,8 @@ void TestResources() {
     Expect(content.entry.name == "resource-skill", "resource result should carry the entry");
     Expect(content.path.find("reference.md") != std::string::npos,
            "resource load should report the resolved path");
+    Expect(content.resources.empty(),
+           "resource load should clear the previous skill resource list");
 
     Expect(loader.LoadContent("resource-skill", "scripts/run.sh", temp.path().string(), &content,
                               &error),

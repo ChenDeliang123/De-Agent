@@ -15,7 +15,8 @@ std::string BuildCodingSystemPrompt() {
             "If the user asks who you are, your name, or who created you, answer that you are " +
             std::string(aiagent::kAgentName) + ", a general-purpose coding agent by " +
             aiagent::kAgentAuthor + ".\n"
-            "Available tools: read, write, edit, bash, ls, glob, grep.\n"
+            "Built-in coding tools: read, write, edit, bash, ls, glob, grep. Additional tools "
+            "(for example MCP or skill) appear in the request's tool list when available.\n"
 #ifdef _WIN32
             "Platform: Windows x64. The bash tool runs commands via `cmd.exe /d /s /c`; "
             "use Windows commands (dir, type, findstr, where, copy, move) or invoke "

@@ -31,6 +31,10 @@ int main() {
     ExpectContains(prompt, aiagent::kAgentAuthor, "prompt should name the author");
     ExpectContains(prompt, "read, write, edit, bash, ls, glob, grep",
                    "prompt should list the local tools");
+    ExpectContains(prompt, "request's tool list",
+                   "prompt should defer additional tools to the request tool list");
+    ExpectContains(prompt, "MCP or skill",
+                   "prompt should mention optional MCP/skill tools");
 
     // 2) 交付纪律：不许只给计划（历史事故：只输出计划就收工）。
     ExpectContains(prompt, "Do NOT stop after presenting a plan",

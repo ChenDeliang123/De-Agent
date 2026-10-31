@@ -30,8 +30,10 @@
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/llm/usage_tracking_model.hpp"
 #include "aiagent/log.hpp"
+#include "aiagent/skills/skill_loader.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/filtered_tool_provider.hpp"
+#include "aiagent/tools/skill_tool.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -582,6 +584,50 @@ void TestFilteredToolProvider() {
 
     aiagent::tools::FilteredToolProvider deny_task(inner, {}, {"noop"});
     Expect(deny_task.ListTools().empty(), "deny list should win over inherit-all");
+}
+
+void TestSkillWhitelistAndCwd() {
+    const auto dir = TempDir();
+    const auto skill_root = dir / ".de" / "skills";
+    std::filesystem::create_directories(skill_root / "alpha");
+    WriteFile(skill_root / "alpha" / "SKILL.md",
+              "---\nname: alpha\ndescription: alpha skill\n---\n\n# Alpha\n");
+
+    aiagent::SkillsConfig config;
+    config.project = true;
+    config.user = false;
+    config.builtin = false;
+    auto loader = std::make_shared<aiagent::skills::SkillLoader>(config, std::vector<std::string>{},
+                                                                 std::vector<std::string>{});
+    auto parent = std::make_shared<aiagent::tools::CompositeToolProvider>();
+    parent->Add(std::make_shared<NoopToolProvider>());
+    parent->Add(aiagent::tools::MakeSkillToolProvider(loader));
+
+    const auto has_tool = [](const std::vector<aiagent::llm::ToolSpec>& tools,
+                             const std::string& name) {
+        for (const auto& tool : tools) {
+            if (tool.name == name) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    aiagent::tools::FilteredToolProvider with_skill(parent, {"noop", "skill"});
+    const auto skill_tools = with_skill.ListToolsFor(dir.string());
+    Expect(has_tool(skill_tools, "noop") && has_tool(skill_tools, "skill"),
+           "sub-agent allowlist containing skill should expose it for the parent cwd");
+
+    aiagent::tools::FilteredToolProvider without_skill(parent, {"noop"});
+    const auto plain_tools = without_skill.ListToolsFor(dir.string());
+    Expect(has_tool(plain_tools, "noop") && !has_tool(plain_tools, "skill"),
+           "sub-agent allowlist without skill should hide it");
+
+    const auto empty = dir / "empty";
+    std::filesystem::create_directories(empty);
+    const auto empty_tools = with_skill.ListToolsFor(empty.string());
+    Expect(has_tool(empty_tools, "noop") && !has_tool(empty_tools, "skill"),
+           "skill should follow the request cwd used by the sub-agent");
 }
 
 void TestDefinitionLoading() {
@@ -2011,6 +2057,7 @@ void TestAgentsBackgroundConfig() {
 
 int main() {
     TestFilteredToolProvider();
+    TestSkillWhitelistAndCwd();
     TestDefinitionLoading();
     TestManagerRun();
     TestDepthControl();

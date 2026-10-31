@@ -125,6 +125,17 @@ test("/skills marks a truncated catalog", async () => {
   }
 });
 
+test("/skills marks truncation even when the catalog is empty", async () => {
+  const backend = await startBackend(200, { enabled: true, skills: [], truncated: true });
+  try {
+    const { ctx, printed } = makeContext(backend.url);
+    await runCommand(ctx, "/skills");
+    assert.deepEqual(printed, ["(no skills)", "  (catalog truncated)"]);
+  } finally {
+    await close(backend.server);
+  }
+});
+
 test("/skills reports backend failures", async () => {
   const backend = await startBackend(500, { error: "boom" });
   try {
