@@ -33,9 +33,12 @@ struct SkillCatalog {
 
 struct SkillContent {
     SkillEntry entry;
+    std::string path;  // 实际加载的文件路径（正文为 SKILL.md，资源为其目标路径）
     std::string body;
     bool truncated = false;
     std::size_t bytes = 0;
+    // 仅正文加载时填充：技能目录的直接子项（目录带 '/'），最多 50 项。
+    std::vector<std::string> resources;
 };
 
 // 技能发现与按需加载。

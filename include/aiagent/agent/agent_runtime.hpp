@@ -24,6 +24,7 @@
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/permissions/project_config.hpp"
 #include "aiagent/permissions/trust_store.hpp"
+#include "aiagent/skills/skill_loader.hpp"
 #include "aiagent/tools/tool_context.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
@@ -99,6 +100,10 @@ public:
             std::shared_ptr<ProjectInstructionsLoader> loader);
     void SetFallbackWorkingDirectory(std::string directory);
 
+    // 可选：注入技能加载器。系统消息仅在工具列表里真的存在 `skill` 时注入目录，
+    // 避免子 Agent 工具白名单不含 skill 时误导模型。
+    void SetSkillLoader(std::shared_ptr<const skills::SkillLoader> loader);
+
     // 设置上下文压缩参数；默认 enabled，阈值见 CompactionSettings。
     void SetCompactionSettings(const CompactionSettings& settings);
 
@@ -163,6 +168,9 @@ private:
     // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录 + 权限模式。
     llm::ChatMessage BuildSystemMessage(
             const std::string& working_directory) const;
+
+    // 追加 Skills 目录（仅在 loader 存在且工具列表含 `skill` 时生效）。
+    void AppendSkillCatalog(std::string& content, const std::string& working_directory) const;
 
     // 追加派发准则（仅在 SetDelegationEnabled(true) 时生效）。流式与非流式
     // 两条系统消息构造路径共用，避免只有一条路径能派发。
@@ -231,6 +239,7 @@ private:
     std::shared_ptr<llm::IModelClient> model_;
     std::shared_ptr<tools::IToolProvider> tools_;
     std::shared_ptr<ProjectInstructionsLoader> instructions_loader_;
+    std::shared_ptr<const skills::SkillLoader> skill_loader_;
     std::shared_ptr<permissions::PermissionStore> permission_store_;
     PermissionSettings permission_settings_;
     permissions::BashPolicy bash_policy_;

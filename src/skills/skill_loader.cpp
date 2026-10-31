@@ -29,6 +29,7 @@ namespace fs = std::filesystem;
 constexpr std::size_t kMaxFrontmatterBytes = 8192;
 constexpr std::size_t kMaxNameBytes = 64;
 constexpr std::size_t kMaxDescriptionBytes = 1024;
+constexpr std::size_t kMaxListedFiles = 50;
 constexpr const char* kSkillFileName = "SKILL.md";
 
 constexpr const char* kCatalogHeader =
@@ -438,6 +439,44 @@ bool HasSymlinkComponent(const fs::path& base, const fs::path& relative) {
     return false;
 }
 
+std::vector<std::string> ListSkillResources(const fs::path& directory, bool follow_symlinks) {
+    std::vector<std::string> resources;
+    std::error_code ec;
+    fs::directory_iterator it(directory, fs::directory_options::skip_permission_denied, ec);
+    if (ec) {
+        return resources;
+    }
+    for (const auto& entry : it) {
+        std::error_code entry_error;
+        const fs::file_status link_status = entry.symlink_status(entry_error);
+        if (entry_error) {
+            continue;
+        }
+        if (fs::is_symlink(link_status) && !follow_symlinks) {
+            continue;
+        }
+        const fs::file_status status =
+                fs::is_symlink(link_status) ? entry.status(entry_error) : link_status;
+        if (entry_error) {
+            continue;
+        }
+        if (!fs::is_directory(status) && !fs::is_regular_file(status)) {
+            continue;
+        }
+        const std::string name = aiagent::platform::ToUtf8(entry.path().filename());
+        if (name.empty() || name == kSkillFileName ||
+            aiagent::platform::IsHiddenPath(entry.path())) {
+            continue;
+        }
+        resources.push_back(fs::is_directory(status) ? name + "/" : name);
+    }
+    std::sort(resources.begin(), resources.end());
+    if (resources.size() > kMaxListedFiles) {
+        resources.resize(kMaxListedFiles);
+    }
+    return resources;
+}
+
 void AppendTruncationMarker(SkillContent* content, const std::string& path, std::size_t limit) {
     if (content == nullptr || !content->truncated) {
         return;
@@ -813,7 +852,9 @@ bool SkillLoader::Impl::LoadContent(const std::string& name, const std::string& 
             return false;
         }
         content->entry = *entry;
+        content->path = entry->path;
         content->body = std::move(parsed.body);
+        content->resources = ListSkillResources(skill_path.parent_path(), config.follow_symlinks);
         content->truncated = parsed.truncated;
         content->bytes = content->body.size();
         AppendTruncationMarker(content, entry->path, config.max_skill_bytes);
@@ -897,6 +938,7 @@ bool SkillLoader::Impl::LoadContent(const std::string& name, const std::string& 
     }
 
     content->entry = *entry;
+    content->path = aiagent::platform::ToUtf8(target);
     content->body = std::move(raw);
     content->truncated = truncated;
     content->bytes = content->body.size();

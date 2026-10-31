@@ -150,6 +150,7 @@ add_library(aiagent_agent STATIC
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
   src/tools/filtered_tool_provider.cpp
+  src/tools/skill_tool.cpp
   src/tools/sub_agent_tool.cpp
 )
 target_include_directories(aiagent_agent PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -346,6 +347,14 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(skill_loader_test tests/skill_loader_test.cpp)
   target_link_libraries(skill_loader_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_skill_loader COMMAND skill_loader_test)
+
+  add_executable(skill_tool_test tests/skill_tool_test.cpp)
+  target_link_libraries(skill_tool_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_skill_tool COMMAND skill_tool_test)
+
+  add_executable(skill_runtime_test tests/skill_runtime_test.cpp)
+  target_link_libraries(skill_runtime_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_skill_runtime COMMAND skill_runtime_test)
 
   add_executable(local_tools_test tests/local_tools_test.cpp)
   target_link_libraries(local_tools_test PRIVATE aiagent_agent)

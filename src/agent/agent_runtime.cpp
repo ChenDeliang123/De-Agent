@@ -1,5 +1,6 @@
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/log.hpp"
+#include "aiagent/tools/skill_tool.hpp"
 
 #include "a2a/core/id.hpp"
 
@@ -269,6 +270,14 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         }
         return {ToolGate::kAllow, {}};
     }
+    if (tool_name == tools::kSkillToolName) {
+        if (!policy.allow_read) {
+            return {ToolGate::kDeny,
+                    "permission denied: skill loading is disabled by the current "
+                    "permission mode"};
+        }
+        return {ToolGate::kAllow, {}};
+    }
     if (tool_name == "write" || tool_name == "edit") {
         if (!policy.allow_write) {
             return {ToolGate::kDeny,
@@ -364,6 +373,10 @@ void AgentRuntime::SetProjectInstructionsLoader(
     instructions_loader_ = std::move(loader);
 }
 
+void AgentRuntime::SetSkillLoader(std::shared_ptr<const skills::SkillLoader> loader) {
+    skill_loader_ = std::move(loader);
+}
+
 void AgentRuntime::SetFallbackWorkingDirectory(std::string directory) {
     fallback_working_directory_ = std::move(directory);
 }
@@ -386,12 +399,40 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
         }
     }
 
+    AppendSkillCatalog(system.content, working_directory);
+
     if (!working_directory.empty()) {
         system.content += "\n\nCurrent working directory: " + working_directory;
     }
     AppendDelegationGuidance(system.content);
     AppendPermissionMode(system.content, ResolvePermissionMode(working_directory));
     return system;
+}
+
+void AgentRuntime::AppendSkillCatalog(std::string& content,
+                                      const std::string& working_directory) const {
+    if (skill_loader_ == nullptr || tools_ == nullptr) {
+        return;
+    }
+
+    bool has_skill_tool = false;
+    for (const auto& tool : tools_->ListTools()) {
+        if (tool.name == tools::kSkillToolName) {
+            has_skill_tool = true;
+            break;
+        }
+    }
+    if (!has_skill_tool) {
+        return;
+    }
+
+    const std::string load_directory =
+            working_directory.empty() ? fallback_working_directory_ : working_directory;
+    const skills::SkillCatalog catalog = skill_loader_->LoadCatalog(load_directory);
+    const std::string rendered = skills::SkillLoader::RenderCatalog(catalog);
+    if (!rendered.empty()) {
+        content += "\n\n" + rendered;
+    }
 }
 
 void AgentRuntime::AppendDelegationGuidance(std::string& content) const {
@@ -644,6 +685,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
     llm::ChatMessage system;
     system.role = "system";
     system.content = system_prompt_;
+    AppendSkillCatalog(system.content, fallback_working_directory_);
     AppendDelegationGuidance(system.content);
     AppendPermissionMode(system.content, ResolvePermissionMode({}, /*interactive=*/false));
     chat_messages.push_back(std::move(system));

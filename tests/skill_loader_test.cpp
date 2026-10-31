@@ -367,12 +367,21 @@ void TestResources() {
     Expect(content.body.find("# Steps") != std::string::npos, "skill body should contain markdown");
     Expect(content.entry.source == aiagent::skills::SkillSource::kUser,
            "entry should carry its source");
+    Expect(content.path.find("SKILL.md") != std::string::npos,
+           "body load should report the SKILL.md path");
+    Expect(std::find(content.resources.begin(), content.resources.end(), "reference.md") !=
+                           content.resources.end() &&
+                   std::find(content.resources.begin(), content.resources.end(), "scripts/") !=
+                           content.resources.end(),
+           "body load should list direct resource entries");
 
     Expect(loader.LoadContent("resource-skill", "reference.md", temp.path().string(), &content,
                               &error),
            "relative resource should load");
     Expect(content.body == "reference body\n", "resource body should be returned verbatim");
     Expect(content.entry.name == "resource-skill", "resource result should carry the entry");
+    Expect(content.path.find("reference.md") != std::string::npos,
+           "resource load should report the resolved path");
 
     Expect(loader.LoadContent("resource-skill", "scripts/run.sh", temp.path().string(), &content,
                               &error),
