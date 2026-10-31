@@ -207,7 +207,8 @@ bool ParseDocument(const std::string& text, const std::string& directory_name, P
             }
             return false;
         }
-        if (Trim(lines[i]) == "---") {
+        if (Trim(lines[i]) == "---" && !lines[i].empty() && lines[i].front() != ' ' &&
+            lines[i].front() != '\t') {
             end = i;
             break;
         }
@@ -246,6 +247,7 @@ bool ParseDocument(const std::string& text, const std::string& directory_name, P
             continue;
         }
 
+        bool next_is_key = false;
         if (value == "|" || value == ">" || value == "|-" || value == ">-" || value == "|+" ||
             value == ">+") {
             const bool literal = value.front() == '|';
@@ -261,6 +263,8 @@ bool ParseDocument(const std::string& text, const std::string& directory_name, P
                     continue;
                 }
                 if (block_line.front() != ' ' && block_line.front() != '\t') {
+                    // 下一行是顶层 key：保留 index，让外层循环继续解析它。
+                    next_is_key = true;
                     break;
                 }
                 if (!have_indent) {
@@ -301,7 +305,9 @@ bool ParseDocument(const std::string& text, const std::string& directory_name, P
         } else if (key == "description") {
             description = std::move(value);
         }
-        ++index;
+        if (!next_is_key) {
+            ++index;
+        }
     }
 
     if (name.empty()) {
@@ -506,6 +512,8 @@ struct SkillLoader::Impl {
     SkillsConfig config;
     std::vector<std::string> user_roots;
     std::vector<std::string> builtin_roots;
+    // 用户/内置根的相对路径以 loader 构造时的工作目录为基准，不能随请求 cwd 漂移。
+    fs::path root_base;
 
     mutable std::mutex cache_mutex;
     mutable std::unordered_map<std::string, std::shared_ptr<const CachedSkill>> cache;
@@ -513,7 +521,8 @@ struct SkillLoader::Impl {
     Impl(SkillsConfig settings, std::vector<std::string> users, std::vector<std::string> builtins)
         : config(std::move(settings)),
           user_roots(std::move(users)),
-          builtin_roots(std::move(builtins)) {}
+          builtin_roots(std::move(builtins)),
+          root_base(ResolveWorkingDirectory({})) {}
 
     SkillCatalog LoadCatalog(const std::string& working_directory) const;
     bool LoadContent(const std::string& name, const std::string& file,
@@ -642,11 +651,12 @@ SkillCatalog SkillLoader::Impl::LoadCatalog(const std::string& working_directory
     for (const auto& root : config.extra_roots) {
         add_root(ResolveRoot(root, cwd), SkillSource::kExtra);
     }
+    const fs::path stable_base = root_base.empty() ? cwd : root_base;
     for (const auto& root : user_roots) {
-        add_root(ResolveRoot(root, cwd), SkillSource::kUser);
+        add_root(ResolveRoot(root, stable_base), SkillSource::kUser);
     }
     for (const auto& root : builtin_roots) {
-        add_root(ResolveRoot(root, cwd), SkillSource::kBuiltin);
+        add_root(ResolveRoot(root, stable_base), SkillSource::kBuiltin);
     }
 
     std::unordered_map<std::string, std::string> seen_names;

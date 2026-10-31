@@ -238,12 +238,31 @@ void TestFrontmatterVariants() {
                "description: bom description\r\n"
                "---\r\n\r\n"
                "body\r\n");
+    WriteSkill(root, "block-before-name",
+               "---\n"
+               "description: |\n"
+               "  first line\n"
+               "  second line\n"
+               "name: actual-name\n"
+               "---\n\n"
+               "# Body\n"
+               "real body\n");
+    WriteSkill(root, "block-with-separator",
+               "---\n"
+               "description: |\n"
+               "  first line\n"
+               "  ---\n"
+               "  second line\n"
+               "name: separator-name\n"
+               "---\n\n"
+               "# Body\n"
+               "real body\n");
 
     aiagent::SkillsConfig config;
     config.project = false;
     aiagent::skills::SkillLoader loader(config, {root.string()}, {});
     const auto catalog = loader.LoadCatalog(temp.path().string());
-    Expect(catalog.entries.size() == 6, "all valid frontmatter variants should load");
+    Expect(catalog.entries.size() == 8, "all valid frontmatter variants should load");
 
     const auto* quoted = FindEntry(catalog, "quoted");
     Expect(quoted != nullptr, "quoted name should load");
@@ -262,6 +281,20 @@ void TestFrontmatterVariants() {
     Expect(FindEntry(catalog, "declared-name") != nullptr,
            "frontmatter name should win over directory name");
     Expect(FindEntry(catalog, "bom") != nullptr, "BOM/CRLF frontmatter should load");
+
+    const auto* actual_name = FindEntry(catalog, "actual-name");
+    Expect(actual_name != nullptr && actual_name->description == "first line second line",
+           "a key after a block scalar must still be parsed");
+    const auto* separator_name = FindEntry(catalog, "separator-name");
+    Expect(separator_name != nullptr && separator_name->description == "first line --- second line",
+           "an indented --- inside a block scalar must not close frontmatter");
+    aiagent::skills::SkillContent separator_content;
+    std::string separator_error;
+    Expect(loader.LoadContent("separator-name", "", temp.path().string(), &separator_content,
+                              &separator_error),
+           "block scalar with an indented separator should load");
+    Expect(separator_content.body == "# Body\nreal body",
+           "frontmatter after an indented separator must not leak into the body");
 
     const fs::path invalid = temp.path() / "invalid";
     WriteSkill(invalid, "missing-description", "---\nname: missing-description\n---\nbody\n");
@@ -477,6 +510,48 @@ void TestDuplicateWithinRoot() {
            "first directory in sorted order should win duplicate");
 }
 
+void TestStableRootBase() {
+    TempDir temp;
+    const fs::path stable = temp.path() / "stable";
+    const fs::path other = temp.path() / "other";
+    WriteSkill(stable / "skills", "alpha", SkillText("alpha", "stable user"));
+    WriteSkill(other / "skills", "alpha", SkillText("alpha", "request user"));
+    WriteSkill(stable / "extra", "extra", SkillText("extra", "stable extra"));
+    WriteSkill(other / "extra", "extra", SkillText("extra", "request extra"));
+
+    std::error_code cwd_error;
+    const fs::path old_cwd = fs::current_path(cwd_error);
+    if (cwd_error) {
+        std::cout << "SKIP: stable root base test: " << cwd_error.message() << "\n";
+        return;
+    }
+    fs::current_path(stable, cwd_error);
+    if (cwd_error) {
+        std::cout << "SKIP: stable root base test: " << cwd_error.message() << "\n";
+        return;
+    }
+
+    {
+        aiagent::SkillsConfig config;
+        config.project = false;
+        config.extra_roots = {"extra"};
+        // 相对 user root 应固定在 loader 构造时的 cwd；extra root 仍跟请求 cwd。
+        aiagent::skills::SkillLoader loader(config, {"skills"}, {});
+        const auto catalog = loader.LoadCatalog(other.string());
+
+        const auto* alpha = FindEntry(catalog, "alpha");
+        Expect(alpha != nullptr && alpha->description == "stable user",
+               "user/builtin relative roots must not follow the request cwd");
+        const auto* extra = FindEntry(catalog, "extra");
+        Expect(extra != nullptr && extra->description == "request extra",
+               "extra_roots should still resolve relative to the request cwd");
+    }
+
+    std::error_code restore_error;
+    fs::current_path(old_cwd, restore_error);
+    Expect(!restore_error, "stable root base test should restore cwd");
+}
+
 }  // namespace
 
 int main() {
@@ -488,6 +563,7 @@ int main() {
     TestResources();
     TestSymlinks();
     TestDuplicateWithinRoot();
+    TestStableRootBase();
 
     if (g_failures == 0) {
         std::cout << "skill loader tests passed\n";

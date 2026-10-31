@@ -441,19 +441,60 @@ int main(int argc, char** argv) {
             return 1;
         }
         skills_config = *parsed_skills;
+        // 用户/内置根必须相对启动目录或可执行文件位置解析；不能相对每次请求的 cwd。
+        const auto absolute_path = [&](const std::string& value) -> std::string {
+            if (value.empty()) {
+                return {};
+            }
+            std::error_code ec;
+            std::filesystem::path path = aiagent::platform::FromUtf8(value);
+            if (!path.is_absolute()) {
+                path = aiagent::platform::FromUtf8(fallback_working_directory) / path;
+            }
+            const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
+            if (!ec) {
+                path = canonical;
+            }
+            return aiagent::platform::ToUtf8(path);
+        };
         std::vector<std::string> skill_user_roots;
         if (skills_config.user && !app_paths.data_dir.empty()) {
-            skill_user_roots.push_back(aiagent::platform::ToUtf8(
-                    aiagent::platform::FromUtf8(app_paths.data_dir) / "skills"));
+            skill_user_roots.push_back(absolute_path(aiagent::platform::ToUtf8(
+                    aiagent::platform::FromUtf8(app_paths.data_dir) / "skills")));
         }
         std::vector<std::string> skill_builtin_roots;
         if (skills_config.builtin) {
+            std::string share_skills;
             if (!share_dir.empty()) {
-                skill_builtin_roots.push_back(aiagent::platform::ToUtf8(
+                share_skills = absolute_path(aiagent::platform::ToUtf8(
                         aiagent::platform::FromUtf8(share_dir) / "skills"));
             }
-            // 源码树回退；安装态若 share 不存在，loader 会静默跳过。
-            skill_builtin_roots.push_back("skills");
+            std::error_code ec;
+            if (!share_skills.empty() &&
+                std::filesystem::is_directory(aiagent::platform::FromUtf8(share_skills), ec) &&
+                !ec) {
+                skill_builtin_roots.push_back(share_skills);
+            } else {
+                // 源码树回退：以可执行文件位置为基准（build/aiagent_app → <repo>/skills），
+                // 避免把任意请求 cwd 下的 skills/ 误当成 builtin。
+                const std::string executable = aiagent::platform::ExecutablePath();
+                if (!executable.empty()) {
+                    const std::filesystem::path executable_dir =
+                            aiagent::platform::FromUtf8(executable).parent_path();
+                    const std::filesystem::path candidates[] = {
+                            executable_dir.parent_path() / "skills", executable_dir / "skills"};
+                    for (const auto& candidate : candidates) {
+                        const std::string path =
+                                absolute_path(aiagent::platform::ToUtf8(candidate));
+                        if (!path.empty() &&
+                            std::filesystem::is_directory(aiagent::platform::FromUtf8(path), ec) &&
+                            !ec) {
+                            skill_builtin_roots.push_back(path);
+                            break;
+                        }
+                    }
+                }
+            }
         }
         auto skill_loader = std::make_shared<aiagent::skills::SkillLoader>(
                 skills_config, skill_user_roots, skill_builtin_roots);
