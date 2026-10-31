@@ -1,4 +1,4 @@
-# Windows local regression gate.
+﻿# Windows local regression gate.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1
@@ -200,23 +200,24 @@ try {
     if ($SkipMcp) {
         Add-Result "mcp" "SKIP" "requested by -SkipMcp" $stageLog
     } else {
-        $python = if ($env:PYTHON_BIN) { $env:PYTHON_BIN } else {
-            (Require-Command "python" "install Python 3 or set PYTHON_BIN")
+        $python = $env:PYTHON_BIN
+        if (-not $python) {
+            $python = Require-Command "python" "install Python 3 or set PYTHON_BIN"
         }
         Require-File $python "install Python 3 or set PYTHON_BIN"
         $mcpBuild = Join-Path $repo "build-mcp-release"
         $mcpExe = Join-Path $mcpBuild "mcp_server\mcp_server.exe"
-        if (-not (Test-Path -LiteralPath $mcpExe)) {
-            $mcpArgs = @(
-                "-S", (Join-Path $repo "vendor/mcp-extension-platform"),
-                "-B", $mcpBuild,
-                "-G", "Ninja",
-                "-DCMAKE_TOOLCHAIN_FILE=$toolchain",
-                "-DCMAKE_BUILD_TYPE=Release"
-            )
-            Invoke-Logged "mcp configure" $stageLog { & $cmake @mcpArgs }
-            Invoke-Logged "mcp build" $stageLog { & $cmake --build $mcpBuild -j }
-        }
+        # 每次都重新 configure/build，避免子模块源码更新后误用旧二进制。
+        $mcpArgs = @(
+            "-S", (Join-Path $repo "vendor/mcp-extension-platform"),
+            "-B", $mcpBuild,
+            "-G", "Ninja",
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain",
+            "-DCMAKE_BUILD_TYPE=Release"
+        )
+        Invoke-Logged "mcp configure" $stageLog { & $cmake @mcpArgs }
+        Invoke-Logged "mcp build" $stageLog { & $cmake --build $mcpBuild -j }
+        Require-File $mcpExe "MCP build did not produce mcp_server.exe"
         $env:MCP_SERVER_BIN = $mcpExe
         $env:MCP_PLUGIN_DIR = Join-Path $repo "vendor/mcp-extension-platform/mcp_server/plugins"
         $env:PYTHON_BIN = $python
