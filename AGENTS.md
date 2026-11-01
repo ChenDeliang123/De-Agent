@@ -76,7 +76,7 @@
     - 一次逻辑改动对应一个 commit；不要把多个不相关改动塞进同一个提交。
     - 具体写法可参考 `项目改动内容.md` 的改动历史条目。
 
-11. 提交后必须推送到远端；父仓库有两个远端，不能只推 Gitee。
+11. 提交后不用立刻推送到远端，用户需要你推送时在推送；父仓库有两个远端，不能只推 Gitee。
     - `origin` = Gitee（默认 fetch/push）；`github` = GitHub（推送镜像）。
     - `master` 可用 `git push-all`；其它分支必须显式双推：
       `git push origin <branch> && git push github <branch>`。
