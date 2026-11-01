@@ -14,6 +14,7 @@ build-a2a/
 logs/
 dist/
 .cache/
+.de/
 node_modules/
 .runtime/
 问题截图
