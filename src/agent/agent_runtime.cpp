@@ -1,11 +1,13 @@
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/log.hpp"
+#include "aiagent/platform/paths.hpp"
 #include "aiagent/tools/skill_tool.hpp"
 
 #include "a2a/core/id.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -106,6 +108,45 @@ std::string BashCommandFromArguments(const std::string& arguments) {
         // 参数不是合法 JSON 时视为无命令。
     }
     return {};
+}
+
+std::string ToolPathFromArguments(const std::string& arguments) {
+    if (arguments.empty()) {
+        return {};
+    }
+    try {
+        const nlohmann::json json = nlohmann::json::parse(arguments);
+        if (json.is_object() && json.contains("path") &&
+            json["path"].is_string()) {
+            return json["path"].get<std::string>();
+        }
+    } catch (const nlohmann::json::exception&) {
+        // 参数不是合法 JSON 时视为无路径；执行层会返回解析错误。
+    }
+    return {};
+}
+
+// write/edit 的目标是否在系统临时目录内、且不在本次工作目录内。
+// 这类写入在 workspace 下允许，但需要逐次审批（策略开关
+// require_confirm_temp_write）。
+bool RequiresTempWriteApproval(const tools::ToolContext& context,
+                               const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    const std::filesystem::path base =
+            aiagent::platform::FromUtf8(context.working_directory);
+    const std::filesystem::path target =
+            aiagent::platform::ResolveCanonicalPath(base, path);
+    const std::filesystem::path temp = aiagent::platform::ResolveCanonicalPath(
+            {}, aiagent::platform::ToUtf8(aiagent::platform::TempDir()));
+    if (!aiagent::platform::IsPathWithin(target, temp)) {
+        return false;
+    }
+    const std::filesystem::path workspace =
+            aiagent::platform::ResolveCanonicalPath(
+                    {}, aiagent::platform::ToUtf8(base));
+    return !aiagent::platform::IsPathWithin(target, workspace);
 }
 
 void AppendPermissionMode(std::string& content, permissions::PermissionMode mode) {
@@ -277,7 +318,8 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         const std::string& tool_name,
         const tools::ToolContext& context,
         const std::string& context_id,
-        const std::string& bash_command) const {
+        const std::string& bash_command,
+        const std::string& tool_path) const {
     const permissions::PermissionPolicy& policy = context.policy;
     if (tool_name == "read") {
         if (!policy.allow_read) {
@@ -302,6 +344,12 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         }
         if (policy.require_confirm_write && !SessionAllows(context_id, tool_name)) {
             return {ToolGate::kNeedsApproval, "file write needs approval"};
+        }
+        if (policy.require_confirm_temp_write &&
+            RequiresTempWriteApproval(context, tool_path) &&
+            !SessionAllows(context_id, tool_name)) {
+            return {ToolGate::kNeedsApproval,
+                    "write to the system temporary directory needs approval"};
         }
         return {ToolGate::kAllow, {}};
     }
@@ -345,8 +393,12 @@ AgentRuntime::ToolDecision AgentRuntime::DecideTool(
     if (call.name == "bash") {
         bash_command = BashCommandFromArguments(call.arguments);
     }
+    std::string tool_path;
+    if (call.name == "write" || call.name == "edit") {
+        tool_path = ToolPathFromArguments(call.arguments);
+    }
     const ToolGateResult gate =
-            CheckToolGate(call.name, context, context_id, bash_command);
+            CheckToolGate(call.name, context, context_id, bash_command, tool_path);
     if (gate.gate == ToolGate::kAllow) {
         return {true, {}};
     }

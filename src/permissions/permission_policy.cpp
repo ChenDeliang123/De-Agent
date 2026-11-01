@@ -44,6 +44,9 @@ PermissionPolicy PolicyForMode(PermissionMode mode) {
             policy.allow_write = true;
             policy.allow_command = true;
             policy.require_confirm_command = true;
+            // 临时目录：读直接放行，写仍需逐次审批（见 CheckToolGate）。
+            policy.allow_temp = true;
+            policy.require_confirm_temp_write = true;
             break;
         case PermissionMode::kFull:
             policy.allow_write = true;
@@ -114,8 +117,10 @@ std::string DescribePolicy(PermissionMode mode) {
             return "file writes and command execution require approval; writes "
                    "outside the workspace are denied";
         case PermissionMode::kWorkspace:
-            return "writes are allowed inside the workspace; command execution "
-                   "requires approval; writes outside the workspace are denied";
+            return "writes are allowed inside the workspace; the system temporary "
+                   "directory is readable and its writes require approval; command "
+                   "execution requires approval; other writes outside the workspace "
+                   "are denied";
         case PermissionMode::kFull:
             return "unrestricted file and shell access";
     }

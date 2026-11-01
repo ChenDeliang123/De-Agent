@@ -194,7 +194,8 @@ private:
     ToolGateResult CheckToolGate(const std::string& tool_name,
                                  const tools::ToolContext& context,
                                  const std::string& context_id,
-                                 const std::string& bash_command) const;
+                                 const std::string& bash_command,
+                                 const std::string& tool_path) const;
 
     // 解析 cwd 对应项目的只读配置（可能为空）。
     std::shared_ptr<const permissions::ProjectConfig> ResolveProjectConfig(

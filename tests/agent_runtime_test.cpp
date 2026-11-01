@@ -21,6 +21,7 @@
 #include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/log.hpp"
+#include "aiagent/tools/local_tools.hpp"
 
 #include "test_support.hpp"
 
@@ -39,6 +40,13 @@ const std::string& WorkDir() {
     static const std::string dir =
             test_support::TempPath("aiagent_runtime_work");
     return dir;
+}
+
+std::string ReadAllText(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream content;
+    content << input.rdbuf();
+    return content.str();
 }
 
 const std::string& TightenProject() {
@@ -455,6 +463,8 @@ public:
         : tool_name_(std::move(tool_name)), arguments_(std::move(arguments)) {}
 
     int calls = 0;
+    // 第二轮请求前看到的上一条 tool 结果，供需要检查工具输出的测试使用。
+    std::string last_tool_content;
 
     aiagent::llm::ChatResult Chat(
             const std::vector<aiagent::llm::ChatMessage>&,
@@ -475,7 +485,7 @@ public:
     }
 
     void ChatStream(
-            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ChatMessage>& messages,
             const std::vector<aiagent::llm::ToolSpec>&,
             const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
             override {
@@ -486,6 +496,11 @@ public:
             event.tool_calls.push_back(
                     aiagent::llm::ToolCall{"call-1", tool_name_, arguments_});
         } else {
+            for (const auto& message : messages) {
+                if (message.role == "tool") {
+                    last_tool_content = message.content;
+                }
+            }
             event.content = "done";
             event.finish_reason = "stop";
         }
@@ -1924,6 +1939,113 @@ int main() {
 
     } catch (const std::exception& e) {
         std::cerr << "agent runtime permission test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        using aiagent::permissions::PermissionMode;
+        auto settings_for = [](PermissionMode mode) {
+            aiagent::agent::PermissionSettings settings;
+            settings.default_mode = mode;
+            settings.max_mode = mode;
+            return settings;
+        };
+
+        // workspace：系统临时目录可直接读，不触发审批。
+        const std::string temp_read =
+                test_support::TempPathWithPid("aiagent_runtime_temp_read_", ".txt");
+        {
+            std::ofstream output(temp_read, std::ios::binary | std::ios::trunc);
+            output << "from-temp";
+        }
+        {
+            auto model = std::make_shared<OneShotToolModel>(
+                    "read", nlohmann::json{{"path", temp_read}}.dump());
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(
+                    std::make_shared<aiagent::tools::LocalCodingTools>(WorkDir()));
+            runtime.SetPermissionSettings(settings_for(PermissionMode::kWorkspace));
+            int approvals = 0;
+            runtime.SetApprovalHandler([&](const aiagent::agent::ApprovalRequest&) {
+                ++approvals;
+                return aiagent::agent::ApprovalDecision::kAllowOnce;
+            });
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "read temp", "text/plain");
+            runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-temp-read", nullptr, WorkDir(),
+                    []() { return false; });
+            Expect(approvals == 0, "workspace temp read should not need approval");
+            Expect(model->last_tool_content == "from-temp",
+                   "workspace temp read should return the file content");
+        }
+
+        // workspace：写临时目录需要审批；批准后文件才落盘。
+        const std::string temp_write =
+                test_support::TempPathWithPid("aiagent_runtime_temp_write_", ".txt");
+        std::filesystem::remove(temp_write);
+        {
+            auto model = std::make_shared<OneShotToolModel>(
+                    "write", nlohmann::json{{"path", temp_write},
+                                            {"content", "via-approval"}}
+                                     .dump());
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(
+                    std::make_shared<aiagent::tools::LocalCodingTools>(WorkDir()));
+            runtime.SetPermissionSettings(settings_for(PermissionMode::kWorkspace));
+            int approvals = 0;
+            std::string reason;
+            runtime.SetApprovalHandler(
+                    [&](const aiagent::agent::ApprovalRequest& request) {
+                        ++approvals;
+                        reason = request.reason;
+                        return aiagent::agent::ApprovalDecision::kAllowOnce;
+                    });
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "write temp", "text/plain");
+            runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-temp-write", nullptr, WorkDir(),
+                    []() { return false; });
+            Expect(approvals == 1, "workspace temp write should request approval once");
+            Expect(reason.find("temporary directory") != std::string::npos,
+                   "temp write approval should explain the temporary-directory scope");
+            Expect(ReadAllText(temp_write) == "via-approval",
+                   "approved temp write should reach the file");
+        }
+
+        // full：同一路径直接写，不触发审批。
+        const std::string temp_full =
+                test_support::TempPathWithPid("aiagent_runtime_temp_full_", ".txt");
+        std::filesystem::remove(temp_full);
+        {
+            auto model = std::make_shared<OneShotToolModel>(
+                    "write", nlohmann::json{{"path", temp_full},
+                                            {"content", "full-direct"}}
+                                     .dump());
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(
+                    std::make_shared<aiagent::tools::LocalCodingTools>(WorkDir()));
+            runtime.SetPermissionSettings(settings_for(PermissionMode::kFull));
+            int approvals = 0;
+            runtime.SetApprovalHandler([&](const aiagent::agent::ApprovalRequest&) {
+                ++approvals;
+                return aiagent::agent::ApprovalDecision::kAllowOnce;
+            });
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "full temp write", "text/plain");
+            runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-temp-full", nullptr, WorkDir(),
+                    []() { return false; });
+            Expect(approvals == 0, "full temp write should not need approval");
+            Expect(ReadAllText(temp_full) == "full-direct",
+                   "full temp write should reach the file directly");
+        }
+
+        std::filesystem::remove(temp_read);
+        std::filesystem::remove(temp_write);
+        std::filesystem::remove(temp_full);
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime temp permission test failed: " << e.what() << '\n';
         return 1;
     }
 

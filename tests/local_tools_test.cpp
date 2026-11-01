@@ -273,7 +273,9 @@ void TestSandbox() {
     WriteFile(outside / "secret.txt", "secret");
 
     aiagent::tools::LocalCodingTools guarded(work.string());
-    const auto restricted = ContextFor(aiagent::permissions::PermissionMode::kWorkspace);
+    // 旧沙箱逃逸断言针对「非临时目录」；临时目录例外单独在下方验证。
+    auto restricted = ContextFor(aiagent::permissions::PermissionMode::kWorkspace);
+    restricted.policy.allow_temp = false;
 
     // 工作目录内正常读写。
     auto result = guarded.Execute("read", {{"path", "inside.txt"}}, restricted);
@@ -316,6 +318,31 @@ void TestSandbox() {
     } else {
         std::cout << "SKIP: symlink escape check: " << ec.message() << "\n";
     }
+
+    // workspace 默认策略：系统临时目录可直接读；执行层允许写，
+    // 审批门由 AgentRuntime::CheckToolGate 负责（见 agent_runtime_test）。
+    const auto workspace_temp = ContextFor(aiagent::permissions::PermissionMode::kWorkspace);
+    result = guarded.Execute("read", {{"path", (outside / "secret.txt").string()}},
+                             workspace_temp);
+    Expect(result.ok && result.text == "secret",
+           "workspace should allow reading the system temp directory");
+    result = guarded.Execute("write",
+                             {{"path", (outside / "temp-write.txt").string()},
+                              {"content", "tmp"}},
+                             workspace_temp);
+    Expect(result.ok, "workspace sandbox should allow temp writes");
+    Expect(ReadAll(outside / "temp-write.txt") == "tmp",
+           "workspace temp write should reach the file");
+
+    // 非临时目录的越界仍应被沙箱拒绝。
+    const auto non_temp = std::filesystem::current_path() /
+                          ("aiagent_sandbox_outside_" +
+                           std::to_string(test_support::Pid()) + ".txt");
+    WriteFile(non_temp, "outside-non-temp");
+    result = guarded.Execute("read", {{"path", non_temp.string()}}, workspace_temp);
+    Expect(!result.ok && result.error.find("sandbox") != std::string::npos,
+           "workspace should still block non-temp outside paths");
+    std::filesystem::remove(non_temp);
 
     // full 策略不限制范围（allow_outside）。
     aiagent::tools::LocalCodingTools unrestricted(work.string());
@@ -423,7 +450,9 @@ void TestLsGlobGrep() {
 
     aiagent::tools::LocalCodingTools tools(root.string());
     const auto context = FullContext();
-    const auto restricted = ContextFor(aiagent::permissions::PermissionMode::kWorkspace);
+    // 越界断言针对非临时目录；临时目录例外由 TestSandbox 单独覆盖。
+    auto restricted = ContextFor(aiagent::permissions::PermissionMode::kWorkspace);
+    restricted.policy.allow_temp = false;
 
     // 工具注册。
     const auto specs = tools.ListTools();

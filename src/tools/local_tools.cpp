@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -109,41 +108,6 @@ std::string ReadFile(const std::string& path, bool* ok, std::string* error) {
     content << input.rdbuf();
     *ok = true;
     return content.str();
-}
-
-// child 是否位于 root 之内（或等于 root）。按路径分量比较，
-// 避免 /foo 误判 /foobar。
-bool PathComponentEqual(const fs::path& left, const fs::path& right) {
-#ifdef _WIN32
-    return _wcsicmp(left.c_str(), right.c_str()) == 0;
-#else
-    return left == right;
-#endif
-}
-
-bool IsWithin(const fs::path& child, const fs::path& root) {
-    if (root.empty()) {
-        return false;
-    }
-    auto root_it = root.begin();
-    auto child_it = child.begin();
-    for (; root_it != root.end(); ++root_it, ++child_it) {
-        if (child_it == child.end() ||
-            !PathComponentEqual(*child_it, *root_it)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// canonical 化；失败（如路径不可访问）时退回 lexically_normal，不抛异常。
-fs::path CanonicalOrNormal(const fs::path& path) {
-    std::error_code ec;
-    const fs::path canonical = fs::weakly_canonical(path, ec);
-    if (ec) {
-        return path.lexically_normal();
-    }
-    return canonical;
 }
 
 // ---------- 只读检索工具（ls / glob / grep）的公共实现 ----------
@@ -572,11 +536,8 @@ bool LocalCodingTools::ResolvePath(const std::string& path,
     const fs::path base = working_directory.empty()
                                   ? aiagent::platform::FromUtf8(cwd_)
                                   : aiagent::platform::FromUtf8(working_directory);
-    fs::path target = aiagent::platform::FromUtf8(path);
-    if (!target.is_absolute()) {
-        target = base / target;
-    }
-    const fs::path effective = CanonicalOrNormal(target);
+    const fs::path effective =
+            aiagent::platform::ResolveCanonicalPath(base, path);
 
     if (policy.allow_outside) {
         *resolved = aiagent::platform::ToUtf8(effective);
@@ -584,20 +545,23 @@ bool LocalCodingTools::ResolvePath(const std::string& path,
     }
 
     std::vector<fs::path> roots;
-    roots.push_back(CanonicalOrNormal(base));
+    roots.push_back(
+            aiagent::platform::ResolveCanonicalPath({}, aiagent::platform::ToUtf8(base)));
     for (const std::string& extra : extra_roots_) {
         if (extra.empty()) {
             continue;
         }
-        fs::path root = aiagent::platform::FromUtf8(extra);
-        if (!root.is_absolute()) {
-            root = base / root;
-        }
-        roots.push_back(CanonicalOrNormal(root));
+        roots.push_back(aiagent::platform::ResolveCanonicalPath(base, extra));
+    }
+    // workspace：临时目录作为只读根放行。写入是否审批由 AgentRuntime 的
+    // CheckToolGate 决定（策略里的 require_confirm_temp_write）。
+    if (policy.allow_temp) {
+        roots.push_back(aiagent::platform::ResolveCanonicalPath(
+                {}, aiagent::platform::ToUtf8(aiagent::platform::TempDir())));
     }
 
     for (const fs::path& root : roots) {
-        if (IsWithin(effective, root)) {
+        if (aiagent::platform::IsPathWithin(effective, root)) {
             *resolved = aiagent::platform::ToUtf8(effective);
             return true;
         }

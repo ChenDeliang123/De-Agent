@@ -28,6 +28,9 @@ void TestPolicyMatrix() {
     Expect(confirm.allow_command, "confirm allows command tool");
     Expect(confirm.require_confirm_write, "confirm requires write approval");
     Expect(confirm.require_confirm_command, "confirm requires command approval");
+    Expect(!confirm.allow_temp, "confirm does not open the system temp directory");
+    Expect(!confirm.require_confirm_temp_write,
+           "confirm temp writes are not a separate gate (outside writes stay denied)");
 
     const auto workspace = PolicyForMode(PermissionMode::kWorkspace);
     Expect(workspace.allow_read, "workspace allows read");
@@ -35,6 +38,9 @@ void TestPolicyMatrix() {
     Expect(!workspace.allow_outside, "workspace denies outside");
     Expect(!workspace.require_confirm_write, "workspace does not require write approval");
     Expect(workspace.require_confirm_command, "workspace requires command approval");
+    Expect(workspace.allow_temp, "workspace opens the system temp directory for reads");
+    Expect(workspace.require_confirm_temp_write,
+           "workspace requires approval for temp-directory writes");
 
     const auto full = PolicyForMode(PermissionMode::kFull);
     Expect(full.allow_write, "full allows write");
@@ -42,6 +48,10 @@ void TestPolicyMatrix() {
     Expect(full.allow_command, "full allows command");
     Expect(!full.require_confirm_write, "full does not require write approval");
     Expect(!full.require_confirm_command, "full does not require command approval");
+    Expect(!full.allow_temp,
+           "full does not need the temp exception (allow_outside covers it)");
+    Expect(!full.require_confirm_temp_write,
+           "full never gates temp writes");
 }
 
 void TestParseMode() {

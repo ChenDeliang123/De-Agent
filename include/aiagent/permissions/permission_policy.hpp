@@ -25,6 +25,10 @@ struct PermissionPolicy {
     bool allow_command = false;  // bash
     bool require_confirm_write = false;
     bool require_confirm_command = false;
+    // workspace：系统临时目录作为只读根可直接访问；写入临时目录仍需审批。
+    // confirm 不开放临时目录；full 由 allow_outside 全放行，不依赖这两个开关。
+    bool allow_temp = false;
+    bool require_confirm_temp_write = false;
 };
 
 // 档位 -> 能力策略。

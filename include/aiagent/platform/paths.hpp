@@ -18,6 +18,16 @@ bool IsHiddenPath(const std::filesystem::path& path);
 // 权限/信任表的路径键：Windows 上统一分隔符并折叠 ASCII 大小写。
 std::string NormalizePathKey(std::string path);
 
+// 解析模型/用户路径并 canonical 化：相对路径以 base 为基准；解析失败
+// （如目标暂不存在）退回 lexically_normal，不抛异常。空 path 返回空。
+std::filesystem::path ResolveCanonicalPath(const std::filesystem::path& base,
+                                           std::string_view path);
+
+// child 是否位于 root 之内（含相等）。按路径分量比较，避免 /foo 误判
+// /foobar；Windows 上分量比较不区分 ASCII 大小写。
+bool IsPathWithin(const std::filesystem::path& child,
+                  const std::filesystem::path& root);
+
 // 当前进程可执行文件路径；拿不到时返回空。
 std::string ExecutablePath();
 

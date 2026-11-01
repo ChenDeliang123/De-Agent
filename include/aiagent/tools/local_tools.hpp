@@ -13,7 +13,8 @@ namespace aiagent::tools {
 //
 // 相对路径以 ToolContext.working_directory 为基准；是否允许越出工作目录由
 // 该请求的权限策略（policy.allow_outside）决定，extra_roots 是额外放行的根目录
-// （来自 [tools] sandbox_roots）。
+// （来自 [tools] sandbox_roots）。workspace 还会把系统临时目录作为只读根放行
+// （policy.allow_temp）；其中写入仍需 AgentRuntime 的审批门。
 class LocalCodingTools : public IToolProvider {
 public:
     explicit LocalCodingTools(std::string working_directory,
@@ -26,8 +27,9 @@ public:
 
 private:
     // 解析 path：相对路径以 working_directory（空则 cwd_）为基准。
-    // policy.allow_outside 为真时不限制范围；否则必须落在工作目录或
-    // extra_roots 之内。越界/非法时返回 false 并写入 error。
+    // policy.allow_outside 为真时不限制范围；否则必须落在工作目录、
+    // extra_roots 之内（workspace 还包含系统临时目录）。越界/非法时
+    // 返回 false 并写入 error。
     bool ResolvePath(const std::string& path,
                      const std::string& working_directory,
                      const permissions::PermissionPolicy& policy,

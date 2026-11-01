@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cwchar>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -138,6 +139,48 @@ std::string NormalizePathKey(std::string path) {
     }
 #endif
     return path;
+}
+
+std::filesystem::path ResolveCanonicalPath(const std::filesystem::path& base,
+                                           std::string_view path) {
+    if (path.empty()) {
+        return {};
+    }
+    std::filesystem::path target = FromUtf8(path);
+    if (!target.is_absolute()) {
+        target = base / target;
+    }
+    std::error_code ec;
+    const std::filesystem::path canonical =
+            std::filesystem::weakly_canonical(target, ec);
+    if (ec) {
+        return target.lexically_normal();
+    }
+    return canonical;
+}
+
+bool IsPathWithin(const std::filesystem::path& child,
+                  const std::filesystem::path& root) {
+    if (root.empty()) {
+        return false;
+    }
+    auto root_it = root.begin();
+    auto child_it = child.begin();
+    for (; root_it != root.end(); ++root_it, ++child_it) {
+        if (child_it == child.end()) {
+            return false;
+        }
+#ifdef _WIN32
+        if (_wcsicmp(child_it->c_str(), root_it->c_str()) != 0) {
+            return false;
+        }
+#else
+        if (*child_it != *root_it) {
+            return false;
+        }
+#endif
+    }
+    return true;
 }
 
 bool IsHiddenPath(const std::filesystem::path& path) {
