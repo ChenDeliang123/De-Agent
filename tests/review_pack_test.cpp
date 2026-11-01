@@ -240,6 +240,8 @@ int main() {
         std::string feature_error;
         Expect(review::NormalizeFeature("a b\tc") == "a-b-c", "whitespace collapse");
         Expect(review::NormalizeFeature("skill-loader") == "skill-loader", "safe feature");
+        Expect(review::NormalizeFeature("中文 功能") == "中文-功能",
+               "UTF-8 / Chinese feature keeps characters and folds whitespace");
         Expect(review::NormalizeFeature("a/b", &feature_error).empty() && !feature_error.empty(),
                "slash rejected");
         Expect(review::NormalizeFeature("CON", &feature_error).empty(),

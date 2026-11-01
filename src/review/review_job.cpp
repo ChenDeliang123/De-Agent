@@ -367,9 +367,17 @@ bool ReviewJobManager::Attach(const std::string& job_id, ReviewJob* job,
     if (report_text != nullptr) {
         report_text->clear();
         if (!it->second.report_path.empty()) {
+            const fs::path repo =
+                    aiagent::platform::FromUtf8(it->second.repo_root);
             const fs::path path = aiagent::platform::ResolveCanonicalPath(
-                    aiagent::platform::FromUtf8(it->second.repo_root),
-                    it->second.report_path);
+                    repo, it->second.report_path);
+            if (!IsSafeRelativePath(it->second.report_path, false) ||
+                !aiagent::platform::IsPathWithin(path, repo)) {
+                if (error != nullptr) {
+                    *error = "review report path escapes the repository";
+                }
+                return true;
+            }
             std::string text;
             bool truncated = false;
             std::string read_error;
