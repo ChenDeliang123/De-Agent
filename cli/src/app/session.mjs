@@ -407,3 +407,67 @@ export async function initProjectPermissions(backendUrl, path, seedFromGlobal = 
   }
   return body;
 }
+
+// 后台审核任务（P1）。所有返回按 JSON 原样交给调用方。
+export async function submitReviewJob(backendUrl, pack, sessionId) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/reviews/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(
+      JSON.stringify({
+        pack,
+        ...(sessionId ? { session_id: sessionId } : {}),
+      }),
+    ),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `submit review job failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function listReviewJobs(backendUrl, sessionId) {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/reviews/jobs${query}`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `list review jobs failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function getReviewJob(backendUrl, id) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/reviews/jobs/${encodeURIComponent(id)}`,
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `get review job failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function cancelReviewJob(backendUrl, id) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/reviews/jobs/${encodeURIComponent(id)}/cancel`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `cancel review job failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+export async function attachReviewJob(backendUrl, id) {
+  const response = await fetch(
+    `${normalizeBackendUrl(backendUrl)}/api/v1/reviews/jobs/${encodeURIComponent(id)}/attach`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `attach review job failed: HTTP ${response.status}`);
+  }
+  return body;
+}

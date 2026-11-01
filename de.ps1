@@ -124,6 +124,13 @@ $CliArgs = New-Object System.Collections.Generic.List[string]
 
 for ($i = 0; $i -lt $ScriptArgs.Count; $i++) {
     $arg = [string]$ScriptArgs[$i]
+    if ($arg -eq "review") {
+        $Action = "review"
+        for ($j = $i + 1; $j -lt $ScriptArgs.Count; $j++) {
+            $CliArgs.Add([string]$ScriptArgs[$j])
+        }
+        break
+    }
     switch -Regex ($arg) {
         '^(stop)$'            { $Action = "stop"; continue }
         '^(status)$'          { $Action = "status"; continue }
@@ -164,6 +171,13 @@ commands:
   init             create user config from examples (non-destructive)
   doctor           check runtime environment and resolved paths
   purge            delete user data dir (asks to confirm; --yes skips)
+  review prepare   create a review pack without entering the CLI
+  review <pack>    start an independent reviewer session for a pack
+  review --background <pack>   submit a background review job
+  review status [job_id]       list/query background review jobs
+  review cancel <job_id>       cancel a background review job
+  review attach <job_id>       show job state and report
+  review --resume <review_id>  resume a review from its checkpoint
   help             show this help
 
 options:
@@ -550,6 +564,84 @@ switch ($Action) {
         }
         Get-Content -LiteralPath $logPath -Wait -Tail 50 -Encoding UTF8
         exit 0
+    }
+    "review" {
+        if (-not $NoBackend) {
+            $code = Start-Backend
+            if ($code -ne 0) { exit $code }
+        }
+        $node = Get-Command node -ErrorAction SilentlyContinue
+        if ($null -eq $node) {
+            Write-Host "node not found; install Node.js >= 18"
+            exit 1
+        }
+        try {
+            $reviewConfig = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/reviews/config" -UseBasicParsing
+        } catch {
+            Write-Host "review config unavailable: $($_.Exception.Message)"
+            exit 1
+        }
+        if (-not $reviewConfig.enabled) {
+            Write-Host "review is disabled ([review] enabled=false)"
+            exit 1
+        }
+        $oldRuntime = $env:AIAGENT_RUNTIME_DIR
+        $oldShare = $env:AIAGENT_SHARE_DIR
+        $env:AIAGENT_RUNTIME_DIR = $RuntimeDir
+        $env:AIAGENT_SHARE_DIR = $ShareDir
+        try {
+            if ($CliArgs.Count -gt 0 -and $CliArgs[0] -eq "prepare") {
+                $nodeArgs = @((Join-Path $CliDir "src\app\review-prepare.mjs"),
+                               "--backend", "http://127.0.0.1:$BackendPort")
+                for ($j = 1; $j -lt $CliArgs.Count; $j++) { $nodeArgs += $CliArgs[$j] }
+                & $node.Source @nodeArgs
+                exit $LASTEXITCODE
+            }
+            if ($CliArgs.Count -gt 0 -and $CliArgs[0] -eq "--background") {
+                if ($CliArgs.Count -lt 2) {
+                    Write-Host "de review --background requires a pack path"
+                    exit 2
+                }
+                $nodeArgs = @((Join-Path $CliDir "src\app\review-job.mjs"),
+                               "--backend", "http://127.0.0.1:$BackendPort",
+                               "submit", $CliArgs[1])
+                for ($j = 2; $j -lt $CliArgs.Count; $j++) { $nodeArgs += $CliArgs[$j] }
+                & $node.Source @nodeArgs
+                exit $LASTEXITCODE
+            }
+            if ($CliArgs.Count -gt 0 -and
+                @("status", "jobs", "cancel", "attach") -contains $CliArgs[0]) {
+                $nodeArgs = @((Join-Path $CliDir "src\app\review-job.mjs"),
+                               "--backend", "http://127.0.0.1:$BackendPort")
+                foreach ($item in $CliArgs) { $nodeArgs += $item }
+                & $node.Source @nodeArgs
+                exit $LASTEXITCODE
+            }
+            $cliArgsOut = @((Join-Path $CliDir "cli.mjs"),
+                            "--backend", "http://127.0.0.1:$BackendPort")
+            if (Test-Path -LiteralPath $CliConfigFile) {
+                $cliArgsOut += @("--cli-config", $CliConfigFile)
+            }
+            if ($CliArgs.Count -eq 0) {
+                $cliArgsOut += @("--role", "reviewer")
+            } elseif ($CliArgs[0] -eq "--resume") {
+                if ($CliArgs.Count -lt 2) {
+                    Write-Host "de review --resume requires a review id"
+                    exit 2
+                }
+                $cliArgsOut += @("--review-resume", $CliArgs[1])
+            } else {
+                $cliArgsOut += @("--review-pack", $CliArgs[0])
+            }
+            & $node.Source @cliArgsOut
+            $cliStatus = $LASTEXITCODE
+        } finally {
+            $env:AIAGENT_RUNTIME_DIR = $oldRuntime
+            $env:AIAGENT_SHARE_DIR = $oldShare
+        }
+        Write-Host ""
+        Write-Host "Reviewer CLI exited. Backend is still running; use 'de stop' to stop it."
+        exit $cliStatus
     }
     "cli" {
         if (-not $NoBackend) {

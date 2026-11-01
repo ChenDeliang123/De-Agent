@@ -143,6 +143,11 @@ try {
     Assert-Exit 0 "CLI passthrough --help"
     Assert ($helpOut -match "usage: node cli.mjs") "CLI help reached through launcher"
 
+    $launcherHelp = (& $de help *>&1 | Out-String)
+    Assert-Exit 0 "launcher help"
+    Assert ($launcherHelp -match "review --background") "launcher help lists review jobs"
+    Assert ($launcherHelp -match "review prepare") "launcher help lists review prepare"
+
     & $de purge --yes *> (Join-Path $temp "purge.out")
     Assert-Exit 0 "source purge"
     Assert (-not (Test-Path -LiteralPath $env:DE_HOME)) "purge removes data dir"

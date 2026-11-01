@@ -299,6 +299,11 @@ async function sendMessage(ctx, text) {
           renderer.compaction(data, agentId);
         } else if (event === "run_summary") {
           runSummary = data;
+        } else if (event === "review_ready") {
+          ctx.print(
+            `review ready: ${data.job_id ?? ""} state=${data.state ?? ""} ` +
+              `verdict=${data.verdict ?? ""} report=${data.report_path ?? ""}`,
+          );
         } else if (event === "approval_request") {
           await handleApproval(ctx, requestSessionId, data);
         } else if (event === "error") {

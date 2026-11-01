@@ -126,6 +126,10 @@ commands:
   purge            delete user data dir (sessions/permissions/logs/conf), asks to confirm
   review prepare   create a review pack without entering the CLI
   review <pack>    start an independent reviewer session for a pack
+  review --background <pack>   submit a background review job
+  review status [job_id]       list/query background review jobs
+  review cancel <job_id>       cancel a background review job
+  review attach <job_id>       show job state and report
   review --resume <review_id>  resume a review from its checkpoint
   review           open a reviewer session (asks for a pack)
   help             show this help
@@ -459,6 +463,11 @@ while [ "$#" -gt 0 ]; do
     review)
       ACTION="review"
       shift
+      # review 子命令（prepare/status/cancel/attach/--background/pack）全部
+      # 交给下方 review 分支；不要再按全局 action 解析，避免 `review status`
+      # 被当成 `de status`。
+      CLI_ARGS+=("$@")
+      break
       ;;
     help|--help|-h)
       ACTION="help"
@@ -567,7 +576,7 @@ case "${ACTION}" in
       exit 1
     fi
     review_enabled="$(curl -sf "http://127.0.0.1:${BACKEND_PORT}/api/v1/reviews/config" 2>/dev/null || true)"
-    if ! printf '%s' "${review_enabled}" | grep -q '"enabled":true'; then
+    if ! printf '%s' "${review_enabled}" | grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true'; then
       echo "review is disabled ([review] enabled=false)" >&2
       exit 1
     fi
@@ -583,6 +592,31 @@ case "${ACTION}" in
         --backend "http://127.0.0.1:${BACKEND_PORT}" \
         "${prepared_args[@]}"
       exit $?
+    fi
+    if [ "${#CLI_ARGS[@]}" -gt 0 ] && [ "${CLI_ARGS[0]}" = "--background" ]; then
+      if [ "${#CLI_ARGS[@]}" -lt 2 ]; then
+        echo "de review --background requires a pack path" >&2
+        exit 2
+      fi
+      background_args=("submit" "${CLI_ARGS[1]}" "${CLI_ARGS[@]:2}")
+      AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
+      AIAGENT_SHARE_DIR="${SHARE_DIR}" \
+      "${NODE_BIN}" "${CLI_DIR}/src/app/review-job.mjs" \
+        --backend "http://127.0.0.1:${BACKEND_PORT}" \
+        "${background_args[@]}"
+      exit $?
+    fi
+    if [ "${#CLI_ARGS[@]}" -gt 0 ]; then
+      case "${CLI_ARGS[0]}" in
+        status|jobs|cancel|attach)
+          AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
+          AIAGENT_SHARE_DIR="${SHARE_DIR}" \
+          "${NODE_BIN}" "${CLI_DIR}/src/app/review-job.mjs" \
+            --backend "http://127.0.0.1:${BACKEND_PORT}" \
+            "${CLI_ARGS[@]}"
+          exit $?
+          ;;
+      esac
     fi
     if [ "${#CLI_ARGS[@]}" -eq 0 ]; then
       review_cli_args=(--role reviewer)
