@@ -793,7 +793,7 @@ void ReviewConsentStore::LoadLocked() {
             entry.config_sha256 = it.value().value("config_sha256", std::string());
             entry.approved_at = it.value().value("approved_at", std::string());
             if (!entry.config_sha256.empty()) {
-                entries_[it.key()] = std::move(entry);
+                entries_[aiagent::platform::NormalizePathKey(it.key())] = std::move(entry);
             }
         }
     } catch (const nlohmann::json::exception&) {

@@ -885,7 +885,27 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
     const ReviewStaleResult stale =
             CheckReviewStale(pack, options_.config, pack.repo_root, owned);
 
-    const std::string source = arguments.value("source", std::string("pack"));
+    const bool source_explicit =
+            arguments.contains("source") && arguments["source"].is_string() &&
+            !arguments["source"].get<std::string>().empty();
+    std::string source = source_explicit
+                                 ? arguments["source"].get<std::string>()
+                                 : std::string("pack");
+    std::string command_id = arguments.value("command_id", std::string());
+    if (!command_id.empty()) {
+        const std::size_t colon = command_id.find(':');
+        if (colon != std::string::npos) {
+            const std::string prefix = command_id.substr(0, colon);
+            if (prefix != "pack" && prefix != "project") {
+                return Fail("unknown command id prefix: " + prefix);
+            }
+            if (source_explicit && prefix != source) {
+                return Fail("command source does not match the selected source");
+            }
+            source = prefix;
+            command_id = command_id.substr(colon + 1);
+        }
+    }
     if (source != "pack" && source != "project") {
         return Fail("source must be pack or project");
     }
@@ -948,20 +968,8 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
                     "running more commands");
     }
 
-    std::string command_id = arguments.value("command_id", std::string());
     if (command_id.empty()) {
         return Fail("command_id is required");
-    }
-    const std::size_t colon = command_id.find(':');
-    if (colon != std::string::npos) {
-        const std::string prefix = command_id.substr(0, colon);
-        if (prefix != "pack" && prefix != "project") {
-            return Fail("unknown command id prefix: " + prefix);
-        }
-        if (prefix != source) {
-            return Fail("command source does not match the selected source");
-        }
-        command_id = command_id.substr(colon + 1);
     }
     const ReviewCommand* selected = nullptr;
     for (const auto& command : commands) {

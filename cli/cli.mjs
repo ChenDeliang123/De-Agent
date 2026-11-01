@@ -714,6 +714,8 @@ async function main() {
     updateFooter();
     state.sessionId = await sendMessage(ctx, options.prompt);
     await pollBackgroundResults(ctx, state.sessionId);
+  } else if (state.role === "reviewer") {
+    emit("reviewer session: pass a pack with 'de review <pack>' or call review_context with a pack path");
   }
 
   try {
