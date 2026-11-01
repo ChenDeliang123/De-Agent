@@ -196,6 +196,14 @@ int main() {
                        read["files"][0]["content"].get<std::string>().find("return 2") !=
                                std::string::npos,
                "review_read content: " + read.dump());
+        auto read_again = Parse(reviewer.Execute(
+                "review_read",
+                {{"files", nlohmann::json::array(
+                                   {{{"path", "src/foo.cpp"}, {"start", 1}, {"limit", 10}}})},
+                 {"max_bytes", 4096}},
+                context));
+        Expect(read_again["files"][0].value("cache_hit", false),
+               "second review_read should hit the cache: " + read_again.dump());
         Expect(!reviewer.Execute("review_read",
                                  {{"files", nlohmann::json::array(
                                                      {{{"path", "../outside.txt"}}})}},

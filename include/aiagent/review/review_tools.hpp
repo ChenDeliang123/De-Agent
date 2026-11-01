@@ -78,11 +78,26 @@ private:
         ReviewPack pack;
     };
 
+    struct ReadCacheEntry {
+        std::string path;
+        std::filesystem::file_time_type mtime;
+        std::uintmax_t size = 0;
+        std::size_t bytes = 0;
+        std::vector<std::string> lines;
+    };
+
+    bool LoadCachedLines(const std::string& path,
+                         std::vector<std::string>* lines, bool* cache_hit,
+                         std::string* error);
+
     ReviewPackService pack_service_;
     mutable std::mutex last_pack_mutex_;
     std::atomic<long long> deadline_epoch_s_{0};
     mutable std::mutex cache_mutex_;
     mutable std::deque<PackCacheEntry> pack_cache_;
+    mutable std::mutex read_cache_mutex_;
+    mutable std::deque<ReadCacheEntry> read_cache_;
+    mutable std::size_t read_cache_bytes_ = 0;
     // review_context/verify/report 记住当前 pack，供没有 pack 参数的
     // review_test_write 关联 state；多轮审核仍以显式 pack 参数为准。
     std::string last_pack_path_;

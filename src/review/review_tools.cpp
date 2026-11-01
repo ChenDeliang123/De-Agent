@@ -13,6 +13,7 @@
 #include <set>
 #include <sstream>
 
+#include "aiagent/log.hpp"
 #include "aiagent/permissions/project_config.hpp"
 #include "aiagent/platform/paths.hpp"
 #include "aiagent/platform/text_file.hpp"
@@ -300,6 +301,84 @@ bool ReviewTools::LoadPack(const std::string& pack_arg,
     }
     if (rel_path != nullptr) {
         *rel_path = rel;
+    }
+    return true;
+}
+
+bool ReviewTools::LoadCachedLines(const std::string& path,
+                                  std::vector<std::string>* lines, bool* cache_hit,
+                                  std::string* error) {
+    *cache_hit = false;
+    const fs::path file = aiagent::platform::FromUtf8(path);
+    std::error_code ec;
+    const auto size = fs::file_size(file, ec);
+    if (ec) {
+        if (error != nullptr) {
+            *error = "cannot stat file: " + path;
+        }
+        return false;
+    }
+    if (size > 8 * 1024 * 1024) {
+        if (error != nullptr) {
+            *error = "file is too large to review: " + path;
+        }
+        return false;
+    }
+    const auto mtime = fs::last_write_time(file, ec);
+    {
+        std::lock_guard<std::mutex> lock(read_cache_mutex_);
+        for (auto it = read_cache_.begin(); it != read_cache_.end(); ++it) {
+            if (it->path == path && !ec && it->mtime == mtime && it->size == size) {
+                *lines = it->lines;
+                *cache_hit = true;
+                ReadCacheEntry entry = std::move(*it);
+                read_cache_.erase(it);
+                read_cache_.push_back(std::move(entry));
+                return true;
+            }
+        }
+    }
+
+    std::string prefix;
+    bool prefix_truncated = false;
+    std::string read_error;
+    aiagent::platform::ReadFilePrefix(file, 8192, &prefix, &prefix_truncated, &read_error);
+    if (aiagent::platform::LooksBinary(prefix)) {
+        if (error != nullptr) {
+            *error = "binary file cannot be read as text: " + path;
+        }
+        return false;
+    }
+    std::ifstream input(file, std::ios::binary);
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot read file: " + path;
+        }
+        return false;
+    }
+    std::vector<std::string> loaded;
+    std::size_t bytes = 0;
+    std::string line;
+    while (std::getline(input, line)) {
+        bytes += line.size() + 1;
+        loaded.push_back(line);
+    }
+    if (input.bad()) {
+        if (error != nullptr) {
+            *error = "read error while caching file: " + path;
+        }
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(read_cache_mutex_);
+        read_cache_.push_back(
+                ReadCacheEntry{path, mtime, size, bytes, std::move(loaded)});
+        read_cache_bytes_ += bytes;
+        while (read_cache_bytes_ > 64 * 1024 * 1024 && !read_cache_.empty()) {
+            read_cache_bytes_ -= read_cache_.front().bytes;
+            read_cache_.pop_front();
+        }
+        *lines = read_cache_.back().lines;
     }
     return true;
 }
@@ -861,6 +940,7 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
         return Fail("review_timeout_s exceeded; stop reading and write a partial blocked "
                     "report now");
     }
+    const auto started = std::chrono::steady_clock::now();
     const std::string repo = RepoRootFor(context);
     const fs::path repo_path = aiagent::platform::FromUtf8(repo);
     std::size_t max_bytes = arguments.value("max_bytes", 262144);
@@ -871,6 +951,7 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
     }
     nlohmann::json payload = nlohmann::json::array();
     std::size_t used = 0;
+    std::size_t cache_hits = 0;
     bool overall_truncated = false;
     for (const auto& item : files) {
         if (used >= max_bytes) {
@@ -889,23 +970,18 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
         if (!fs::is_regular_file(path, ec) || ec) {
             return Fail("not a file: " + raw_path);
         }
-        const auto size = fs::file_size(path, ec);
-        if (ec || size > 8 * 1024 * 1024) {
-            return Fail("file is too large to review: " + raw_path);
-        }
-        std::string prefix;
-        bool prefix_truncated = false;
-        std::string read_error;
-        aiagent::platform::ReadFilePrefix(path, 8192, &prefix, &prefix_truncated,
-                                          &read_error);
-        if (aiagent::platform::LooksBinary(prefix)) {
-            return Fail("binary file cannot be read as text: " + raw_path);
-        }
         const int start = std::max(1, item.value("start", 1));
         const int limit = std::max(1, item.value("limit", 2000));
-        std::ifstream input(path, std::ios::binary);
-        std::string line;
-        int line_number = 0;
+        std::vector<std::string> lines;
+        bool cache_hit = false;
+        std::string read_error;
+        if (!LoadCachedLines(aiagent::platform::ToUtf8(path), &lines, &cache_hit,
+                             &read_error)) {
+            return Fail(read_error);
+        }
+        if (cache_hit) {
+            ++cache_hits;
+        }
         std::ostringstream content;
         int end = start - 1;
         std::size_t body_bytes = 0;
@@ -913,16 +989,13 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
                 std::min<std::size_t>(65536, max_bytes - std::min(used, max_bytes));
         bool truncated_by_limit = false;
         bool truncated_by_bytes = false;
-        while (std::getline(input, line)) {
-            ++line_number;
-            if (line_number < start) {
-                continue;
-            }
+        for (std::size_t i = static_cast<std::size_t>(start - 1); i < lines.size(); ++i) {
+            const int line_number = static_cast<int>(i) + 1;
             if (line_number >= start + limit) {
                 truncated_by_limit = true;
                 break;
             }
-            std::string rendered = line;
+            std::string rendered = lines[i];
             rendered.push_back('\n');
             if (body_bytes + rendered.size() > file_limit) {
                 truncated_by_bytes = true;
@@ -939,11 +1012,21 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
                            {"end", end},
                            {"lines_read", end >= start ? end - start + 1 : 0},
                            {"truncated", truncated_by_limit || truncated_by_bytes},
+                           {"cache_hit", cache_hit},
                            {"content", body}});
     }
     nlohmann::json result = {{"files", payload},
                              {"max_bytes", max_bytes},
                              {"truncated", overall_truncated || used >= max_bytes}};
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "review",
+            "event=review_read files=" + std::to_string(files.size()) +
+                    " cache_hits=" + std::to_string(cache_hits) +
+                    " output_bytes=" + std::to_string(used) +
+                    " duration_ms=" + std::to_string(duration_ms));
     return Ok(result);
 }
 
