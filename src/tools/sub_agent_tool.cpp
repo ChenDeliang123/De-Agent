@@ -196,6 +196,8 @@ std::vector<llm::ToolSpec> SubAgentToolProvider::ListTools() {
             "investigations) or to keep bulky intermediate results out of your own context. "
             "Put every fact the sub-agent needs into the prompt; you will receive only its "
             "final report.";
+    task.prompt_snippet =
+            "Delegate self-contained subtasks to sub-agents (parallel fan-out available)";
     const json task_item_properties = {
             {"prompt", {{"type", "string"},
                         {"description", "Self-contained instruction; the sub-agent sees no "
@@ -240,6 +242,7 @@ std::vector<llm::ToolSpec> SubAgentToolProvider::ListTools() {
             "while they run, or the same title line and report the foreground task tool would "
             "have returned once they finish. Omit task_id to list every background task that "
             "has not been recycled yet.";
+    task_result.prompt_snippet = "Check background task status and collect its report";
     task_result.parameters = {
             {"type", "object"},
             {"properties",

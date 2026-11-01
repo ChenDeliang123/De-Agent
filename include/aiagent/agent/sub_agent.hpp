@@ -147,8 +147,6 @@ public:
         std::string tool_id_prefix;         // 事件与审批共用的 tool_call_id 前缀
         std::string working_directory;
         int max_tool_rounds = 0;
-        // 该子 Agent 是否也拿到了 task 工具（depth+1 < max_depth）；决定是否注入派发准则。
-        bool delegation_enabled = false;
         // 用量归集 sink：装配方创建子模型客户端时套 UsageTrackingModel 并转发到这里。
         // 与「会话 usage」同一口径（prompt/completion/cache_hit），用于统计与日志。
         std::function<void(const llm::ChatUsage&)> on_usage;

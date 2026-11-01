@@ -737,8 +737,10 @@ void TestManagerRun() {
         Expect(!captured->child_tool_names[0].empty() &&
                        captured->child_tool_names[0][0] == "noop",
                "explorer child tools should come from the allowlist");
-        Expect(!captured->specs[0].delegation_enabled,
-               "child at depth 1 under max_depth=1 must not get delegation guidance");
+        const auto& names = captured->child_tool_names[0];
+        Expect(std::find(names.begin(), names.end(), "task") == names.end() &&
+                       std::find(names.begin(), names.end(), "task_result") == names.end(),
+               "child at depth 1 under max_depth=1 must not get task tools");
     }
 
     const auto calls = harness->Calls();
@@ -792,8 +794,6 @@ void TestDepthControl() {
         Expect(std::find(names.begin(), names.end(), "task") != names.end() &&
                        std::find(names.begin(), names.end(), "task_result") != names.end(),
                "child at depth 1 should get nested task/task_result tools when max_depth=2");
-        Expect(captured->specs.back().delegation_enabled,
-               "child that can delegate should also get the delegation guideline flag");
     }
 
     // depth 已达上限：直接拒绝。

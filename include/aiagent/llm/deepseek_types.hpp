@@ -30,6 +30,10 @@ struct ToolSpec {
     std::string name;
     std::string description;
     nlohmann::json parameters = nlohmann::json::object();
+    // 系统提示词贡献：由 BuildCodingSystemPrompt() 汇总，不发送给模型 API。
+    // 空 snippet 表示该工具不进入系统提示词的工具清单（例如 MCP 工具）。
+    std::string prompt_snippet;
+    std::vector<std::string> prompt_guidelines;
 };
 
 struct ChatUsage {

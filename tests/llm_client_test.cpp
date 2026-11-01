@@ -83,6 +83,8 @@ void TestRequestBody() {
     tool.description = "查询城市天气";
     tool.parameters = {{"type", "object"},
                        {"properties", {{"city", {{"type", "string"}}}}}};
+    tool.prompt_snippet = "查询天气";
+    tool.prompt_guidelines = {"只在用户询问天气时调用"};
 
     const std::string body = BuildChatRequestBody(
             "deepseek-v4-flash",
@@ -103,6 +105,9 @@ void TestRequestBody() {
            "tool message should keep tool_call_id");
     Expect(root["tools"][0]["function"]["name"] == "get_weather",
            "tools should be serialized");
+    Expect(!root["tools"][0]["function"].contains("prompt_snippet") &&
+                   !root["tools"][0]["function"].contains("prompt_guidelines"),
+           "prompt metadata must not be sent to the model API");
     Expect(root["tool_choice"] == "auto", "tool_choice should be serialized");
 
     // 流式请求应开启 include_usage，并在非流式请求中不出现该字段。

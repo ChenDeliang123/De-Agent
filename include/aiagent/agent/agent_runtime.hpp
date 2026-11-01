@@ -60,6 +60,10 @@ public:
 
     // 工具需要逐次确认时的回调；应阻塞直到有决定（由 ApprovalBroker 提供）。
     using ApprovalHandler = std::function<ApprovalDecision(const ApprovalRequest&)>;
+    // 按本次请求真实激活的工具集生成基础系统提示词。
+    // 根 Agent 用它实现“提示词随工具集变化”；子 Agent 注入自定义提示词时不设置。
+    using SystemPromptBuilder =
+            std::function<std::string(const std::vector<llm::ToolSpec>& tools)>;
 
     explicit AgentRuntime(std::shared_ptr<llm::IModelClient> model,
                           std::string system_prompt =
@@ -68,6 +72,9 @@ public:
 
     // 可选：注入 MCP/工具提供者后，Agent 会自动执行 model 的 tool_calls。
     void SetToolProvider(std::shared_ptr<tools::IToolProvider> tools);
+    // 可选：设置基础提示词生成器。设置后每次组装 system message 都用
+    // tools_->ListToolsFor(cwd) 的结果重建基础提示词；未设置时使用构造时的字符串。
+    void SetSystemPromptBuilder(SystemPromptBuilder builder);
     void SetMaxToolRounds(int rounds);
 
     // 可选：注入按路径权限存储与默认设置。未注入时使用 default_mode。
@@ -89,11 +96,6 @@ public:
 
     // 可选：注入审批回调。未注入时“需要确认”的工具直接拒绝。
     void SetApprovalHandler(ApprovalHandler handler);
-
-    // 可选：声明「本运行时可派发子 Agent」（main 在注册 task 工具后调用）。
-    // 开启后系统消息会附带派发准则（何时该派、何时不该派）；默认关闭，
-    // 避免在子 Agent 未启用时误导模型去调不存在的工具。
-    void SetDelegationEnabled(bool enabled);
 
     // 可选：注入项目指令加载器（AGENTS.md）与无 cwd 请求的默认工作目录。
     void SetProjectInstructionsLoader(
@@ -166,15 +168,18 @@ private:
                               int round);
 
     // 组装请求使用的 system message：基础 prompt + 项目指令 + 工作目录 + 权限模式。
+    // interactive=false（A2A / 同步接口）用于收紧权限档位；流式路径用默认 true。
+    // 流式与非流式共用，避免只有一条路径能看到 AGENTS.md/cwd。
     llm::ChatMessage BuildSystemMessage(
-            const std::string& working_directory) const;
+            const std::string& working_directory, bool interactive = true) const;
 
     // 追加 Skills 目录（仅在 loader 存在且工具列表含 `skill` 时生效）。
-    void AppendSkillCatalog(std::string& content, const std::string& working_directory) const;
+    void AppendSkillCatalog(std::string& content, const std::string& working_directory,
+                            const std::vector<llm::ToolSpec>& tools) const;
 
-    // 追加派发准则（仅在 SetDelegationEnabled(true) 时生效）。流式与非流式
-    // 两条系统消息构造路径共用，避免只有一条路径能派发。
-    void AppendDelegationGuidance(std::string& content) const;
+    // 追加派发准则（仅在本次工具列表真的含 `task` 时生效）。
+    void AppendDelegationGuidance(std::string& content,
+                                  const std::vector<llm::ToolSpec>& tools) const;
 
     // 解析某工作目录当前生效的权限档位（含 max_mode/allow_full_access 夹取）。
     // interactive=false（A2A / 同步接口）时还会按 non_interactive_max_mode 夹取。
@@ -247,8 +252,7 @@ private:
     ProjectConfigProvider project_config_provider_;
     std::shared_ptr<permissions::TrustStore> trust_store_;
     ApprovalHandler approval_handler_;
-    // 是否在系统消息里注入派发准则（见 SetDelegationEnabled）。
-    bool delegation_enabled_ = false;
+    SystemPromptBuilder system_prompt_builder_;
     mutable std::mutex session_allow_mutex_;
     // context_id -> 本会话「总是允许」的工具名集合（仅内存，不持久化）。
     std::map<std::string, std::set<std::string>> session_allow_;

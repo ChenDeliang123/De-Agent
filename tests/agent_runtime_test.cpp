@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "a2a/core/version.hpp"
@@ -19,6 +21,7 @@
 
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/agent/message_inbox.hpp"
+#include "aiagent/agent/system_prompt.hpp"
 #include "aiagent/llm/deepseek_client.hpp"
 #include "aiagent/log.hpp"
 #include "aiagent/tools/local_tools.hpp"
@@ -279,6 +282,31 @@ private:
     std::atomic<int> calls_{0};
     mutable std::mutex mutex_;
     std::vector<std::vector<aiagent::llm::ChatMessage>> seen_;
+};
+
+// 返回固定 ToolSpec 列表；用于验证 system message 的工具清单/权限/派发
+// 是否真的由本次工具集驱动。
+class SpecToolProvider final : public aiagent::tools::IToolProvider {
+public:
+    explicit SpecToolProvider(std::vector<aiagent::llm::ToolSpec> specs)
+        : specs_(std::move(specs)) {}
+
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        return specs_;
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string&,
+            const nlohmann::json&,
+            const aiagent::tools::ToolContext&) override {
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = false;
+        result.error = "unused";
+        return result;
+    }
+
+private:
+    std::vector<aiagent::llm::ToolSpec> specs_;
 };
 
 class OkToolProvider final : public aiagent::tools::IToolProvider {
@@ -1150,8 +1178,7 @@ int main() {
     }
 
     try {
-        // 派发准则：默认不注入；显式开启（main 在注册 task 工具后调用）才注入，
-        // 且必须同时带正向（何时派）与反向（何时不派）约束。
+        // 派发准则由“本次工具列表真的含 task”驱动，不再依赖外部布尔开关。
         auto model = std::make_shared<FakeModel>();
         aiagent::agent::AgentRuntime runtime(model);
         a2a::models::Message user = a2a::models::MakeTextMessage(
@@ -1159,15 +1186,20 @@ int main() {
 
         runtime.HandleMessage(user, {user}, "ctx-guidance-off");
         Expect(model->last_system_content.find("Delegation:") == std::string::npos,
-               "delegation guidance must stay out of the system message by default");
+               "delegation guidance must stay out when task is not available");
 
-        runtime.SetDelegationEnabled(true);
+        aiagent::llm::ToolSpec task;
+        task.name = "task";
+        task.prompt_snippet = "Delegate self-contained subtasks to sub-agents";
+        runtime.SetToolProvider(
+                std::make_shared<SpecToolProvider>(
+                        std::vector<aiagent::llm::ToolSpec>{task}));
         runtime.HandleMessage(user, {user}, "ctx-guidance-on");
         const std::string& system = model->last_system_content;
         Expect(system.find("Delegation:") != std::string::npos &&
                        system.find("`task` tool is available") != std::string::npos,
-               "enabling delegation should inject the guideline");
-        Expect(system.find("Do NOT delegate single-file reads") != std::string::npos,
+               "task tool presence should inject the guideline");
+        Expect(system.find("Do not delegate single-file reads") != std::string::npos,
                "guideline should include the negative constraint");
         Expect(system.find("tasks[]") != std::string::npos,
                "guideline should mention batch fan-out");
@@ -1177,6 +1209,83 @@ int main() {
                "guideline should require a scoped subtask brief");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime delegation guidance test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        // 非流式路径与流式路径共用 BuildSystemMessage：AGENTS.md 与 cwd
+        // 都必须出现在 A2A/同步调用的 system message 里。
+        const std::string dir =
+                test_support::TempPathWithPid("aiagent_runtime_instructions_");
+        std::filesystem::create_directories(dir);
+        {
+            std::ofstream output(aiagent::platform::ToUtf8(
+                                         aiagent::platform::FromUtf8(dir)) +
+                                         "/AGENTS.md",
+                                 std::ios::binary | std::ios::trunc);
+            output << "RUNTIME_AGENTS_MARKER\n";
+        }
+
+        auto model = std::make_shared<FakeModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+        aiagent::InstructionsConfig instructions_config;
+        instructions_config.agents_md_search_parents = false;
+        runtime.SetProjectInstructionsLoader(
+                std::make_shared<aiagent::agent::ProjectInstructionsLoader>(
+                        instructions_config));
+        runtime.SetFallbackWorkingDirectory(dir);
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "instructions", "text/plain");
+        runtime.HandleMessage(user, {user}, "ctx-instructions");
+        const std::string& system = model->last_system_content;
+        Expect(system.find("RUNTIME_AGENTS_MARKER") != std::string::npos,
+               "non-streaming path should include project instructions");
+        Expect(system.find("Current working directory: " + dir) != std::string::npos,
+               "non-streaming path should include the effective cwd");
+
+        std::filesystem::remove_all(dir);
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime non-streaming system message test failed: "
+                  << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        // 设置 builder 后，基础提示词应只列本次工具集，未激活工具的规则不出现。
+        auto model = std::make_shared<FakeModel>();
+        aiagent::agent::AgentRuntime runtime(model);
+
+        aiagent::llm::ToolSpec read;
+        read.name = "read";
+        read.prompt_snippet = "Read file contents";
+        read.prompt_guidelines = {"READ_GUIDELINE"};
+        aiagent::llm::ToolSpec grep;
+        grep.name = "grep";
+        grep.prompt_snippet = "Search file contents";
+        runtime.SetToolProvider(std::make_shared<SpecToolProvider>(
+                std::vector<aiagent::llm::ToolSpec>{read, grep}));
+        runtime.SetSystemPromptBuilder(
+                [](const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
+                    return aiagent::agent::BuildCodingSystemPrompt(tool_specs);
+                });
+
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "dynamic prompt", "text/plain");
+        runtime.HandleMessage(user, {user}, "ctx-dynamic-prompt");
+        const std::string& system = model->last_system_content;
+        Expect(system.find("- read: Read file contents") != std::string::npos,
+               "dynamic prompt should list the active read tool");
+        Expect(system.find("- grep: Search file contents") != std::string::npos,
+               "dynamic prompt should list the active grep tool");
+        Expect(system.find("READ_GUIDELINE") != std::string::npos,
+               "dynamic prompt should include tool-contributed guidelines");
+        Expect(system.find("- bash:") == std::string::npos,
+               "dynamic prompt must not list an inactive bash tool");
+        Expect(system.find("Use bash for builds") == std::string::npos,
+               "dynamic prompt must not include inactive bash rules");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime dynamic prompt test failed: " << e.what() << '\n';
         return 1;
     }
 

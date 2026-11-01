@@ -411,9 +411,9 @@ int main(int argc, char** argv) {
         meta_path.replace_filename("aiagent_sessions.json");
         aiagent::agent::SessionMetaStore session_meta(aiagent::platform::ToUtf8(meta_path));
         auto model = std::make_shared<aiagent::llm::DeepSeekClient>(*config);
-        const std::string coding_system_prompt =
-                aiagent::agent::BuildCodingSystemPrompt();
-        aiagent::agent::AgentRuntime runtime(model, coding_system_prompt);
+        // 根 Agent 的基础提示词由运行时按本次请求的工具集生成（见
+        // SetSystemPromptBuilder）；子 Agent 仍使用各自定义文件里的提示词。
+        aiagent::agent::AgentRuntime runtime(model);
         aiagent::InstructionsConfig instructions_config;
         std::string instructions_error;
         const auto parsed_instructions = aiagent::LoadInstructionsConfigFile(
@@ -699,6 +699,10 @@ int main(int argc, char** argv) {
                                                              fallback_working_directory));
         }
         runtime.SetToolProvider(tools);
+        runtime.SetSystemPromptBuilder(
+                [](const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
+                    return aiagent::agent::BuildCodingSystemPrompt(tool_specs);
+                });
 
         // MCP：优先读 [mcp] 配置；没有时依次尝试安装目录 share/de/mcp 与源码树
         // vendor 的本地构建（不再只依赖 cwd 下的相对路径）。
@@ -863,7 +867,6 @@ int main(int argc, char** argv) {
                                 child_model, spec.system_prompt);
                         child_runtime->SetToolProvider(spec.tools);
                         child_runtime->SetMaxToolRounds(spec.max_tool_rounds);
-                        child_runtime->SetDelegationEnabled(spec.delegation_enabled);
                         child_runtime->SetFallbackWorkingDirectory(fallback_working_directory);
                         child_runtime->SetSkillLoader(skill_loader);
                         child_runtime->SetCompactionSettings(compaction_settings);
@@ -918,8 +921,8 @@ int main(int argc, char** argv) {
                            ", background=" + std::to_string(agents_config.max_background) + ")";
             if (agents_config.max_depth > 0 && agent_manager->Enabled()) {
                 tools->Add(aiagent::tools::MakeSubAgentToolProvider(agent_manager, 0));
-                // 只有 task 工具真的注册成功，才在系统消息里注入派发准则。
-                runtime.SetDelegationEnabled(true);
+                // 派发准则由 BuildSystemMessage 在本次工具列表含 task 时注入，
+                // 不再需要额外的布尔开关。
             } else if (agents_config.max_depth <= 0) {
                 agents_info += " [task tool disabled: max_depth=0]";
             }

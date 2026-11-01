@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -92,6 +93,37 @@ public:
 private:
     std::string name_;
 };
+
+void TestPromptMetadata() {
+    aiagent::tools::LocalCodingTools tools(".");
+    const auto specs = tools.ListTools();
+
+    std::set<std::string> names;
+    for (const auto& spec : specs) {
+        names.insert(spec.name);
+        Expect(!spec.prompt_snippet.empty(),
+               spec.name + " should contribute a prompt snippet");
+    }
+    for (const char* name : {"read", "write", "edit", "bash", "ls", "glob", "grep"}) {
+        Expect(names.count(name) == 1, std::string("missing built-in tool ") + name);
+    }
+
+    const std::vector<std::string> empty;
+    const auto guidelines = [&specs, &empty](const std::string& name)
+            -> const std::vector<std::string>& {
+        for (const auto& spec : specs) {
+            if (spec.name == name) {
+                return spec.prompt_guidelines;
+            }
+        }
+        return empty;
+    };
+
+    Expect(!guidelines("read").empty(), "read should contribute a guideline");
+    Expect(!guidelines("write").empty(), "write should contribute a guideline");
+    Expect(guidelines("edit").size() >= 2, "edit should contribute batching/atomicity guidelines");
+    Expect(!guidelines("bash").empty(), "bash should contribute an aggregation guideline");
+}
 
 void TestReadWriteEdit() {
     const auto dir = TempDir();
@@ -735,6 +767,7 @@ void TestUtf8PathsAndShellOutput() {
 }  // namespace
 
 int main() {
+    TestPromptMetadata();
     TestReadWriteEdit();
     TestBash();
     TestComposite();

@@ -581,6 +581,8 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     read.description =
             "Read the contents of a file. For text files, output is truncated to 2000 lines "
             "or 50KB (whichever is hit first). Use offset/limit for large files.";
+    read.prompt_snippet = "Read file contents";
+    read.prompt_guidelines = {"Use read to examine files instead of cat or sed."};
     read.parameters = {{"type", "object"},
                        {"properties",
                         {{"path", {{"type", "string"},
@@ -594,6 +596,8 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
     llm::ToolSpec write;
     write.name = "write";
     write.description = "Write content to a file, overwriting it if it exists.";
+    write.prompt_snippet = "Create or overwrite files";
+    write.prompt_guidelines = {"Use write only for new files or complete rewrites."};
     write.parameters = {{"type", "object"},
                         {"properties",
                          {{"path", {{"type", "string"},
@@ -609,6 +613,14 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
             "change, use ONE call with an edits[] array instead of many single edits. Each "
             "oldText must match exactly once in the ORIGINAL file and blocks must not overlap; "
             "the whole call is rejected (nothing written) if any block fails.";
+    edit.prompt_snippet =
+            "Make precise file edits with exact text replacement, including multiple disjoint "
+            "edits in one call";
+    edit.prompt_guidelines = {
+            "Use edit for targeted changes; batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file; keep "
+            "matches short and non-overlapping.",
+            "Read the target file before editing it; never edit content you have not inspected."};
     const json edit_block_properties = {
             {"oldText",
              {{"type", "string"},
@@ -651,6 +663,10 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
             "statistics, enumerating matches) prefer ONE pipeline that prints the summary "
             "(e.g. `git ls-files | xargs wc -l`) over several small commands or a helper "
             "script.";
+    bash.prompt_snippet = "Execute shell commands";
+    bash.prompt_guidelines = {
+            "Use bash for builds, tests, and one-shot aggregation (e.g. "
+            "`git ls-files | xargs wc -l`), not for helper scripts or report files."};
     bash.parameters = {{"type", "object"},
                        {"properties",
                         {{"command", {{"type", "string"},
@@ -666,6 +682,7 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
             "end with '/'), sorted by name within each level. Hidden files and directories "
             "(dot-prefix or Windows hidden attribute) are skipped. Depth is clamped to 1..4 (default 2) and at "
             "most 200 entries are returned (default).";
+    ls.prompt_snippet = "List directory contents";
     ls.parameters = {{"type", "object"},
                      {"properties",
                       {{"path", {{"type", "string"},
@@ -684,6 +701,7 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
             "path segments). Only files are returned, as sorted paths relative to the search "
             "root. Hidden files and directories (dot-prefix or Windows hidden attribute) are skipped. At most "
             "200 matches (default) are returned and output is truncated to 50KB.";
+    glob.prompt_snippet = "Find files by glob pattern";
     glob.parameters = {{"type", "object"},
                        {"properties",
                         {{"pattern", {{"type", "string"},
@@ -705,6 +723,7 @@ std::vector<llm::ToolSpec> LocalCodingTools::ListTools() {
             "'path:line: content' "
             "(content truncated to 500 characters); at most 100 results (default) are returned "
             "and output is truncated to 50KB.";
+    grep.prompt_snippet = "Search file contents for a pattern";
     grep.parameters = {
             {"type", "object"},
             {"properties",

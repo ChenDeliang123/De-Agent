@@ -318,8 +318,6 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
     spec.tool_id_prefix = identity.tool_prefix;
     spec.working_directory = request.working_directory;
     spec.max_tool_rounds = settings_.max_rounds;
-    // BuildChildTools 只有在 depth+1 < max_depth 时才给子 Agent 挂 task 工具。
-    spec.delegation_enabled = depth + 1 < settings_.max_depth;
     spec.on_usage = [usage_totals](const llm::ChatUsage& usage) {
         usage_totals->Add(usage);
     };

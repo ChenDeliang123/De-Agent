@@ -1,22 +1,27 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+#include "aiagent/llm/deepseek_types.hpp"
 
 namespace aiagent::agent {
 
 // 终端 coding agent 的系统提示词（唯一事实来源）。
 //
-// 为什么单独成模块：提示词是行为的关键输入面（身份、工具用法、批量策略、最小实现
-// 与验证尺度），抽出来才能被单测锁住——避免以后顺手改文案时把某条规则删掉。
+// 提示词由两部分组成：
+//   1) 跨工具的基础行为规则（实现 vs 分析、最小改动、批量调用、验证尺度）；
+//   2) 当前请求真实激活的工具贡献的 snippet/guidelines（ToolSpec 里的
+//      prompt_snippet / prompt_guidelines）。
 //
-// 规则分四组：
-//   1) 身份与工具清单；
-//   2) 交付纪律：必须在同一轮真正落盘、不许只给计划；
-//   3) 批量策略：同一文件多处改动用一次 edit + edits[]；互不依赖的工具同轮发出；
-//   4) 最小实现与验证尺度：只做被要求的事、按比例验证、卡住就报告而不是无限造工具；
-//   5) 敏捷迭代：先落地能跑的薄切片，再小步迭代；偏好可运行的软件而非一次性大设计；
-//      需求含糊时先给合理最小版本并声明假设，下一轮按反馈收敛；每个迭代留可运行状态
-//      并给出最短验证路径，反馈即新计划，一次只推进一个切片。
-std::string BuildCodingSystemPrompt();
+// 为什么按工具集生成：工具列表可能是动态的（MCP/skill 可用性、权限过滤、
+// 子 Agent 白名单）。写死工具名会让模型调用本次请求没有声明的工具；把工具
+// 机制放在 ToolSpec 旁边，也让工具描述和提示词只有一个事实来源。
+//
+// 约定：
+//   - prompt_snippet 为空的内置工具不进入提示词的工具清单（MCP 工具默认走
+//     “Additional tools may be available” 兜底）。
+//   - prompt_guidelines 会按加入顺序去重后追加到 Rules。
+std::string BuildCodingSystemPrompt(const std::vector<llm::ToolSpec>& tools);
 
 }  // namespace aiagent::agent

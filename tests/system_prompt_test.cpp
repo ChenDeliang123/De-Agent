@@ -1,17 +1,35 @@
 // 系统提示词的关键规则回归测试。
 //
-// 提示词是行为的关键输入面：这几条规则各自对应一次真实的"跑偏"事故，
-// 所以用测试锁住，避免以后改文案时被顺手删掉。
+// 提示词现在由“基础行为规则 + 本次激活工具的贡献”组成，所以测试不再锁死整段
+// 文案，而是锁三件事：
+//   1) 每条事故规则仍有可判定的语义；
+//   2) 未激活的工具不会出现在工具清单/规则里；
+//   3) 规则不重复，且正文保持在预算内。
 
+#include <algorithm>
+#include <initializer_list>
 #include <iostream>
+#include <set>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "aiagent/agent/system_prompt.hpp"
+#include "aiagent/llm/deepseek_types.hpp"
+#include "aiagent/tools/local_tools.hpp"
+#include "aiagent/tools/sub_agent_tool.hpp"
 #include "aiagent/version.hpp"
 
 namespace {
 
 int g_failures = 0;
+
+void Expect(bool condition, const std::string& message) {
+    if (!condition) {
+        std::cerr << "FAILED: " << message << '\n';
+        ++g_failures;
+    }
+}
 
 void ExpectContains(const std::string& haystack, const std::string& needle,
                     const std::string& message) {
@@ -21,66 +39,205 @@ void ExpectContains(const std::string& haystack, const std::string& needle,
     }
 }
 
+void ExpectNotContains(const std::string& haystack, const std::string& needle,
+                       const std::string& message) {
+    if (haystack.find(needle) != std::string::npos) {
+        std::cerr << "FAILED: " << message << " (unexpected: " << needle << ")\n";
+        ++g_failures;
+    }
+}
+
+std::size_t CountOccurrences(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    std::size_t offset = 0;
+    while ((offset = text.find(needle, offset)) != std::string::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
+
+std::vector<aiagent::llm::ToolSpec> BuiltinTools() {
+    aiagent::tools::LocalCodingTools tools(".");
+    return tools.ListTools();
+}
+
+std::vector<aiagent::llm::ToolSpec> SelectTools(
+        const std::vector<aiagent::llm::ToolSpec>& all,
+        std::initializer_list<const char*> names) {
+    std::vector<aiagent::llm::ToolSpec> selected;
+    for (const auto& spec : all) {
+        for (const char* name : names) {
+            if (spec.name == name) {
+                selected.push_back(spec);
+                break;
+            }
+        }
+    }
+    return selected;
+}
+
+void ExpectUniqueRules(const std::string& prompt) {
+    std::set<std::string> seen;
+    std::istringstream input(prompt);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("- ", 0) != 0) {
+            continue;
+        }
+        Expect(seen.insert(line).second, "duplicate rule/tool line: " + line);
+    }
+}
+
+void TestFullToolSet() {
+    const std::string prompt =
+            aiagent::agent::BuildCodingSystemPrompt(BuiltinTools());
+
+    // 身份与平台。
+    ExpectContains(prompt, aiagent::kAgentName, "prompt should name the agent");
+    ExpectContains(prompt, aiagent::kAgentAuthor, "prompt should name the author");
+    ExpectContains(prompt, "Platform:", "prompt should state the platform");
+
+    // 工具清单只列本次激活的内置工具。
+    for (const char* name : {"read", "write", "edit", "bash", "ls", "glob", "grep"}) {
+        ExpectContains(prompt, std::string("- ") + name + ":",
+                       "tool list should include " + std::string(name));
+    }
+    ExpectContains(prompt, "Additional tools may be available",
+                   "prompt should defer other tools to the request tool list");
+
+    // 实现 vs 分析的分支（历史事故：只 review 却改文件 / 只给计划不落盘）。
+    ExpectContains(prompt, "Implement when asked to implement",
+                   "prompt should require implementation when asked");
+    ExpectContains(prompt, "If the user asks only for analysis",
+                   "prompt should keep analysis/review requests read-only");
+    ExpectContains(prompt, "do not modify files",
+                   "prompt should forbid edits for analysis-only requests");
+
+    // 最小实现与迭代节奏。
+    ExpectContains(prompt, "Make the smallest complete change",
+                   "prompt should require a minimal implementation");
+    ExpectContains(prompt, "no features the user did not ask for",
+                   "prompt should forbid unrequested features");
+    ExpectContains(prompt, "smallest reasonable version",
+                   "prompt should ship an assumption-driven version when ambiguous");
+    ExpectContains(prompt, "thin end-to-end slice",
+                   "prompt should prefer a thin end-to-end slice");
+    ExpectContains(prompt, "treat new feedback as the new plan",
+                   "prompt should treat feedback as the new plan");
+    ExpectContains(prompt, "keep the tree runnable",
+                   "prompt should require a runnable tree");
+    ExpectContains(prompt, "Batch independent work",
+                   "prompt should batch independent calls");
+    ExpectContains(prompt, "keep code-changing slices sequential",
+                   "prompt should keep code-changing slices sequential");
+
+    // 工具边界。
+    ExpectContains(prompt, "Use read to examine files instead of cat or sed",
+                   "read guideline should prefer read over shell inspection");
+    ExpectContains(prompt, "Use write only for new files or complete rewrites",
+                   "write guideline should scope write");
+    ExpectContains(prompt, "batch changes to one file in a single call",
+                   "edit guideline should require batching");
+    ExpectContains(prompt, "Read the target file before editing it",
+                   "edit guideline should require reading first");
+    ExpectContains(prompt, "Use bash for builds, tests, and one-shot aggregation",
+                   "bash guideline should route aggregation to one pipeline");
+    ExpectContains(prompt, "For source changes use write/edit",
+                   "prompt should forbid shell edits for source changes");
+    ExpectContains(prompt, "Prefer ls/glob/grep over bash",
+                   "prompt should prefer structured search tools");
+
+    // 验证尺度与收尾。
+    ExpectContains(prompt, "Verify in proportion",
+                   "prompt should scope verification effort");
+    ExpectContains(prompt, "two focused fixes",
+                   "prompt should cap bug-chasing with an escalation rule");
+    ExpectContains(prompt, "report the symptom", "prompt should report blockers");
+    ExpectContains(prompt, "Be concise and show file paths",
+                   "prompt should require concise, path-bearing output");
+
+    ExpectUniqueRules(prompt);
+    Expect(prompt.size() < 4096, "base prompt should stay under 4 KB");
+}
+
+void TestSubsetToolSet() {
+    const auto subset =
+            SelectTools(BuiltinTools(), {"read", "grep", "glob", "ls"});
+    const std::string prompt =
+            aiagent::agent::BuildCodingSystemPrompt(subset);
+
+    ExpectContains(prompt, "- read:", "active read tool should be listed");
+    ExpectContains(prompt, "Use read to examine files",
+                   "active read guideline should be included");
+    ExpectContains(prompt, "Prefer ls/glob/grep over shell pipelines",
+                   "search-only rule should avoid naming bash");
+    ExpectNotContains(prompt, "- write:", "inactive write tool must not be listed");
+    ExpectNotContains(prompt, "- edit:", "inactive edit tool must not be listed");
+    ExpectNotContains(prompt, "- bash:", "inactive bash tool must not be listed");
+    ExpectNotContains(prompt, "Use write only", "inactive write rule must not appear");
+    ExpectNotContains(prompt, "edits[]", "inactive edit rule must not appear");
+    ExpectNotContains(prompt, "Use bash for builds",
+                      "inactive bash rule must not appear");
+    ExpectNotContains(prompt, "For source changes use write/edit",
+                      "source-change rule needs both bash and an edit tool");
+
+    ExpectUniqueRules(prompt);
+}
+
+void TestTaskMetadata() {
+    aiagent::tools::SubAgentToolProvider provider({}, 0);
+    const auto specs = provider.ListTools();
+
+    const auto task = std::find_if(specs.begin(), specs.end(), [](const auto& spec) {
+        return spec.name == "task";
+    });
+    Expect(task != specs.end(), "task provider should expose task");
+    if (task != specs.end()) {
+        Expect(!task->prompt_snippet.empty(),
+               "task should contribute a prompt snippet");
+    }
+    const auto task_result =
+            std::find_if(specs.begin(), specs.end(), [](const auto& spec) {
+                return spec.name == "task_result";
+            });
+    Expect(task_result != specs.end(), "task provider should expose task_result");
+    if (task_result != specs.end()) {
+        Expect(!task_result->prompt_snippet.empty(),
+               "task_result should contribute a prompt snippet");
+    }
+
+    const std::string prompt =
+            aiagent::agent::BuildCodingSystemPrompt(specs);
+    ExpectContains(prompt, "- task:", "task should be listed from its snippet");
+    ExpectContains(prompt, "- task_result:",
+                   "task_result should be listed from its snippet");
+    // 派发准则是运行时按“工具列表含 task”追加的，不应在基础提示词里重复。
+    ExpectNotContains(prompt, "Delegation:",
+                      "delegation guidance belongs to the runtime append");
+}
+
+void TestRuleDedup() {
+    auto tools = BuiltinTools();
+    aiagent::llm::ToolSpec extra;
+    extra.name = "extra";
+    extra.prompt_snippet = "Extra tool";
+    extra.prompt_guidelines = {"Use read to examine files instead of cat or sed."};
+    tools.push_back(std::move(extra));
+
+    const std::string prompt =
+            aiagent::agent::BuildCodingSystemPrompt(tools);
+    Expect(CountOccurrences(prompt, "Use read to examine files instead of cat or sed.") == 1,
+           "duplicate tool guideline should be deduplicated");
+}
+
 }  // namespace
 
 int main() {
-    const std::string prompt = aiagent::agent::BuildCodingSystemPrompt();
-
-    // 1) 身份与工具清单：自我认知与可用工具必须写清楚。
-    ExpectContains(prompt, aiagent::kAgentName, "prompt should name the agent");
-    ExpectContains(prompt, aiagent::kAgentAuthor, "prompt should name the author");
-    ExpectContains(prompt, "read, write, edit, bash, ls, glob, grep",
-                   "prompt should list the local tools");
-    ExpectContains(prompt, "request's tool list",
-                   "prompt should defer additional tools to the request tool list");
-    ExpectContains(prompt, "MCP or skill",
-                   "prompt should mention optional MCP/skill tools");
-
-    // 2) 交付纪律：不许只给计划（历史事故：只输出计划就收工）。
-    ExpectContains(prompt, "Do NOT stop after presenting a plan",
-                   "prompt should forbid planning-only replies");
-
-    // 3) 批量策略（历史事故：同一文件改多处被拆成多次 edit，轮次放大 10 倍）。
-    ExpectContains(prompt, "ONE edit call with an edits[] array",
-                   "prompt should require batching edits");
-    ExpectContains(prompt, "emit them in the SAME turn",
-                   "prompt should require same-turn independent tool calls");
-
-    // 4) 最小实现与验证尺度（历史事故：一句"写个坦克大战"落成 27 个文件 + 截图/像素分析工具链）。
-    ExpectContains(prompt, "Keep it minimal", "prompt should require a minimal implementation");
-    ExpectContains(prompt, "Do not add features the user did not ask for",
-                   "prompt should forbid unrequested features");
-    ExpectContains(prompt, "Verify in proportion",
-                   "prompt should scope verification effort");
-    ExpectContains(prompt, "Do NOT build test frameworks",
-                   "prompt should forbid building test harnesses unprompted");
-    ExpectContains(prompt, "If a bug survives two focused fix attempts",
-                   "prompt should cap bug-chasing with an escalation rule");
-
-    // 5) 敏捷迭代（历史事故：把“实现一个小游戏”当成一次性大工程，先造设计再写代码）。
-    // 只读聚合类任务：一条 pipeline 完成，不写脚本/报告、不逐文件 read（2026-10-16 实测 190s→秒级）。
-    ExpectContains(prompt, "ONE shell pipeline",
-                   "prompt should route read-only aggregation to one shell pipeline");
-    ExpectContains(prompt, "Do NOT write helper scripts or report files",
-                   "prompt should forbid helper scripts/reports for aggregation");
-    ExpectContains(prompt, "Work in agile iterations when changing code",
-                   "iteration guidance should be scoped to code changes");
-    ExpectContains(prompt, "Work on one slice at a time when changing code",
-                   "one-slice guidance should be scoped to code changes");
-    ExpectContains(prompt, "for a code change, running it once",
-                   "verification guidance should be scoped to code changes");
-    ExpectContains(prompt, "Work in agile iterations",
-                   "prompt should require agile, iterative delivery");
-    ExpectContains(prompt, "Favor working software over an elaborate upfront design",
-                   "prompt should prefer working software over big upfront design");
-    ExpectContains(prompt, "When the request is ambiguous",
-                   "prompt should tell the agent to ship a minimal assumption-driven version");
-    ExpectContains(prompt, "leave the project in a runnable state",
-                   "prompt should require a runnable state at each increment");
-    ExpectContains(prompt, "Treat new feedback as the new plan",
-                   "prompt should tell the agent to respond to change");
-    ExpectContains(prompt, "Work on one slice at a time",
-                   "prompt should limit work in progress to one slice");
+    TestFullToolSet();
+    TestSubsetToolSet();
+    TestTaskMetadata();
+    TestRuleDedup();
 
     if (g_failures != 0) {
         std::cerr << "system prompt test failed with " << g_failures << " failure(s)\n";

@@ -2,9 +2,11 @@
 #include "aiagent/log.hpp"
 #include "aiagent/platform/paths.hpp"
 #include "aiagent/tools/skill_tool.hpp"
+#include "aiagent/tools/sub_agent_tool.hpp"
 
 #include "a2a/core/id.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -183,6 +185,10 @@ void AgentRuntime::SetToolProvider(std::shared_ptr<tools::IToolProvider> tools) 
     tools_ = std::move(tools);
 }
 
+void AgentRuntime::SetSystemPromptBuilder(SystemPromptBuilder builder) {
+    system_prompt_builder_ = std::move(builder);
+}
+
 void AgentRuntime::SetMaxToolRounds(int rounds) {
     max_tool_rounds_ = rounds > 0 ? rounds : 0;
 }
@@ -295,10 +301,6 @@ tools::ToolContext AgentRuntime::BuildToolContext(
 
 void AgentRuntime::SetApprovalHandler(ApprovalHandler handler) {
     approval_handler_ = std::move(handler);
-}
-
-void AgentRuntime::SetDelegationEnabled(bool enabled) {
-    delegation_enabled_ = enabled;
 }
 
 bool AgentRuntime::SessionAllows(const std::string& context_id,
@@ -450,15 +452,21 @@ void AgentRuntime::SetFallbackWorkingDirectory(std::string directory) {
 }
 
 llm::ChatMessage AgentRuntime::BuildSystemMessage(
-        const std::string& working_directory) const {
+        const std::string& working_directory, bool interactive) const {
+    const std::string load_directory =
+            working_directory.empty() ? fallback_working_directory_ : working_directory;
+    const std::vector<llm::ToolSpec> tool_specs =
+            tools_ != nullptr ? tools_->ListToolsFor(load_directory)
+                              : std::vector<llm::ToolSpec>();
+
     llm::ChatMessage system;
     system.role = "system";
     system.content = system_prompt_;
+    if (system_prompt_builder_) {
+        system.content = system_prompt_builder_(tool_specs);
+    }
 
     if (instructions_loader_ != nullptr) {
-        const std::string load_directory =
-                working_directory.empty() ? fallback_working_directory_
-                                          : working_directory;
         const LoadedInstructions instructions =
                 instructions_loader_->Load(load_directory,
                                            fallback_working_directory_);
@@ -467,67 +475,63 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
         }
     }
 
-    AppendSkillCatalog(system.content, working_directory);
+    AppendSkillCatalog(system.content, load_directory, tool_specs);
 
-    if (!working_directory.empty()) {
-        system.content += "\n\nCurrent working directory: " + working_directory;
+    if (!load_directory.empty()) {
+        system.content += "\n\nCurrent working directory: " + load_directory;
     }
-    AppendDelegationGuidance(system.content);
-    AppendPermissionMode(system.content, ResolvePermissionMode(working_directory));
+    AppendDelegationGuidance(system.content, tool_specs);
+    AppendPermissionMode(system.content,
+                         ResolvePermissionMode(load_directory, interactive));
     return system;
 }
 
 void AgentRuntime::AppendSkillCatalog(std::string& content,
-                                      const std::string& working_directory) const {
-    if (skill_loader_ == nullptr || tools_ == nullptr) {
+                                      const std::string& working_directory,
+                                      const std::vector<llm::ToolSpec>& tools) const {
+    if (skill_loader_ == nullptr) {
         return;
     }
 
-    const std::string load_directory =
-            working_directory.empty() ? fallback_working_directory_ : working_directory;
-    bool has_skill_tool = false;
-    for (const auto& tool : tools_->ListToolsFor(load_directory)) {
-        if (tool.name == tools::kSkillToolName) {
-            has_skill_tool = true;
-            break;
-        }
-    }
+    const bool has_skill_tool =
+            std::any_of(tools.begin(), tools.end(), [](const llm::ToolSpec& tool) {
+                return tool.name == tools::kSkillToolName;
+            });
     if (!has_skill_tool) {
         return;
     }
 
-    const skills::SkillCatalog catalog = skill_loader_->LoadCatalog(load_directory);
+    const skills::SkillCatalog catalog = skill_loader_->LoadCatalog(working_directory);
     const std::string rendered = skills::SkillLoader::RenderCatalog(catalog);
     if (!rendered.empty()) {
         content += "\n\n" + rendered;
     }
 }
 
-void AgentRuntime::AppendDelegationGuidance(std::string& content) const {
-    if (!delegation_enabled_) {
+void AgentRuntime::AppendDelegationGuidance(
+        std::string& content, const std::vector<llm::ToolSpec>& tools) const {
+    const bool has_task_tool =
+            std::any_of(tools.begin(), tools.end(), [](const llm::ToolSpec& tool) {
+                return tool.name == tools::kTaskToolName;
+            });
+    if (!has_task_tool) {
         return;
     }
-    // 派发准则：只在真的注册了 task 工具时注入（main 在装配后显式开启），
-    // 否则模型会去调一个不存在的工具。正反两面都写：漏了反向约束就会出现
-    // "小事也派发"的浪费。
+    // 派发准则：只在本次工具列表真的含 task 时注入。正反两面都写：漏了反向
+    // 约束就会出现“小事也派发”的浪费。
     content +=
             "\n\nDelegation:\n"
-            "- A `task` tool is available: it runs a sub-agent in its own separate "
-            "context and returns only a compressed report, so bulky intermediate work "
-            "never enters this conversation.\n"
-            "- Delegate when (a) the subtask is a broad investigation whose raw content "
-            "you do not need (summarizing many files, wide searches across directories), "
-            "or (b) two or more independent investigations can run in parallel — pass "
+            "- A `task` tool is available: it runs a sub-agent in its own context and "
+            "returns only a compressed report, so bulky intermediate work never enters "
+            "this conversation.\n"
+            "- Use it for broad read-only investigations whose raw output you do not need, "
+            "or for two or more independent investigations that can run in parallel; pass "
             "them in one `tasks[]` call instead of exploring sequentially.\n"
-            "- For read-only investigation always pass type `explorer` (read/grep/glob/ls "
-            "only): it is faster and cheaper than the default `general`. Use `general` only "
-            "when the subtask must run commands or modify files.\n"
-            "- Write every subtask prompt as a self-contained brief: exact scope (which "
-            "paths), what to return (format and length), and when to stop. A vague prompt "
-            "makes the sub-agent wander until it hits its timeout.\n"
-            "- Do NOT delegate single-file reads, small lookups, or anything that "
-            "depends on this conversation: the sub-agent sees only the prompt you give "
-            "it and cannot ask you questions.";
+            "- For read-only work pass type `explorer`; use `general` only when commands or "
+            "edits are required.\n"
+            "- Write a self-contained brief with exact scope, expected return format, and a "
+            "stop condition. Do not delegate single-file reads or anything that depends on "
+            "this conversation.";
 }
 
 void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {
@@ -750,13 +754,9 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
 
     std::vector<llm::ChatMessage> chat_messages;
 
-    llm::ChatMessage system;
-    system.role = "system";
-    system.content = system_prompt_;
-    AppendSkillCatalog(system.content, fallback_working_directory_);
-    AppendDelegationGuidance(system.content);
-    AppendPermissionMode(system.content, ResolvePermissionMode({}, /*interactive=*/false));
-    chat_messages.push_back(std::move(system));
+    // 与流式路径共用同一套 system message 组装：项目指令、技能目录、cwd、
+    // 派发准则与权限模式都不会只在一条路径生效。A2A/同步调用按非交互夹取权限。
+    chat_messages.push_back(BuildSystemMessage({}, /*interactive=*/false));
 
     bool has_user_message = false;
     for (const auto& message : history) {

@@ -69,6 +69,7 @@ std::vector<llm::ToolSpec> SkillToolProvider::ListTools() {
             "Load the full instructions for a skill from the Skills catalog. Call this before "
             "starting a task that matches a skill description. Optionally read a file inside the "
             "skill directory with `file`.";
+    spec.prompt_snippet = "Load a skill's full instructions";
     spec.parameters = {
             {"type", "object"},
             {"properties",
