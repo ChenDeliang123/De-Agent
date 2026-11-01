@@ -1136,8 +1136,8 @@ int main(int argc, char** argv) {
             scout_config.max_depth = 1;
             scout_config.max_concurrent = review_config.scout_max;
             scout_config.max_background = 0;
-            scout_config.default_timeout_s = 120;
-            scout_config.max_rounds = 16;
+            scout_config.default_timeout_s = review_config.scout_timeout_s;
+            scout_config.max_rounds = review_config.scout_max_rounds;
             scout_config.result_max_chars = 8192;
             scout_config.agents.clear();
             aiagent::AgentDefinitionConfig scout_definition;
@@ -1166,7 +1166,11 @@ int main(int argc, char** argv) {
                     aiagent::DefaultLogger().Log(
                             aiagent::LogLevel::kInfo, "main",
                             "review_scout enabled: max=" +
-                                    std::to_string(review_config.scout_max));
+                                    std::to_string(review_config.scout_max) +
+                                    " rounds=" +
+                                    std::to_string(review_config.scout_max_rounds) +
+                                    " timeout_s=" +
+                                    std::to_string(review_config.scout_timeout_s));
                 } else {
                     aiagent::DefaultLogger().Log(
                             aiagent::LogLevel::kWarning, "main",

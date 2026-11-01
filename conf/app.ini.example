@@ -153,6 +153,9 @@ max_tool_rounds = 192
 review_timeout_s = 3600
 ; 0 关闭 review_scout；1–4 为只读 scout 并发上限。
 scout_max = 4
+; 单个 scout 的独立预算，不能沿用通用子 Agent 的 16 轮/120s。
+scout_timeout_s = 600
+scout_max_rounds = 64
 checkpoint = true
 draft_report = true
 chunk_files = 20

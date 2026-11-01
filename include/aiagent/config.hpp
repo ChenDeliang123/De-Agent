@@ -171,6 +171,9 @@ struct ReviewConfig {
     long review_timeout_s = 3600;
     // 默认 deep：4 个只读 scout；设为 0 关闭，1–3 降为更轻的分片。
     int scout_max = 4;
+    // 单个 scout 的独立预算：16 轮/120s 在 20 文件切片上会稳定耗尽。
+    long scout_timeout_s = 600;
+    int scout_max_rounds = 64;
     bool checkpoint = true;
     bool draft_report = true;
     std::size_t chunk_files = 20;

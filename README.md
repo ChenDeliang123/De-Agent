@@ -646,8 +646,9 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 `resolved` / `still_open` / `regressed`；新问题从旧 id 之后编号。
 
 受控分片（P1，默认 deep）：`[review] scout_max=4` 时 reviewer 看到 `review_scout`；
-默认 `4`。想降成本可设 `0` 关闭或 `1–3` 减并发。scout 是只读候选来源，父 reviewer
-必须重读证据后再写报告。
+默认 `4`。单个 scout 默认 `scout_timeout_s=600`、`scout_max_rounds=64`，避免沿用通用
+子 Agent 的 16 轮/120s 在 20 文件切片上提前耗尽。想降成本可设 `scout_max=0` 关闭或
+`1–3` 减并发。scout 是只读候选来源，父 reviewer 必须重读证据后再写报告。
 
 后台审核（P1，需 `[review] background_enabled=true`）：
 

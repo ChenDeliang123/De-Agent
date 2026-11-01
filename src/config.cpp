@@ -928,6 +928,18 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
                 return std::nullopt;
             }
             config.scout_max = static_cast<int>(parsed);
+        } else if (key == "scout_timeout_s") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 60, 1800, &parsed)) {
+                return std::nullopt;
+            }
+            config.scout_timeout_s = static_cast<long>(parsed);
+        } else if (key == "scout_max_rounds") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 8, 256, &parsed)) {
+                return std::nullopt;
+            }
+            config.scout_max_rounds = static_cast<int>(parsed);
         } else if (key == "review_timeout_s") {
             long long parsed = 0;
             if (!parse_number(key, value, 60, 14400, &parsed)) {
