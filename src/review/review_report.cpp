@@ -450,6 +450,16 @@ ReviewReportResult ReviewReportWriter::Write(
         }
     }
 
+    // 报告落盘前二次校验：审核期间代码可能又被改动，不能把旧结论写进 final。
+    const ReviewStaleResult rechecked = CheckReviewStale(
+            pack, config_, repo_root, ReviewerOwnedTestPaths(state, repo_root));
+    const ReviewStaleResult effective_stale = rechecked.stale ? rechecked : stale;
+    if (input.status == "final" && effective_stale.stale &&
+        input.verdict != "blocked") {
+        return fail("pack changed while the review was running; only verdict=blocked "
+                    "can be written");
+    }
+
     std::ostringstream report;
     report << "---\n";
     report << "review_id: " << YamlPlain(pack.review_id) << '\n';
@@ -466,7 +476,7 @@ ReviewReportResult ReviewReportWriter::Write(
     report << "head_commit: " << YamlPlain(pack.git.head_commit) << '\n';
     report << "diff_sha256: " << YamlPlain(pack.git.diff_sha256) << '\n';
     report << "dirty: " << (pack.git.dirty ? "true" : "false") << '\n';
-    report << "stale: " << (stale.stale ? "true" : "false") << '\n';
+    report << "stale: " << (effective_stale.stale ? "true" : "false") << '\n';
     report << "round: " << (pack.previous_report.empty() ? 1 : 2) << '\n';
     if (pack.previous_report.empty()) {
         report << "previous_report: null\n";
@@ -588,11 +598,11 @@ ReviewReportResult ReviewReportWriter::Write(
     report << "- base..head: `" << pack.git.base_commit << ".." << pack.git.head_commit << "`\n";
     report << "- branch: `" << pack.git.branch << "`\n";
     report << "- dirty: " << (pack.git.dirty ? "true" : "false") << '\n';
-    report << "- stale: " << (stale.stale ? "true" : "false") << '\n';
-    if (stale.head_changed) {
+    report << "- stale: " << (effective_stale.stale ? "true" : "false") << '\n';
+    if (effective_stale.head_changed) {
         report << "- head_changed: true (content digest unchanged)\n";
     }
-    for (const auto& reason : stale.reasons) {
+    for (const auto& reason : effective_stale.reasons) {
         report << "- stale_reason: " << reason << '\n';
     }
     if (pack.context_missing) {
