@@ -15,6 +15,66 @@ namespace {
 
 namespace fs = std::filesystem;
 
+std::vector<std::string> InstructionFileCandidates(const InstructionsConfig& config) {
+    std::vector<std::string> names;
+    if (!config.agents_md_override_file_name.empty()) {
+        names.push_back(config.agents_md_override_file_name);
+    }
+    names.push_back(config.agents_md_file_name);
+    if (config.agents_md_claude_fallback) {
+        names.push_back("CLAUDE.md");
+        names.push_back("CLAUDE.MD");
+    }
+    return names;
+}
+
+std::string EscapeXmlAttribute(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const char c : value) {
+        switch (c) {
+            case '&':
+                escaped += "&amp;";
+                break;
+            case '<':
+                escaped += "&lt;";
+                break;
+            case '>':
+                escaped += "&gt;";
+                break;
+            case '"':
+                escaped += "&quot;";
+                break;
+            case '\'':
+                escaped += "&apos;";
+                break;
+            default:
+                escaped.push_back(c);
+                break;
+        }
+    }
+    return escaped;
+}
+
+void ReplaceAll(std::string* text, const std::string& from, const std::string& to) {
+    if (text == nullptr || from.empty()) {
+        return;
+    }
+    std::size_t offset = 0;
+    while ((offset = text->find(from, offset)) != std::string::npos) {
+        text->replace(offset, from.size(), to);
+        offset += to.size();
+    }
+}
+
+// 项目指令是数据，不是系统规则。内容里若出现闭合标签，必须中和，
+// 否则一段恶意 AGENTS.md 可以提前结束 <project_context> 并伪造后续指令。
+std::string NeutralizeClosingTags(std::string content) {
+    ReplaceAll(&content, "</project_instructions>", "&lt;/project_instructions&gt;");
+    ReplaceAll(&content, "</project_context>", "&lt;/project_context&gt;");
+    return content;
+}
+
 std::string JoinPaths(const std::vector<InstructionFile>& files) {
     std::string result;
     for (const auto& file : files) {
@@ -104,7 +164,8 @@ std::vector<fs::path> CollectDirectories(const fs::path& start, const Instructio
 
 std::string RenderInstructions(const LoadedInstructions& loaded, const std::string& file_name) {
     std::ostringstream output;
-    output << "<project-instructions>\n"
+    output << "<project_context>\n"
+           << "Project-specific instructions and guidelines.\n"
            << "These instructions are loaded from " << file_name
            << " files for the current project.\n"
            << "They are scoped to the current working directory. Follow them "
@@ -114,13 +175,15 @@ std::string RenderInstructions(const LoadedInstructions& loaded, const std::stri
            << "Files are ordered from lowest to highest priority.\n";
 
     for (const auto& file : loaded.files) {
-        output << "\n----- file: " << file.path << " -----\n";
-        output << file.content;
+        output << "\n<project_instructions path=\""
+               << EscapeXmlAttribute(file.path) << "\">\n";
+        output << NeutralizeClosingTags(file.content);
         if (!file.content.empty() && file.content.back() != '\n') {
             output << '\n';
         }
+        output << "</project_instructions>\n";
     }
-    output << "</project-instructions>";
+    output << "</project_context>";
     return output.str();
 }
 
@@ -203,32 +266,41 @@ LoadedInstructions ProjectInstructionsLoader::Load(const std::string& working_di
             break;
         }
 
-        const fs::path path = directory / config_.agents_md_file_name;
-        std::error_code ec;
-        const fs::file_status symlink_status = fs::symlink_status(path, ec);
-        if (ec || !fs::exists(symlink_status)) {
-            aiagent::DefaultLogger().Log(
-                    aiagent::LogLevel::kDebug, "instructions",
-                    "event=instructions_skip path=" +
-                            aiagent::platform::ToUtf8(path) + " reason=missing");
-            continue;
-        }
-        if (fs::is_symlink(symlink_status) && !config_.agents_md_follow_symlinks) {
-            aiagent::DefaultLogger().Log(
-                    aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" +
-                            aiagent::platform::ToUtf8(path) + " reason=symlink");
-            continue;
-        }
+        fs::path path;
+        for (const auto& candidate_name : InstructionFileCandidates(config_)) {
+            const fs::path candidate = directory / candidate_name;
+            std::error_code ec;
+            const fs::file_status symlink_status = fs::symlink_status(candidate, ec);
+            if (ec || !fs::exists(symlink_status)) {
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kDebug, "instructions",
+                        "event=instructions_skip path=" +
+                                aiagent::platform::ToUtf8(candidate) + " reason=missing");
+                continue;
+            }
+            if (fs::is_symlink(symlink_status) && !config_.agents_md_follow_symlinks) {
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kWarning, "instructions",
+                        "event=instructions_skip path=" +
+                                aiagent::platform::ToUtf8(candidate) + " reason=symlink");
+                continue;
+            }
 
-        const fs::file_status status =
-                fs::is_symlink(symlink_status) ? fs::status(path, ec) : symlink_status;
-        if (ec || !fs::is_regular_file(status)) {
-            aiagent::DefaultLogger().Log(
-                    aiagent::LogLevel::kWarning, "instructions",
-                    "event=instructions_skip path=" +
-                            aiagent::platform::ToUtf8(path) +
-                            " reason=not_regular_file");
+            const fs::file_status status = fs::is_symlink(symlink_status)
+                                                   ? fs::status(candidate, ec)
+                                                   : symlink_status;
+            if (ec || !fs::is_regular_file(status)) {
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kWarning, "instructions",
+                        "event=instructions_skip path=" +
+                                aiagent::platform::ToUtf8(candidate) +
+                                " reason=not_regular_file");
+                continue;
+            }
+            path = candidate;
+            break;
+        }
+        if (path.empty()) {
             continue;
         }
 

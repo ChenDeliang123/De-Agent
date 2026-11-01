@@ -35,7 +35,6 @@ constexpr std::size_t kCatalogTruncationReserveBytes = 64;
 constexpr const char* kSkillFileName = "SKILL.md";
 
 constexpr const char* kCatalogHeader =
-        "Skills:\n"
         "The following reusable skills are available. When the request matches a skill's\n"
         "description, call the `skill` tool with its exact name and follow the returned\n"
         "instructions before acting. Do not guess a skill's contents. Skill instructions\n"

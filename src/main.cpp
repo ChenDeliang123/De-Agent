@@ -54,6 +54,7 @@
 #include "aiagent/permissions/trust_store.hpp"
 #include "aiagent/platform/console.hpp"
 #include "aiagent/platform/paths.hpp"
+#include "aiagent/platform/text_file.hpp"
 #include "aiagent/skills/skill_loader.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
@@ -150,6 +151,72 @@ AppOptions ParseOptions(int argc, char** argv) {
         }
     }
     return options;
+}
+
+// 用户级提示词文件：绝对路径原样使用；相对路径相对配置文件所在目录解析，
+// 避免“启动目录不同导致读不到同一个 SYSTEM.md”。
+bool LoadPromptFile(const std::string& value, const std::string& config_path,
+                    std::size_t max_bytes, const char* label, std::string* output,
+                    std::string* error) {
+    if (output != nullptr) {
+        output->clear();
+    }
+    if (value.empty()) {
+        return true;
+    }
+
+    std::error_code ec;
+    std::filesystem::path path = aiagent::platform::FromUtf8(value);
+    if (!path.is_absolute()) {
+        const std::filesystem::path config_dir =
+                std::filesystem::absolute(aiagent::platform::FromUtf8(config_path), ec)
+                        .parent_path();
+        if (ec) {
+            if (error != nullptr) {
+                *error = std::string(label) + ": cannot resolve config directory: " +
+                         ec.message();
+            }
+            return false;
+        }
+        path = config_dir / path;
+    }
+
+    std::string content;
+    bool truncated = false;
+    std::string read_error;
+    if (!aiagent::platform::ReadFilePrefix(path, max_bytes, &content, &truncated,
+                                           &read_error)) {
+        if (error != nullptr) {
+            *error = std::string(label) + ": cannot read " +
+                     aiagent::platform::ToUtf8(path) + ": " + read_error;
+        }
+        return false;
+    }
+    if (truncated) {
+        if (error != nullptr) {
+            *error = std::string(label) + " exceeds max_system_prompt_bytes: " +
+                     aiagent::platform::ToUtf8(path);
+        }
+        return false;
+    }
+    if (aiagent::platform::LooksBinary(content)) {
+        if (error != nullptr) {
+            *error = std::string(label) + " is binary: " +
+                     aiagent::platform::ToUtf8(path);
+        }
+        return false;
+    }
+    if (content.find_first_not_of(" \t\r\n") == std::string::npos) {
+        if (error != nullptr) {
+            *error = std::string(label) + " is empty: " +
+                     aiagent::platform::ToUtf8(path);
+        }
+        return false;
+    }
+    if (output != nullptr) {
+        *output = std::move(content);
+    }
+    return true;
 }
 
 // 缓存优先地取某个会话的最新历史（见 session_history.hpp）。
@@ -423,6 +490,39 @@ int main(int argc, char** argv) {
             return 1;
         }
         instructions_config = *parsed_instructions;
+
+        // 用户级系统提示词覆盖：[prompt] system_prompt_file /
+        // append_system_prompt_file。空 = 使用内置动态提示词。
+        aiagent::PromptConfig prompt_config;
+        std::string prompt_config_error;
+        const auto parsed_prompt = aiagent::LoadPromptConfigFile(config_path,
+                                                                 &prompt_config_error);
+        if (!parsed_prompt.has_value()) {
+            std::cerr << "配置错误: " << prompt_config_error << '\n';
+            return 1;
+        }
+        prompt_config = *parsed_prompt;
+        std::string system_prompt_override;
+        std::string system_prompt_append;
+        std::string prompt_file_error;
+        if (!LoadPromptFile(prompt_config.system_prompt_file, config_path,
+                            prompt_config.max_system_prompt_bytes,
+                            "system_prompt_file", &system_prompt_override,
+                            &prompt_file_error) ||
+            !LoadPromptFile(prompt_config.append_system_prompt_file, config_path,
+                            prompt_config.max_system_prompt_bytes,
+                            "append_system_prompt_file", &system_prompt_append,
+                            &prompt_file_error)) {
+            std::cerr << "配置错误: " << prompt_file_error << '\n';
+            return 1;
+        }
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "main",
+                "system prompt source=" +
+                        std::string(system_prompt_override.empty() ? "builtin" : "file") +
+                        " override_bytes=" + std::to_string(system_prompt_override.size()) +
+                        " append_bytes=" + std::to_string(system_prompt_append.size()));
+
         const std::string fallback_working_directory =
                 aiagent::platform::ToUtf8(std::filesystem::current_path());
         runtime.SetFallbackWorkingDirectory(fallback_working_directory);
@@ -700,8 +800,13 @@ int main(int argc, char** argv) {
         }
         runtime.SetToolProvider(tools);
         runtime.SetSystemPromptBuilder(
-                [](const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
-                    return aiagent::agent::BuildCodingSystemPrompt(tool_specs);
+                [system_prompt_override, system_prompt_append](
+                        const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
+                    aiagent::agent::SystemPromptOptions prompt_options;
+                    prompt_options.tools = tool_specs;
+                    prompt_options.override_prompt = system_prompt_override;
+                    prompt_options.append_prompt = system_prompt_append;
+                    return aiagent::agent::BuildCodingSystemPrompt(prompt_options);
                 });
 
         // MCP：优先读 [mcp] 配置；没有时依次尝试安装目录 share/de/mcp 与源码树

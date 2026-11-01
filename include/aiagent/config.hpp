@@ -118,12 +118,27 @@ struct AgentsConfig {
 struct InstructionsConfig {
     bool agents_md = true;
     std::string agents_md_file_name = "AGENTS.md";
+    // 同目录存在 override 时压制 primary（AGENTS.md）。空 = 关闭 override。
+    std::string agents_md_override_file_name = "AGENTS.override.md";
+    // primary/override 都缺失时，是否回退读取 CLAUDE.md / CLAUDE.MD。
+    // 默认关闭：同时存在 AGENTS.md 与 CLAUDE.md 的仓库容易重复注入。
+    bool agents_md_claude_fallback = false;
     bool agents_md_search_parents = true;
     std::size_t agents_md_max_files = 8;
     std::size_t agents_md_max_file_bytes = 16384;
     std::size_t agents_md_max_total_bytes = 32768;
     bool agents_md_follow_symlinks = false;
     std::size_t agents_md_max_depth = 16;
+};
+
+// 用户级系统提示词覆盖（[prompt]）。
+struct PromptConfig {
+    // 空 = 使用内置动态提示词；非空 = 读取文件替换基础提示词（preamble/tools/rules）。
+    // 相对路径相对配置文件所在目录解析。
+    std::string system_prompt_file;
+    // 空 = 不追加；非空 = 作为 <addendum> 追加到基础提示词后、项目指令前。
+    std::string append_system_prompt_file;
+    std::size_t max_system_prompt_bytes = 32768;
 };
 
 // Skill 加载配置（[skills]）。
@@ -208,6 +223,13 @@ std::optional<InstructionsConfig> ParseInstructionsConfig(
 std::optional<InstructionsConfig> LoadInstructionsConfigFile(
         const std::string& path,
         std::string* error = nullptr);
+
+// 解析 INI 文本中的 [prompt] 段；没有该段时返回默认值（不覆盖、不追加）。
+std::optional<PromptConfig> ParsePromptConfig(const std::string& content,
+                                              std::string* error = nullptr);
+
+std::optional<PromptConfig> LoadPromptConfigFile(const std::string& path,
+                                                 std::string* error = nullptr);
 
 // 解析 INI 文本中的 [skills] 段；没有该段时返回默认值。
 std::optional<SkillsConfig> ParseSkillsConfig(const std::string& content,

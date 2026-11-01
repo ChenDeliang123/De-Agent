@@ -98,6 +98,12 @@ void TestFullToolSet() {
     ExpectContains(prompt, aiagent::kAgentAuthor, "prompt should name the author");
     ExpectContains(prompt, "Platform:", "prompt should state the platform");
 
+    // 基础提示词按 section 分块：preamble 无标签，tools/rules 有边界。
+    ExpectContains(prompt, "<tools>\n", "prompt should open a tools section");
+    ExpectContains(prompt, "</tools>", "prompt should close the tools section");
+    ExpectContains(prompt, "<rules>\n", "prompt should open a rules section");
+    ExpectContains(prompt, "</rules>", "prompt should close the rules section");
+
     // 工具清单只列本次激活的内置工具。
     for (const char* name : {"read", "write", "edit", "bash", "ls", "glob", "grep"}) {
         ExpectContains(prompt, std::string("- ") + name + ":",
@@ -217,6 +223,30 @@ void TestTaskMetadata() {
                       "delegation guidance belongs to the runtime append");
 }
 
+void TestOverrideAndAppend() {
+    aiagent::agent::SystemPromptOptions options;
+    options.tools = BuiltinTools();
+    options.override_prompt = "CUSTOM SYSTEM PROMPT";
+    options.append_prompt = "APPENDED RULE";
+
+    const std::string prompt = aiagent::agent::BuildCodingSystemPrompt(options);
+    ExpectContains(prompt, "CUSTOM SYSTEM PROMPT",
+                   "override prompt should replace the preamble");
+    ExpectNotContains(prompt, "<tools>", "override should suppress the tools section");
+    ExpectNotContains(prompt, "<rules>", "override should suppress the rules section");
+    ExpectNotContains(prompt, "Implement when asked to implement",
+                      "override should suppress the built-in rules");
+    ExpectContains(prompt, "<addendum>\nAPPENDED RULE\n</addendum>",
+                   "append prompt should be rendered as an addendum section");
+
+    options.override_prompt.clear();
+    const std::string appended = aiagent::agent::BuildCodingSystemPrompt(options);
+    ExpectContains(appended, "<tools>", "append-only should keep the tools section");
+    ExpectContains(appended, "<rules>", "append-only should keep the rules section");
+    ExpectContains(appended, "<addendum>\nAPPENDED RULE\n</addendum>",
+                   "append-only should still add the addendum");
+}
+
 void TestRuleDedup() {
     auto tools = BuiltinTools();
     aiagent::llm::ToolSpec extra;
@@ -237,6 +267,7 @@ int main() {
     TestFullToolSet();
     TestSubsetToolSet();
     TestTaskMetadata();
+    TestOverrideAndAppend();
     TestRuleDedup();
 
     if (g_failures != 0) {

@@ -550,6 +550,19 @@ std::optional<InstructionsConfig> ParseInstructionsConfig(const std::string& con
                 return std::nullopt;
             }
             config.agents_md_file_name = value;
+        } else if (key == "agents_md_override_file_name") {
+            if (!value.empty() &&
+                (value.find('/') != std::string::npos ||
+                 value.find('\\') != std::string::npos)) {
+                if (error != nullptr) {
+                    *error = "agents_md_override_file_name must be a plain file name or empty";
+                }
+                return std::nullopt;
+            }
+            config.agents_md_override_file_name = value;
+        } else if (key == "agents_md_claude_fallback") {
+            config.agents_md_claude_fallback =
+                    Lower(value) == "true" || value == "1";
         } else if (key == "agents_md_search_parents") {
             config.agents_md_search_parents =
                     Lower(value) == "true" || value == "1";
@@ -576,6 +589,92 @@ std::optional<InstructionsConfig> ParseInstructionsConfig(const std::string& con
     }
 
     return config;
+}
+
+std::optional<PromptConfig> ParsePromptConfig(const std::string& content,
+                                              std::string* error) {
+    PromptConfig config;
+    bool in_prompt = false;
+
+    auto parse_size = [error](const std::string& key, const std::string& value,
+                              std::size_t min_value, std::size_t max_value,
+                              std::size_t* output) {
+        if (!value.empty() && value.front() == '-') {
+            if (error != nullptr) {
+                *error = key + " must be between " + std::to_string(min_value) +
+                         " and " + std::to_string(max_value);
+            }
+            return false;
+        }
+        try {
+            const unsigned long long parsed = std::stoull(value);
+            if (parsed < min_value || parsed > max_value) {
+                if (error != nullptr) {
+                    *error = key + " must be between " + std::to_string(min_value) +
+                             " and " + std::to_string(max_value);
+                }
+                return false;
+            }
+            *output = static_cast<std::size_t>(parsed);
+            return true;
+        } catch (const std::exception&) {
+            if (error != nullptr) {
+                *error = "invalid " + key + ": " + value;
+            }
+            return false;
+        }
+    };
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_prompt = (section == "prompt");
+            continue;
+        }
+        if (!in_prompt) {
+            continue;
+        }
+
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "system_prompt_file") {
+            config.system_prompt_file = value;
+        } else if (key == "append_system_prompt_file") {
+            config.append_system_prompt_file = value;
+        } else if (key == "max_system_prompt_bytes") {
+            if (!parse_size(key, value, 1, 1048576, &config.max_system_prompt_bytes)) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    return config;
+}
+
+std::optional<PromptConfig> LoadPromptConfigFile(const std::string& path,
+                                                 std::string* error) {
+    std::ifstream input(aiagent::platform::FromUtf8(path));
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParsePromptConfig(content.str(), error);
 }
 
 std::optional<InstructionsConfig> LoadInstructionsConfigFile(const std::string& path,

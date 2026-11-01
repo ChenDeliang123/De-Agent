@@ -63,6 +63,11 @@ min_gain_ratio = 0.3
 ; 终端 Agent 是否自动加载工作目录相关的 AGENTS.md。
 agents_md = true
 agents_md_file_name = AGENTS.md
+; 同目录存在 override 时压制 AGENTS.md；留空 = 关闭 override。
+agents_md_override_file_name = AGENTS.override.md
+; primary/override 都缺失时，是否回退读取 CLAUDE.md / CLAUDE.MD。
+; 默认关闭：同时存在 AGENTS.md 与 CLAUDE.md 的仓库容易重复注入。
+agents_md_claude_fallback = false
 ; 是否向祖先目录查找；找到 .git 根后停止。
 agents_md_search_parents = true
 ; 最多加载多少个文件。
@@ -74,6 +79,16 @@ agents_md_max_total_bytes = 32768
 agents_md_follow_symlinks = false
 ; 没有 .git 根时最多向上查找的层数。
 agents_md_max_depth = 16
+
+[prompt]
+; 用户级系统提示词覆盖。留空 = 使用内置动态提示词（按本次工具集生成）。
+; system_prompt_file 非空时替换基础 preamble/tools/rules；项目指令、技能、
+; 环境与派发准则仍由运行时追加。相对路径相对本配置文件所在目录解析。
+system_prompt_file =
+; 非空时作为 <addendum> 追加到基础提示词后、项目指令前。
+append_system_prompt_file =
+; 两个提示词文件的字节上限；超过直接报错，避免半截提示词上线。
+max_system_prompt_bytes = 32768
 
 [skills]
 ; 技能加载：从 <root>/<skill>/SKILL.md 发现技能。系统提示只注入

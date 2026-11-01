@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -151,12 +152,30 @@ bool RequiresTempWriteApproval(const tools::ToolContext& context,
     return !aiagent::platform::IsPathWithin(target, workspace);
 }
 
-void AppendPermissionMode(std::string& content, permissions::PermissionMode mode) {
-    content += "\n\nCurrent permission mode: ";
-    content += permissions::ModeName(mode);
-    content += " (";
-    content += permissions::DescribePolicy(mode);
-    content += ").";
+std::string PermissionModeText(permissions::PermissionMode mode) {
+    std::string text = "Permission mode: ";
+    text += permissions::ModeName(mode);
+    text += " (";
+    text += permissions::DescribePolicy(mode);
+    text += ").";
+    return text;
+}
+
+void AppendTaggedSection(std::string& content, std::string_view name,
+                         const std::string& body) {
+    if (body.empty()) {
+        return;
+    }
+    content += "\n\n<";
+    content += name;
+    content += ">\n";
+    content += body;
+    if (body.back() != '\n') {
+        content += '\n';
+    }
+    content += "</";
+    content += name;
+    content += ">";
 }
 
 void EmitCompactionEvent(const CompactionRecord& record,
@@ -466,6 +485,14 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
         system.content = system_prompt_builder_(tool_specs);
     }
 
+    std::string environment;
+    if (!load_directory.empty()) {
+        environment += "Current working directory: " + load_directory + "\n";
+    }
+    environment += PermissionModeText(
+            ResolvePermissionMode(load_directory, interactive));
+    AppendTaggedSection(system.content, "environment", environment);
+
     if (instructions_loader_ != nullptr) {
         const LoadedInstructions instructions =
                 instructions_loader_->Load(load_directory,
@@ -476,13 +503,7 @@ llm::ChatMessage AgentRuntime::BuildSystemMessage(
     }
 
     AppendSkillCatalog(system.content, load_directory, tool_specs);
-
-    if (!load_directory.empty()) {
-        system.content += "\n\nCurrent working directory: " + load_directory;
-    }
     AppendDelegationGuidance(system.content, tool_specs);
-    AppendPermissionMode(system.content,
-                         ResolvePermissionMode(load_directory, interactive));
     return system;
 }
 
@@ -504,7 +525,7 @@ void AgentRuntime::AppendSkillCatalog(std::string& content,
     const skills::SkillCatalog catalog = skill_loader_->LoadCatalog(working_directory);
     const std::string rendered = skills::SkillLoader::RenderCatalog(catalog);
     if (!rendered.empty()) {
-        content += "\n\n" + rendered;
+        AppendTaggedSection(content, "skills", rendered);
     }
 }
 
@@ -519,8 +540,8 @@ void AgentRuntime::AppendDelegationGuidance(
     }
     // 派发准则：只在本次工具列表真的含 task 时注入。正反两面都写：漏了反向
     // 约束就会出现“小事也派发”的浪费。
-    content +=
-            "\n\nDelegation:\n"
+    AppendTaggedSection(
+            content, "delegation",
             "- A `task` tool is available: it runs a sub-agent in its own context and "
             "returns only a compressed report, so bulky intermediate work never enters "
             "this conversation.\n"
@@ -531,7 +552,7 @@ void AgentRuntime::AppendDelegationGuidance(
             "edits are required.\n"
             "- Write a self-contained brief with exact scope, expected return format, and a "
             "stop condition. Do not delegate single-file reads or anything that depends on "
-            "this conversation.";
+            "this conversation.");
 }
 
 void AgentRuntime::SetCompactionSettings(const CompactionSettings& settings) {

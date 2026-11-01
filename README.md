@@ -725,6 +725,8 @@ system prompt；项目指令不会写入会话历史。查找顺序从当前工�
 [instructions]
 agents_md = true
 agents_md_file_name = AGENTS.md
+agents_md_override_file_name = AGENTS.override.md
+agents_md_claude_fallback = false
 agents_md_search_parents = true
 agents_md_max_files = 8
 agents_md_max_file_bytes = 16384
@@ -743,8 +745,34 @@ agents_md_max_depth = 16
 - 默认不跟随符号链接；文件过大时按 UTF-8 安全截断，并限制文件数与总字节数。
 - 同一进程内按文件 mtime/size 缓存已读取内容，文件变化后自动重新加载。
 - 项目指令只对当前项目生效，不能覆盖 Agent 的基础安全规则。
-- 该功能当前只覆盖终端 CLI 的流式聊天与手动压缩；同步 `/api/v1/chat`
-  和 A2A `SendMessage` 暂不保证使用项目指令。
+- 同一目录存在 `AGENTS.override.md` 时压制 `AGENTS.md`；两者都缺失时，
+  可配置 `agents_md_claude_fallback = true` 回退读取 `CLAUDE.md`（默认关闭）。
+- 项目指令渲染为 `<project_context>` / `<project_instructions path="...">`；
+  内容里的闭合标签会被中和，避免提前结束 section。
+- 流式、同步 `/api/v1/chat` 与 A2A `SendMessage` 共用同一套 system message
+  组装，项目指令与 cwd 在三条路径上都生效。
+
+### 系统提示词覆盖（用户级）
+
+主 Agent 的基础提示词默认按本次请求的工具集动态生成（工具清单 + 工具贡献规则）。
+需要实验或个性化时，可在配置文件里覆盖：
+
+```ini
+[prompt]
+; 留空 = 内置动态提示词；非空 = 读取文件替换 preamble/tools/rules。
+system_prompt_file =
+; 非空 = 作为 <addendum> 追加到基础提示词后、项目指令前。
+append_system_prompt_file =
+; 两个文件的字节上限；超过直接报错。
+max_system_prompt_bytes = 32768
+```
+
+- 相对路径相对配置文件所在目录解析，避免启动目录不同导致读不到同一个文件。
+- 覆盖只影响根 Agent；子 Agent 继续使用 `[agents.<name>]` 的
+  `system_prompt_file`。
+- 覆盖/追加不能绕过权限层；工具调用仍受权限模式、审批与 bash 策略约束。
+- 基础提示词按 section 渲染：preamble 无标签，`<tools>`、`<rules>`、
+  `<environment>`、`<project_context>`、`<skills>`、`<delegation>` 各自有边界。
 
 ## Skills
 

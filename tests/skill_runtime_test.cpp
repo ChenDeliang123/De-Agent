@@ -211,7 +211,7 @@ void TestCatalogInjection() {
 
     const auto user = a2a::models::MakeTextMessage(a2a::models::Role::kUser, "hello", "text/plain");
     runtime.HandleMessage(user, {user}, "ctx-catalog-sync");
-    Expect(model->system_content.find("Skills:") != std::string::npos,
+    Expect(model->system_content.find("<skills>") != std::string::npos,
            "sync path should inject the skill catalog");
     Expect(model->system_content.find("- alpha: alpha skill") != std::string::npos,
            "catalog should include name and description");
@@ -227,7 +227,7 @@ void TestCatalogInjection() {
     stream_runtime.SetFallbackWorkingDirectory(temp.path().string());
     stream_runtime.HandleMessageStreamingEvents(user, {user}, "ctx-catalog-stream", nullptr,
                                                 temp.path().string());
-    Expect(stream_model->system_content.find("Skills:") != std::string::npos,
+    Expect(stream_model->system_content.find("<skills>") != std::string::npos,
            "streaming path should inject the skill catalog");
     Expect(HasSkillTool(stream_model->last_tools),
            "streaming path should expose the skill tool when the cwd has skills");
@@ -247,7 +247,7 @@ void TestCatalogGuards() {
         runtime.SetToolProvider(std::make_shared<PlainToolProvider>());
         runtime.SetFallbackWorkingDirectory(temp.path().string());
         runtime.HandleMessage(user, {user}, "ctx-no-skill-tool");
-        Expect(model->system_content.find("Skills:") == std::string::npos,
+        Expect(model->system_content.find("<skills>") == std::string::npos,
                "catalog must stay hidden when the tool list lacks skill");
         Expect(!HasSkillTool(model->last_tools),
                "skill tool must stay absent when the provider lacks it");
@@ -259,7 +259,7 @@ void TestCatalogGuards() {
         runtime.SetToolProvider(aiagent::tools::MakeSkillToolProvider(nullptr));
         runtime.SetFallbackWorkingDirectory(temp.path().string());
         runtime.HandleMessage(user, {user}, "ctx-no-loader");
-        Expect(model->system_content.find("Skills:") == std::string::npos,
+        Expect(model->system_content.find("<skills>") == std::string::npos,
                "catalog must stay hidden without a skill loader");
         Expect(!HasSkillTool(model->last_tools), "skill tool must stay absent without a loader");
     }
@@ -274,7 +274,7 @@ void TestCatalogGuards() {
         runtime.SetToolProvider(aiagent::tools::MakeSkillToolProvider(empty_loader));
         runtime.SetFallbackWorkingDirectory(temp.path().string());
         runtime.HandleMessage(user, {user}, "ctx-empty-catalog");
-        Expect(model->system_content.find("Skills:") == std::string::npos,
+        Expect(model->system_content.find("<skills>") == std::string::npos,
                "empty catalog should not add an empty block");
         Expect(!HasSkillTool(model->last_tools), "empty catalog should not expose the skill tool");
     }
@@ -304,7 +304,7 @@ void TestSkillToolExecution() {
                "sync run should return the skill header");
         Expect(model->tool_result.find("Body text from skill.") != std::string::npos,
                "sync run should return the skill body");
-        Expect(model->system_content.find("Skills:") != std::string::npos,
+        Expect(model->system_content.find("<skills>") != std::string::npos,
                "sync run should expose the catalog to the model");
     }
 

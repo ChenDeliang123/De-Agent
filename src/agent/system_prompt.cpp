@@ -151,18 +151,76 @@ std::string RenderRules(const std::vector<llm::ToolSpec>& tools) {
     return rules.Render();
 }
 
-}  // namespace
+struct PromptSection {
+    std::string name;
+    std::string content;
+    bool tagged = true;
+};
 
-std::string BuildCodingSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
+std::string RenderSections(const std::vector<PromptSection>& sections) {
+    std::ostringstream output;
+    bool first = true;
+    for (const auto& section : sections) {
+        if (section.content.empty()) {
+            continue;
+        }
+        if (!first) {
+            output << "\n\n";
+        }
+        first = false;
+        if (!section.tagged) {
+            output << section.content;
+            continue;
+        }
+        output << '<' << section.name << ">\n" << section.content;
+        if (section.content.back() != '\n') {
+            output << '\n';
+        }
+        output << "</" << section.name << '>';
+    }
+    if (!first) {
+        output << '\n';
+    }
+    return output.str();
+}
+
+std::string BuildPreamble(bool has_bash) {
     std::ostringstream output;
     output << "You are " << aiagent::kAgentName
            << ", a general-purpose coding agent created by " << aiagent::kAgentAuthor << ".\n";
     output << "You work on software projects in any language: reading, editing and writing "
               "files, running shell commands, and calling tools.\n\n";
-    output << PlatformLine(HasTool(tools, "bash")) << "\n\n";
-    output << "Tools:\n" << RenderTools(tools) << "\n\n";
-    output << "Rules:\n" << RenderRules(tools);
+    output << PlatformLine(has_bash);
     return output.str();
+}
+
+}  // namespace
+
+std::string BuildCodingSystemPrompt(const SystemPromptOptions& options) {
+    std::vector<PromptSection> sections;
+    const std::string override_prompt = Trim(options.override_prompt);
+    if (!override_prompt.empty()) {
+        // 用户级 SYSTEM.md：替换 preamble/tools/rules，保留运行时追加的
+        // 项目指令、技能、环境与派发准则。
+        sections.push_back({"preamble", override_prompt, false});
+    } else {
+        sections.push_back(
+                {"preamble", BuildPreamble(HasTool(options.tools, "bash")), false});
+        sections.push_back({"tools", RenderTools(options.tools), true});
+        sections.push_back({"rules", RenderRules(options.tools), true});
+    }
+
+    const std::string append_prompt = Trim(options.append_prompt);
+    if (!append_prompt.empty()) {
+        sections.push_back({"addendum", append_prompt, true});
+    }
+    return RenderSections(sections);
+}
+
+std::string BuildCodingSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
+    SystemPromptOptions options;
+    options.tools = tools;
+    return BuildCodingSystemPrompt(options);
 }
 
 }  // namespace aiagent::agent

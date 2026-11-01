@@ -1185,7 +1185,7 @@ int main() {
                 a2a::models::Role::kUser, "guidance", "text/plain");
 
         runtime.HandleMessage(user, {user}, "ctx-guidance-off");
-        Expect(model->last_system_content.find("Delegation:") == std::string::npos,
+        Expect(model->last_system_content.find("<delegation>") == std::string::npos,
                "delegation guidance must stay out when task is not available");
 
         aiagent::llm::ToolSpec task;
@@ -1196,7 +1196,7 @@ int main() {
                         std::vector<aiagent::llm::ToolSpec>{task}));
         runtime.HandleMessage(user, {user}, "ctx-guidance-on");
         const std::string& system = model->last_system_content;
-        Expect(system.find("Delegation:") != std::string::npos &&
+        Expect(system.find("<delegation>") != std::string::npos &&
                        system.find("`task` tool is available") != std::string::npos,
                "task tool presence should inject the guideline");
         Expect(system.find("Do not delegate single-file reads") != std::string::npos,
@@ -1239,6 +1239,12 @@ int main() {
                 a2a::models::Role::kUser, "instructions", "text/plain");
         runtime.HandleMessage(user, {user}, "ctx-instructions");
         const std::string& system = model->last_system_content;
+        Expect(system.find("<environment>") != std::string::npos,
+               "non-streaming path should include an environment section");
+        Expect(system.find("<project_context>") != std::string::npos,
+               "non-streaming path should include a project_context section");
+        Expect(system.find("<project_instructions path=\"") != std::string::npos,
+               "project instructions should carry a path attribute");
         Expect(system.find("RUNTIME_AGENTS_MARKER") != std::string::npos,
                "non-streaming path should include project instructions");
         Expect(system.find("Current working directory: " + dir) != std::string::npos,
@@ -1274,6 +1280,12 @@ int main() {
                 a2a::models::Role::kUser, "dynamic prompt", "text/plain");
         runtime.HandleMessage(user, {user}, "ctx-dynamic-prompt");
         const std::string& system = model->last_system_content;
+        Expect(system.find("<tools>") != std::string::npos &&
+                       system.find("</tools>") != std::string::npos,
+               "dynamic prompt should include a tools section");
+        Expect(system.find("<rules>") != std::string::npos &&
+                       system.find("</rules>") != std::string::npos,
+               "dynamic prompt should include a rules section");
         Expect(system.find("- read: Read file contents") != std::string::npos,
                "dynamic prompt should list the active read tool");
         Expect(system.find("- grep: Search file contents") != std::string::npos,

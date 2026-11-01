@@ -22,6 +22,15 @@ namespace aiagent::agent {
 //   - prompt_snippet 为空的内置工具不进入提示词的工具清单（MCP 工具默认走
 //     “Additional tools may be available” 兜底）。
 //   - prompt_guidelines 会按加入顺序去重后追加到 Rules。
+//   - override_prompt 非空时替换 preamble/tools/rules（用户级 SYSTEM.md）；
+//     append_prompt 非空时作为 <addendum> 追加。
+struct SystemPromptOptions {
+    std::vector<llm::ToolSpec> tools;
+    std::string override_prompt;
+    std::string append_prompt;
+};
+
+std::string BuildCodingSystemPrompt(const SystemPromptOptions& options);
 std::string BuildCodingSystemPrompt(const std::vector<llm::ToolSpec>& tools);
 
 }  // namespace aiagent::agent

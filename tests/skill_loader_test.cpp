@@ -184,7 +184,8 @@ void TestDiscoveryAndPrecedence() {
            "builtin-only should come from builtin root");
 
     const std::string rendered = aiagent::skills::SkillLoader::RenderCatalog(catalog);
-    Expect(rendered.rfind("Skills:\n", 0) == 0, "rendered catalog should start with header");
+    Expect(rendered.rfind("The following reusable skills are available.", 0) == 0,
+           "rendered catalog should start with the skills header");
     Expect(rendered.find("- project-only: project only") != std::string::npos,
            "rendered catalog should contain project-only");
     Expect(rendered.find("- shared: project shared") != std::string::npos,
