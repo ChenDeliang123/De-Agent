@@ -90,8 +90,15 @@ export async function sessionStats(backendUrl, sessionId) {
   return body;
 }
 
-export async function listTools(backendUrl, cwd) {
-  const query = cwd ? `?path=${encodeURIComponent(cwd)}` : "";
+export async function listTools(backendUrl, cwd, sessionId) {
+  const params = [];
+  if (cwd) {
+    params.push(`path=${encodeURIComponent(cwd)}`);
+  }
+  if (sessionId) {
+    params.push(`session_id=${encodeURIComponent(sessionId)}`);
+  }
+  const query = params.length > 0 ? `?${params.join("&")}` : "";
   const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/tools${query}`);
   if (!response.ok) {
     throw new Error(`failed to list tools: HTTP ${response.status}`);

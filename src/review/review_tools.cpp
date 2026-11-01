@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -244,6 +245,26 @@ ReviewTools::ReviewTools(ReviewToolOptions options, Mode mode,
           mode_(mode),
           history_provider_(std::move(history_provider)),
           pack_service_(ReviewPackServiceOptions{options_.config, options_.data_dir}) {}
+
+void ReviewTools::EnsureClock(const ReviewPack& pack, const std::string& pack_relative,
+                              ReviewState* state) {
+    if (state->pack_path.empty()) {
+        state->pack_path = pack_relative;
+    }
+    if (state->started_at_epoch_s <= 0) {
+        state->started_at_epoch_s = static_cast<long long>(std::time(nullptr));
+        state->updated_at = LocalTimestampIso();
+        std::string error;
+        SaveReviewState(options_.config, pack.repo_root, *state, &error);
+    }
+    const long budget = std::max<long>(1, options_.config.review_timeout_s);
+    deadline_epoch_s_.store(state->started_at_epoch_s + budget);
+}
+
+bool ReviewTools::DeadlineExceeded() const {
+    const long long deadline = deadline_epoch_s_.load();
+    return deadline > 0 && static_cast<long long>(std::time(nullptr)) > deadline;
+}
 
 std::vector<llm::ToolSpec> ReviewTools::ListTools() {
     std::vector<llm::ToolSpec> tools;
@@ -507,6 +528,7 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
     }
     ReviewState state;
     LoadState(pack, rel_path, options_.config, &state);
+    EnsureClock(pack, rel_path, &state);
     const auto owned = ReviewerOwnedTestPaths(state, pack.repo_root);
     const ReviewStaleResult stale =
             CheckReviewStale(pack, options_.config, pack.repo_root, owned);
@@ -599,11 +621,16 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                                              : nlohmann::json(pack.previous_report);
         manifest["chunk_files"] = options_.config.chunk_files;
         manifest["chunk_diff_bytes"] = options_.config.chunk_diff_bytes;
-        manifest["review_state"] = {{"status", state.status},
-                                    {"reviewed_files", state.reviewed_files.size()},
-                                    {"reviewer_tests", state.reviewer_tests.size()},
-                                    {"verification", state.verification.size()},
-                                    {"next_chunk", state.next_chunk}};
+        manifest["review_state"] = {
+                {"status", state.status},
+                {"reviewed_files", state.reviewed_files},
+                {"reviewer_tests", state.reviewer_tests.size()},
+                {"verification", state.verification.size()},
+                {"next_chunk", state.next_chunk},
+                {"started_at_epoch_s", state.started_at_epoch_s},
+                {"deadline_epoch_s",
+                 state.started_at_epoch_s + options_.config.review_timeout_s},
+                {"timed_out", DeadlineExceeded() || state.timed_out}};
         return Ok(manifest);
     }
 
@@ -614,6 +641,13 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
             content = ExtractFileDiff(pack.diff, path);
             if (content.empty()) {
                 return Fail("no diff for path: " + path);
+            }
+            if (std::find(state.reviewed_files.begin(), state.reviewed_files.end(), path) ==
+                state.reviewed_files.end()) {
+                state.reviewed_files.push_back(path);
+                state.updated_at = LocalTimestampIso();
+                std::string state_error;
+                SaveReviewState(options_.config, pack.repo_root, state, &state_error);
             }
         } else {
             if (pack.diff.size() > 65536) {
@@ -697,6 +731,10 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
                                              const tools::ToolContext& context) {
     if (!context.policy.allow_read) {
         return Fail("permission denied: read is disabled");
+    }
+    if (DeadlineExceeded()) {
+        return Fail("review_timeout_s exceeded; stop reading and write a partial blocked "
+                    "report now");
     }
     const std::string repo = RepoRootFor(context);
     const fs::path repo_path = aiagent::platform::FromUtf8(repo);
@@ -804,6 +842,7 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
     }
     ReviewState state;
     LoadState(pack, rel_path, options_.config, &state);
+    EnsureClock(pack, rel_path, &state);
     const auto owned = ReviewerOwnedTestPaths(state, pack.repo_root);
     const ReviewStaleResult stale =
             CheckReviewStale(pack, options_.config, pack.repo_root, owned);
@@ -865,6 +904,10 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
 
     if (stale.stale) {
         return Fail("review pack is stale; regenerate it before running verification");
+    }
+    if (DeadlineExceeded()) {
+        return Fail("review_timeout_s exceeded; write a partial blocked report instead of "
+                    "running more commands");
     }
 
     std::string command_id = arguments.value("command_id", std::string());
@@ -1098,6 +1141,11 @@ tools::ToolExecutionResult ReviewTools::TestWrite(const nlohmann::json& argument
 
     ReviewState state;
     LoadState(pack, rel_path, options_.config, &state);
+    EnsureClock(pack, rel_path, &state);
+    if (DeadlineExceeded()) {
+        return Fail("review_timeout_s exceeded; write a partial blocked report instead of "
+                    "adding more tests");
+    }
     bool replaced = false;
     for (auto& record : state.reviewer_tests) {
         if (record.path == path) {
@@ -1234,6 +1282,8 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     }
     ReviewState state;
     LoadState(pack, rel_path, options_.config, &state);
+    EnsureClock(pack, rel_path, &state);
+    const bool timed_out = state.timed_out || DeadlineExceeded();
     const auto owned = ReviewerOwnedTestPaths(state, pack.repo_root);
     const ReviewStaleResult stale =
             CheckReviewStale(pack, options_.config, pack.repo_root, owned);
@@ -1280,6 +1330,18 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
                 return Fail("invalid verification reference");
             }
             input.verification.push_back(*ref);
+        }
+    }
+
+    if (timed_out) {
+        state.timed_out = true;
+        input.status = "final";
+        input.verdict = "blocked";
+        input.unverified.push_back(
+                "review_timeout_s exceeded; this report is partial and covers only the "
+                "evidence collected so far");
+        if (input.summary.empty()) {
+            input.summary = "Review timed out; partial report only.";
         }
     }
 

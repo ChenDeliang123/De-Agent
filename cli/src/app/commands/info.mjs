@@ -124,7 +124,7 @@ export const infoCommands = [
     category: "info",
     handler: async (ctx) => {
       try {
-        const tools = await listTools(ctx.backend, ctx.state.cwd);
+        const tools = await listTools(ctx.backend, ctx.state.cwd, ctx.state.sessionId);
         if (tools.length === 0) {
           ctx.print("(no tools)");
           return;

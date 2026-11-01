@@ -37,6 +37,9 @@ struct ReviewState {
     std::vector<ReviewVerificationRecord> verification;
     int next_chunk = 0;
     std::string updated_at;
+    // 审核起点（epoch 秒）：跨进程 resume 时继续沿用同一个总时限。
+    long long started_at_epoch_s = 0;
+    bool timed_out = false;
 };
 
 std::string ReviewStatePath(const ReviewConfig& config, const std::string& repo_root,

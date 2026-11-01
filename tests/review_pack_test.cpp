@@ -51,7 +51,10 @@ int main() {
         review_test_support::WriteFile(repo + "/README.md", "# base\n");
         review_test_support::WriteFile(repo + "/src/foo.cpp", "int foo() { return 1; }\n");
         review_test_support::WriteFile(repo + "/docs/plan.md", "# plan\n");
+        review_test_support::WriteFile(repo + "/docs/review/tracked.txt", "v1\n");
         Expect(review_test_support::CommitAll(repo, "base"), "commit base");
+        // review 目录里被跟踪的文件也属于审核产物：改动它不应让 pack 过期。
+        review_test_support::WriteFile(repo + "/docs/review/tracked.txt", "v2\n");
 
         review::ReviewPackServiceOptions options;
         options.config = aiagent::ReviewConfig{};
@@ -161,6 +164,15 @@ int main() {
                "secret content must not enter the diff");
         Expect(pack.diff.find("docs/review/") == std::string::npos,
                "review artifacts must not enter the diff");
+        Expect(pack.diff.find("tracked.txt") == std::string::npos,
+               "tracked review artifacts must not enter the diff");
+        review_test_support::WriteFile(repo + "/docs/review/tracked.txt", "v3\n");
+        review::ReviewStaleResult artifact_stale =
+                review::CheckReviewStale(pack, options.config, repo, {});
+        Expect(!artifact_stale.stale,
+               "changing tracked review artifacts must not stale the pack: " +
+                       (artifact_stale.reasons.empty() ? std::string()
+                                                       : artifact_stale.reasons.front()));
 
         bool project_command = false;
         for (const auto& command : pack.verification) {

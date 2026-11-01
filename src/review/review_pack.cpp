@@ -168,14 +168,15 @@ std::vector<std::string> SplitDiffSections(const std::string& diff) {
 }
 
 std::string FilterDiff(const std::string& raw, const std::string& review_dir,
-                       const std::vector<std::string>& excluded_paths) {
+                       const std::vector<std::string>& excluded_paths,
+                       bool drop_sensitive) {
     const std::set<std::string> excluded(excluded_paths.begin(), excluded_paths.end());
     std::string output;
     for (const auto& section : SplitDiffSections(raw)) {
         const std::string path = PathFromDiffSection(section);
         if (!path.empty() &&
             (IsUnderDir(path, review_dir) || excluded.count(path) > 0 ||
-             IsSensitivePath(path))) {
+             (drop_sensitive && IsSensitivePath(path)))) {
             continue;
         }
         output += section;
@@ -326,7 +327,10 @@ ReviewWorkspaceDigest ComputeDigestInternal(
         digest.error = "git diff failed: " + TrimmedOutput(diff);
         return digest;
     }
-    digest.diff_sha256 = aiagent::util::Sha256Hex(diff.output);
+    // digest 必须与 pack 创建时同口径：排除 review 产物与 reviewer-owned 测试，
+    // 但不因敏感文件而从摘要中消失（内容变化仍要触发 stale）。
+    digest.diff_sha256 = aiagent::util::Sha256Hex(
+            FilterDiff(diff.output, review_dir, excluded_paths, /*drop_sensitive=*/false));
 
     const ArgvRunResult head = RunGit(repo_root, {"rev-parse", "HEAD"}, 4096);
     if (head.started && head.exit_code == 0) {
@@ -828,7 +832,9 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
     if (!raw_diff.started || raw_diff.exit_code != 0) {
         return fail("git diff failed: " + TrimmedOutput(raw_diff));
     }
-    const std::string diff_sha = aiagent::util::Sha256Hex(raw_diff.output);
+    const std::string diff_sha = aiagent::util::Sha256Hex(
+            FilterDiff(raw_diff.output, options_.config.dir, {},
+                       /*drop_sensitive=*/false));
 
     const ArgvRunResult name_status =
             RunGit(repo, {"diff", "--name-status", base_hash}, 4 * 1024 * 1024);
@@ -881,6 +887,9 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
     std::vector<ReviewChangedFile> changed_files;
     std::vector<ReviewOmittedFile> omitted;
     for (const auto& path : ChangedPathsFromNameStatus(name_status.output)) {
+        if (IsUnderDir(path, options_.config.dir)) {
+            continue;  // 审核产物不属于待审代码
+        }
         if (changed_files.size() >= options_.config.max_files) {
             omitted.push_back({path, "max_files"});
             continue;
@@ -1079,7 +1088,8 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
     pack.changed_files = std::move(changed_files);
     pack.untracked = std::move(untracked);
     pack.omitted = std::move(omitted);
-    pack.diff = FilterDiff(raw_diff.output, options_.config.dir, {});
+    pack.diff = FilterDiff(raw_diff.output, options_.config.dir, {},
+                           /*drop_sensitive=*/true);
     pack.diff_truncated = raw_diff.truncated;
     pack.previous_report = previous_report;
 

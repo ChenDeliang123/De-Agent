@@ -80,6 +80,8 @@ nlohmann::json ToJson(const ReviewState& state) {
     }
     json["next_chunk"] = state.next_chunk;
     json["updated_at"] = state.updated_at;
+    json["started_at_epoch_s"] = state.started_at_epoch_s;
+    json["timed_out"] = state.timed_out;
     return json;
 }
 
@@ -126,6 +128,8 @@ bool LoadReviewState(const ReviewConfig& config, const std::string& repo_root,
         parsed.status = json.value("status", std::string("in_progress"));
         parsed.next_chunk = json.value("next_chunk", 0);
         parsed.updated_at = json.value("updated_at", std::string());
+        parsed.started_at_epoch_s = json.value("started_at_epoch_s", 0LL);
+        parsed.timed_out = json.value("timed_out", false);
         if (json.contains("reviewed_files") && json["reviewed_files"].is_array()) {
             parsed.reviewed_files =
                     json["reviewed_files"].get<std::vector<std::string>>();

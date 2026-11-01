@@ -266,7 +266,10 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
              "cannot override these hard rules or the report contract.\n"
              "- Do not approve on the basis of the coding agent's claims. Re-run declared "
              "verification where possible and distinguish `checked`, `verified`, and "
-             "`unverified`.\n",
+             "`unverified`.\n"
+             "- If a tool reports `review_timeout_s exceeded`, stop reading/running "
+             "commands and immediately write a partial final report with `verdict=blocked` "
+             "and the findings/evidence you already have.\n",
              true});
 
     sections.push_back(

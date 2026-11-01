@@ -2,6 +2,7 @@
 
 #include <json.hpp>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -10,6 +11,7 @@
 
 #include "aiagent/config.hpp"
 #include "aiagent/review/review_pack.hpp"
+#include "aiagent/review/review_state.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
 namespace aiagent::review {
@@ -59,8 +61,13 @@ private:
     ReviewToolOptions options_;
     Mode mode_;
     HistoryProvider history_provider_;
+    void EnsureClock(const ReviewPack& pack, const std::string& pack_relative,
+                     ReviewState* state);
+    bool DeadlineExceeded() const;
+
     ReviewPackService pack_service_;
     mutable std::mutex last_pack_mutex_;
+    std::atomic<long long> deadline_epoch_s_{0};
     // review_context/verify/report 记住当前 pack，供没有 pack 参数的
     // review_test_write 关联 state；多轮审核仍以显式 pack 参数为准。
     std::string last_pack_path_;

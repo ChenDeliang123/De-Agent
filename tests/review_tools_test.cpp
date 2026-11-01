@@ -1,3 +1,4 @@
+#include <ctime>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -360,6 +361,41 @@ int main() {
                 context);
         Expect(blocked_ok.ok, "stale blocked report: " + blocked_ok.error);
         Expect(Parse(blocked_ok).value("stale", false), "blocked report marks stale");
+
+        // 总时限：把 checkpoint 的起点挪到过去，后续工具拒绝继续读/验证，
+        // 但 review_report 仍可写 partial blocked。
+        {
+            review::ReviewState timed;
+            std::string state_error;
+            Expect(review::LoadReviewState(options.config, repo, created.review_id, &timed,
+                                           &state_error),
+                   "load state for timeout: " + state_error);
+            timed.started_at_epoch_s = static_cast<long long>(std::time(nullptr)) - 10000;
+            timed.timed_out = false;
+            Expect(review::SaveReviewState(options.config, repo, timed, &state_error),
+                   "save timeout state: " + state_error);
+            auto expired = Parse(reviewer.Execute(
+                    "review_context", {{"pack", pack_path}, {"mode", "manifest"}}, context));
+            Expect(expired["review_state"].value("timed_out", false),
+                   "manifest should report timeout: " + expired.dump());
+            const auto denied = reviewer.Execute(
+                    "review_read",
+                    {{"files", nlohmann::json::array({{{"path", "README.md"}}})}},
+                    context);
+            Expect(!denied.ok && denied.error.find("review_timeout_s") != std::string::npos,
+                   "read should stop after timeout: " + denied.error);
+            auto partial = reviewer.Execute(
+                    "review_report",
+                    {{"pack", pack_path},
+                     {"status", "draft"},
+                     {"summary", ""},
+                     {"unverified", {"timeout"}}},
+                    context);
+            Expect(partial.ok, "timeout partial report: " + partial.error);
+            Expect(Parse(partial).value("verdict", std::string()) == "blocked" &&
+                           Parse(partial).value("status", std::string()) == "final",
+                   "timeout should force final blocked: " + partial.text);
+        }
 
         // coding handoff：带本回合用户消息。
         std::string history_title;
