@@ -148,10 +148,11 @@ verify_output_bytes = 32768
 ; 原工作区；含 submodule 的仓库暂不支持 copy，会明确报错。
 verify_mode = in_place
 ; 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
-max_tool_rounds = 128
+; 默认 deep：192 轮 + 4 个只读 scout；想降成本可改回 128/0。
+max_tool_rounds = 192
 review_timeout_s = 3600
-; P1 受控分片：0 关闭 review_scout；1–4 为只读 scout 并发上限。
-scout_max = 0
+; 0 关闭 review_scout；1–4 为只读 scout 并发上限。
+scout_max = 4
 checkpoint = true
 draft_report = true
 chunk_files = 20

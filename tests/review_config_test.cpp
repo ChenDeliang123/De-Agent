@@ -26,8 +26,8 @@ int main() {
         Expect(config->dir == "docs/review", "default review dir");
         Expect(config->max_diff_bytes == 2 * 1024 * 1024, "default max_diff_bytes");
         Expect(config->verify_timeout_s == 900, "default verify timeout");
-        Expect(config->max_tool_rounds == 128, "default max tool rounds");
-        Expect(config->scout_max == 0, "default scout max");
+        Expect(config->max_tool_rounds == 192, "default max tool rounds");
+        Expect(config->scout_max == 4, "default scout max");
         Expect(config->chunk_files == 20, "default chunk size");
     }
 

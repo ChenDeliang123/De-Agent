@@ -628,9 +628,9 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 - `review_read`：批量按行读真实文件与调用方；读完整文件会记入覆盖账本。
 - `review_git`：只读 `diff/log/show/blame/rev-parse/ls-files/status`；拒绝 shell、
   checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
-- `review_scout`（P1，`[review] scout_max=1–4`）：最多 4 个只读分片；scout 只能
-  读文件/查 git，不能写、不能执行命令、不能写报告；父 reviewer 必须重读证据，
-  scout 覆盖不替代父 coverage。
+- `review_scout`（P1，默认开启，`[review] scout_max=1–4`）：最多 4 个只读分片；
+  scout 只能读文件/查 git，不能写、不能执行命令、不能写报告；父 reviewer 必须
+  重读证据，scout 覆盖不替代父 coverage。
 - `review_verify`：只执行 pack 或 `.de/review.json` 声明的 argv（无 shell），
   执行前后比较源码 digest；源码被测试改动会返回 `source_modified=true`。
 - `review_test_write`：只允许新建测试或向既有测试 append，不能覆盖/删除测试，
@@ -645,8 +645,9 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 `review_context(mode=delta)` 看两轮之间的文件变化，并沿用旧 finding id 标记
 `resolved` / `still_open` / `regressed`；新问题从旧 id 之后编号。
 
-受控分片（P1）：`[review] scout_max=1–4` 时 reviewer 才能看到 `review_scout`；
-默认 `0` 关闭。scout 是只读候选来源，父 reviewer 必须重读证据后再写报告。
+受控分片（P1，默认 deep）：`[review] scout_max=4` 时 reviewer 看到 `review_scout`；
+默认 `4`。想降成本可设 `0` 关闭或 `1–3` 减并发。scout 是只读候选来源，父 reviewer
+必须重读证据后再写报告。
 
 后台审核（P1，需 `[review] background_enabled=true`）：
 
