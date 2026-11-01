@@ -287,6 +287,10 @@ if(AIAGENT_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
   endif()
 
+  add_executable(review_round2_test tests/review_round2_test.cpp)
+  target_link_libraries(review_round2_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_round2 COMMAND review_round2_test)
+
   add_executable(review_tools_test tests/review_tools_test.cpp)
   target_link_libraries(review_tools_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_review_tools COMMAND review_tools_test)

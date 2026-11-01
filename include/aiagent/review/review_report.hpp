@@ -42,6 +42,21 @@ struct ReviewReportInput {
     std::string notes;
 };
 
+// 上一轮报告的最小摘要：frontmatter 的 pack/review_id/verdict + finding id。
+// mode=delta 与第二轮状态校验共用，避免各处重复解析 Markdown。
+struct PreviousReviewSummary {
+    std::string report_path;
+    std::string pack_path;
+    std::string review_id;
+    std::string verdict;
+    std::vector<std::string> finding_ids;
+};
+
+bool LoadPreviousReviewSummary(const std::string& repo_root,
+                               const std::string& report_relative_path,
+                               PreviousReviewSummary* summary,
+                               std::string* error = nullptr);
+
 struct ReviewReportResult {
     bool ok = false;
     std::string error;

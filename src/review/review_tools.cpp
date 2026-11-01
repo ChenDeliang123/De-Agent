@@ -8,6 +8,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -769,7 +770,84 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
     }
 
     if (mode == "delta") {
-        return Fail("review_context(mode=delta) is a P1 feature");
+        if (pack.previous_report.empty()) {
+            return Fail("pack has no previous_report; delta is only for round 2");
+        }
+        PreviousReviewSummary previous;
+        std::string previous_error;
+        if (!LoadPreviousReviewSummary(pack.repo_root, pack.previous_report, &previous,
+                                       &previous_error)) {
+            return Fail("cannot read previous report: " + previous_error);
+        }
+        const fs::path previous_path = aiagent::platform::ResolveCanonicalPath(
+                aiagent::platform::FromUtf8(pack.repo_root),
+                previous.pack_path);
+        const std::string previous_rel = PackRelative(pack.repo_root, previous_path);
+        if (previous_rel.empty() || !IsUnderReviewDir(previous_rel, options_.config)) {
+            return Fail("previous report points outside the review directory");
+        }
+        ReviewPack previous_pack;
+        if (!LoadReviewPack(aiagent::platform::ToUtf8(previous_path), &previous_pack,
+                            &previous_error)) {
+            return Fail("cannot load previous pack: " + previous_error);
+        }
+        if (aiagent::platform::NormalizePathKey(previous_pack.repo_root) !=
+            aiagent::platform::NormalizePathKey(pack.repo_root)) {
+            return Fail("previous pack belongs to a different repository");
+        }
+
+        auto signatures = [](const ReviewPack& value) {
+            std::map<std::string, std::string> map;
+            for (const auto& file : value.changed_files) {
+                map[file.path] = file.status + "|" + std::to_string(file.added) + "|" +
+                                 std::to_string(file.removed) + "|" +
+                                 std::to_string(file.diff_bytes) + "|" +
+                                 ExtractFileDiff(value.diff, file.path);
+            }
+            for (const auto& file : value.untracked) {
+                map[file.path] = "untracked|" + std::to_string(file.content.size()) + "|" +
+                                 (file.redacted ? "redacted" : file.reason) + "|" +
+                                 aiagent::util::Sha256Hex(file.content);
+            }
+            return map;
+        };
+        const auto current_sig = signatures(pack);
+        const auto previous_sig = signatures(previous_pack);
+        std::set<std::string> paths;
+        for (const auto& [path, _] : current_sig) {
+            paths.insert(path);
+        }
+        for (const auto& [path, _] : previous_sig) {
+            paths.insert(path);
+        }
+        nlohmann::json files = nlohmann::json::array();
+        for (const auto& path : paths) {
+            const bool in_current = current_sig.count(path) > 0;
+            const bool in_previous = previous_sig.count(path) > 0;
+            std::string change;
+            if (in_current && !in_previous) {
+                change = "added";
+            } else if (!in_current && in_previous) {
+                change = "removed";
+            } else if (current_sig.at(path) != previous_sig.at(path)) {
+                change = "modified";
+            } else {
+                continue;
+            }
+            files.push_back({{"path", path}, {"change", change}});
+        }
+        nlohmann::json payload = stale_json();
+        payload["mode"] = "delta";
+        payload["previous_report"] = pack.previous_report;
+        payload["previous_pack"] = previous_rel;
+        payload["previous_review_id"] = previous.review_id;
+        payload["previous_verdict"] = previous.verdict;
+        payload["previous_finding_ids"] = previous.finding_ids;
+        payload["current_pack"] = rel_path;
+        payload["head_changed"] =
+                previous_pack.git.head_commit != pack.git.head_commit;
+        payload["files"] = files;
+        return Ok(payload);
     }
     return Fail("unknown review_context mode: " + mode);
 }

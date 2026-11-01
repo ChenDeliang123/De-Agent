@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "aiagent/platform/paths.hpp"
+#include "aiagent/platform/text_file.hpp"
 #include "aiagent/review/project_verify_config.hpp"
 #include "aiagent/util/sha256.hpp"
 
@@ -54,6 +55,49 @@ bool IsFindingStatus(const std::string& value) {
 bool IsFinalVerdict(const std::string& value) {
     return value == "approved" || value == "approved_with_notes" ||
            value == "changes_requested" || value == "blocked";
+}
+
+std::string TrimText(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string UnquoteYaml(std::string value) {
+    value = TrimText(std::move(value));
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        std::string output;
+        for (std::size_t i = 1; i + 1 < value.size(); ++i) {
+            if (value[i] == '\\' && i + 2 < value.size()) {
+                output.push_back(value[++i]);
+            } else {
+                output.push_back(value[i]);
+            }
+        }
+        return output;
+    }
+    if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'') {
+        return value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+int NumericFindingId(const std::string& id) {
+    if (id.size() < 2 || id.front() != 'R') {
+        return 0;
+    }
+    int value = 0;
+    for (std::size_t i = 1; i < id.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(id[i]))) {
+            return 0;
+        }
+        value = value * 10 + (id[i] - '0');
+    }
+    return value;
 }
 
 std::string ReviewDirRelative(const ReviewConfig& config) {
@@ -108,6 +152,102 @@ bool WriteAtomic(const fs::path& target, const std::string& content, std::string
 std::string ReviewVerdictName(const std::string& verdict) {
     return verdict;
 }
+bool LoadPreviousReviewSummary(const std::string& repo_root,
+                               const std::string& report_relative_path,
+                               PreviousReviewSummary* summary,
+                               std::string* error) {
+    if (summary == nullptr) {
+        if (error != nullptr) {
+            *error = "previous review summary output is null";
+        }
+        return false;
+    }
+    if (!IsSafeRelativePath(report_relative_path, false)) {
+        if (error != nullptr) {
+            *error = "previous report path must stay inside the repository";
+        }
+        return false;
+    }
+    const fs::path repo = aiagent::platform::FromUtf8(repo_root);
+    const fs::path path =
+            aiagent::platform::ResolveCanonicalPath(repo, report_relative_path);
+    if (!aiagent::platform::IsPathWithin(path, repo)) {
+        if (error != nullptr) {
+            *error = "previous report escapes the repository";
+        }
+        return false;
+    }
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || ec) {
+        if (error != nullptr) {
+            *error = "previous report not found: " + report_relative_path;
+        }
+        return false;
+    }
+    std::string text;
+    bool truncated = false;
+    std::string read_error;
+    if (!aiagent::platform::ReadFilePrefix(path, 4 * 1024 * 1024, &text, &truncated,
+                                           &read_error) ||
+        truncated) {
+        if (error != nullptr) {
+            *error = read_error.empty() ? "previous report is too large" : read_error;
+        }
+        return false;
+    }
+
+    PreviousReviewSummary parsed;
+    parsed.report_path = NormalizeRelativePath(report_relative_path);
+    bool saw_frontmatter = false;
+    bool in_frontmatter = false;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string trimmed = TrimText(line);
+        if (trimmed == "---") {
+            if (!saw_frontmatter) {
+                saw_frontmatter = true;
+                in_frontmatter = true;
+            } else if (in_frontmatter) {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+        if (in_frontmatter) {
+            const std::size_t colon = trimmed.find(':');
+            if (colon == std::string::npos) {
+                continue;
+            }
+            const std::string key = TrimText(trimmed.substr(0, colon));
+            const std::string value = UnquoteYaml(trimmed.substr(colon + 1));
+            if (key == "pack") {
+                parsed.pack_path = NormalizeRelativePath(value);
+            } else if (key == "review_id") {
+                parsed.review_id = value;
+            } else if (key == "verdict") {
+                parsed.verdict = value;
+            }
+            continue;
+        }
+        if (trimmed.rfind("### ", 0) == 0) {
+            const std::string rest = trimmed.substr(4);
+            const std::size_t space = rest.find(' ');
+            const std::string id = rest.substr(0, space);
+            if (!id.empty()) {
+                parsed.finding_ids.push_back(id);
+            }
+        }
+    }
+    if (!saw_frontmatter || parsed.pack_path.empty()) {
+        if (error != nullptr) {
+            *error = "previous report has no frontmatter pack field";
+        }
+        return false;
+    }
+    *summary = std::move(parsed);
+    return true;
+}
+
 
 ReviewReportWriter::ReviewReportWriter(ReviewConfig config) : config_(std::move(config)) {}
 
@@ -216,6 +356,45 @@ ReviewReportResult ReviewReportWriter::Write(
             has_blocker_or_major = true;
         }
     }
+    PreviousReviewSummary previous;
+    if (!pack.previous_report.empty()) {
+        std::string previous_error;
+        if (!LoadPreviousReviewSummary(repo_root, pack.previous_report, &previous,
+                                       &previous_error)) {
+            return fail("cannot read previous report: " + previous_error);
+        }
+        std::set<std::string> old_ids(previous.finding_ids.begin(),
+                                      previous.finding_ids.end());
+        int max_old_id = 0;
+        for (const auto& id : previous.finding_ids) {
+            max_old_id = std::max(max_old_id, NumericFindingId(id));
+        }
+        for (const auto& finding : input.findings) {
+            if (old_ids.count(finding.id) > 0) {
+                if (input.status == "final" && finding.status != "resolved" &&
+                    finding.status != "still_open" && finding.status != "regressed") {
+                    return fail("finding " + finding.id +
+                                " from the previous round must be resolved/still_open/"
+                                "regressed");
+                }
+            } else if (input.status == "final" && max_old_id > 0) {
+                const int numeric = NumericFindingId(finding.id);
+                if (numeric > 0 && numeric <= max_old_id) {
+                    return fail("new finding " + finding.id +
+                                " reuses the previous round's id space (max R" +
+                                std::to_string(max_old_id) + ")");
+                }
+            }
+        }
+        if (input.status == "final") {
+            for (const auto& id : previous.finding_ids) {
+                if (finding_ids.count(id) == 0) {
+                    return fail("final report is missing previous finding: " + id);
+                }
+            }
+        }
+    }
+
     if (input.status == "final") {
         if (has_blocker_or_major && input.verdict != "changes_requested" &&
             input.verdict != "blocked") {
