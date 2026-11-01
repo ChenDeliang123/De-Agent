@@ -86,6 +86,16 @@ int main() {
                     std::cerr << "first failing offset " << offset << ": " << page.error
                               << '\n';
                 }
+                continue;
+            }
+            const auto json = nlohmann::json::parse(page.text);
+            if (json.contains("total_bytes") && offset < json.value("total_bytes", 0)) {
+                Expect(json.value("next_offset", 0) > offset,
+                       "diff page must advance at offset " + std::to_string(offset) +
+                               ": " + page.text);
+                Expect(!json.value("content", std::string()).empty(),
+                       "diff page must contain at least one character at offset " +
+                               std::to_string(offset));
             }
         }
         Expect(failures == 0, "UTF-8 diff pagination must not fail on continuation bytes");

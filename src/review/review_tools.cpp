@@ -65,6 +65,26 @@ std::string RepoRootFor(const tools::ToolContext& context) {
             fs::weakly_canonical(aiagent::platform::FromUtf8(context.working_directory), ec));
 }
 
+std::size_t Utf8CharLength(const std::string& text, std::size_t offset) {
+    if (offset >= text.size()) {
+        return 0;
+    }
+    const unsigned char lead = static_cast<unsigned char>(text[offset]);
+    if (lead < 0x80U) {
+        return 1;
+    }
+    if ((lead & 0xE0U) == 0xC0U) {
+        return 2;
+    }
+    if ((lead & 0xF0U) == 0xE0U) {
+        return 3;
+    }
+    if ((lead & 0xF8U) == 0xF0U) {
+        return 4;
+    }
+    return 1;
+}
+
 std::size_t AlignUtf8Start(const std::string& text, std::size_t offset) {
     if (offset >= text.size()) {
         return text.size();
@@ -1047,8 +1067,15 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
         }
         // 分页边界不能落在 UTF-8 续字节上，否则 JSON 序列化会拒绝整页。
         offset = AlignUtf8Start(content, offset);
-        std::string slice = content.substr(offset, limit);
+        // limit 小于当前字符字节数时必须至少带出一个完整字符，否则
+        // next_offset 不前进，调用方会原地重试。
+        const std::size_t char_len = Utf8CharLength(content, offset);
+        const std::size_t take = std::max(limit, char_len);
+        std::string slice = content.substr(offset, take);
         aiagent::platform::TrimIncompleteUtf8Suffix(&slice);
+        if (slice.empty() && offset < content.size() && char_len > 0) {
+            slice = content.substr(offset, char_len);
+        }
         nlohmann::json payload = stale_json();
         payload["mode"] = "diff";
         payload["path"] = path;
