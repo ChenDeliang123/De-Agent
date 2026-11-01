@@ -52,10 +52,8 @@ int main() {
         review_test_support::WriteFile(repo + "/src/foo.cpp", "int foo() { return 1; }\n");
         review_test_support::WriteFile(repo + "/docs/plan.md", "# plan\n");
         review_test_support::WriteFile(repo + "/docs/review/tracked.txt", "v1\n");
+        review_test_support::WriteFile(repo + "/secret.pem", "key-v1\n");
         Expect(review_test_support::CommitAll(repo, "base"), "commit base");
-        // review 目录里被跟踪的文件也属于审核产物：改动它不应让 pack 过期。
-        review_test_support::WriteFile(repo + "/docs/review/tracked.txt", "v2\n");
-
         review::ReviewPackServiceOptions options;
         options.config = aiagent::ReviewConfig{};
         options.data_dir = repo + "/.data";
@@ -67,6 +65,10 @@ int main() {
         const auto empty = service.CreatePack(empty_request);
         Expect(!empty.ok && empty.error.find("no changes") != std::string::npos,
                "clean repo should not produce an empty pack: " + empty.error);
+
+        // review 目录里被跟踪的文件也属于审核产物：改动它不应让 pack 过期。
+        review_test_support::WriteFile(repo + "/docs/review/tracked.txt", "v2\n");
+        review_test_support::WriteFile(repo + "/secret.pem", "key-v2\n");
 
         // 改动源码 + untracked 测试/敏感文件/二进制。
         review_test_support::WriteFile(repo + "/src/foo.cpp",
@@ -160,6 +162,11 @@ int main() {
         Expect(FindOmitted(pack.omitted, "asset.bin") != nullptr &&
                        FindOmitted(pack.omitted, "asset.bin")->reason == "binary",
                "binary omitted reason");
+        Expect(FindOmitted(pack.omitted, "secret.pem") != nullptr &&
+                       FindOmitted(pack.omitted, "secret.pem")->reason == "secret",
+               "tracked sensitive file omitted");
+        Expect(pack.diff.find("key-v2") == std::string::npos,
+               "tracked secret content must not enter the diff");
         Expect(pack.diff.find("SECRET=value") == std::string::npos,
                "secret content must not enter the diff");
         Expect(pack.diff.find("docs/review/") == std::string::npos,

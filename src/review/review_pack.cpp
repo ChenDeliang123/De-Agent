@@ -928,6 +928,11 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
             file.diff_bytes = it->second;
         }
         file.truncated = raw_diff.truncated;
+        if (IsSensitivePath(path)) {
+            omitted.push_back({path, "secret"});
+        } else if (file.binary) {
+            omitted.push_back({path, "binary"});
+        }
         changed_files.push_back(std::move(file));
     }
 

@@ -676,6 +676,17 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
         if (!path.empty()) {
             content = ExtractFileDiff(pack.diff, path);
             if (content.empty()) {
+                for (const auto& omitted : pack.omitted) {
+                    if (omitted.path == path) {
+                        nlohmann::json payload = stale_json();
+                        payload["mode"] = "diff";
+                        payload["path"] = path;
+                        payload["content"] = "";
+                        payload["omitted"] = true;
+                        payload["reason"] = omitted.reason;
+                        return Ok(payload);
+                    }
+                }
                 return Fail("no diff for path: " + path);
             }
             if (std::find(state.reviewed_files.begin(), state.reviewed_files.end(), path) ==
