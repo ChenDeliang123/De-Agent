@@ -42,7 +42,7 @@ int main() {
                 "verify_enabled = false\n"
                 "verify_timeout_s = 120\n"
                 "verify_output_bytes = 4096\n"
-                "verify_mode = in_place\n"
+                "verify_mode = copy\n"
                 "max_tool_rounds = 32\n"
                 "review_timeout_s = 600\n"
                 "checkpoint = false\n"
@@ -73,7 +73,7 @@ int main() {
                 "[review]\nmax_diff_bytes = 999999999\n",
                 "[review]\nverify_timeout_s = 0\n",
                 "[review]\nverify_timeout_s = 1801\n",
-                "[review]\nverify_mode = copy\n",
+                "[review]\nverify_mode = rsync\n",
                 "[review]\nmax_tool_rounds = 7\n",
                 "[review]\nreview_timeout_s = 59\n",
                 "[review]\nsupersede_policy = queue\n",

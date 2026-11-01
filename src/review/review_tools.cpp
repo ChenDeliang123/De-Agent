@@ -72,6 +72,120 @@ std::string ConsentPath(const std::string& data_dir) {
                                      "review_consent.json");
 }
 
+struct WorktreeGuard {
+    std::string repo;
+    std::string path;
+    bool active = false;
+
+    ~WorktreeGuard() {
+        if (!active || path.empty()) {
+            return;
+        }
+        RunArgvCapture({"git", "worktree", "remove", "--force", path}, repo, 120,
+                       65536);
+        std::error_code ec;
+        std::filesystem::remove_all(aiagent::platform::FromUtf8(path), ec);
+    }
+};
+
+bool PrepareCopyWorktree(const ReviewPack& pack, const ReviewConfig& config,
+                         WorktreeGuard* guard, std::string* error) {
+    namespace fs = std::filesystem;
+    const fs::path repo = aiagent::platform::FromUtf8(pack.repo_root);
+    std::error_code ec;
+    if (fs::exists(repo / ".gitmodules", ec) && !ec) {
+        if (error != nullptr) {
+            *error = "verify_mode=copy does not support submodules yet; use in_place";
+        }
+        return false;
+    }
+    const fs::path worktree = aiagent::platform::TempDir() /
+                              aiagent::platform::FromUtf8(
+                                      "de-review-" + pack.review_id + "-" +
+                                      NewReviewId());
+    if (fs::exists(worktree, ec) && !ec) {
+        fs::remove_all(worktree, ec);
+    }
+    const std::string worktree_text = aiagent::platform::ToUtf8(worktree);
+    const ArgvRunResult add = RunArgvCapture(
+            {"git", "worktree", "add", "--detach", worktree_text, pack.git.base_commit},
+            pack.repo_root, 120, 65536);
+    if (!add.started || add.exit_code != 0) {
+        if (error != nullptr) {
+            *error = "cannot create verification worktree: " + add.output + add.error;
+        }
+        return false;
+    }
+    guard->repo = pack.repo_root;
+    guard->path = worktree_text;
+    guard->active = true;
+
+    auto cleanup_fail = [&](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    const ArgvRunResult diff = RunArgvCapture(
+            {"git", "diff", "--no-color", "--no-ext-diff", pack.git.base_commit},
+            pack.repo_root, config.review_timeout_s, config.max_diff_bytes);
+    if (!diff.started || diff.exit_code != 0) {
+        return cleanup_fail("cannot read working-tree diff for copy: " + diff.output);
+    }
+    if (diff.truncated) {
+        return cleanup_fail("working-tree diff exceeds max_diff_bytes; cannot copy");
+    }
+    if (!diff.output.empty()) {
+        const fs::path patch = worktree / ".de-review.patch";
+        {
+            std::ofstream output(patch, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                return cleanup_fail("cannot write verification patch");
+            }
+            output << diff.output;
+        }
+        const ArgvRunResult apply = RunArgvCapture(
+                {"git", "apply", "--whitespace=nowarn", aiagent::platform::ToUtf8(patch)},
+                worktree_text, 120, 65536);
+        fs::remove(patch, ec);
+        if (!apply.started || apply.exit_code != 0) {
+            return cleanup_fail("cannot apply working-tree diff in copy: " + apply.output);
+        }
+    }
+
+    const ArgvRunResult untracked = RunArgvCapture(
+            {"git", "ls-files", "--others", "--exclude-standard"}, pack.repo_root, 60,
+            4 * 1024 * 1024);
+    if (!untracked.started || untracked.exit_code != 0) {
+        return cleanup_fail("cannot list untracked files for copy: " + untracked.output);
+    }
+    std::istringstream lines(untracked.output);
+    std::string relative;
+    while (std::getline(lines, relative)) {
+        if (relative.empty() || IsUnderReviewDir(relative, config)) {
+            continue;
+        }
+        const fs::path source = aiagent::platform::ResolveCanonicalPath(repo, relative);
+        if (!aiagent::platform::IsPathWithin(source, repo) ||
+            !fs::is_regular_file(source, ec) || ec) {
+            return cleanup_fail("unsupported untracked entry in copy: " + relative);
+        }
+        const fs::path target =
+                aiagent::platform::ResolveCanonicalPath(worktree, relative);
+        if (!aiagent::platform::IsPathWithin(target, worktree)) {
+            return cleanup_fail("untracked path escapes the verification copy: " +
+                                relative);
+        }
+        fs::create_directories(target.parent_path(), ec);
+        fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            return cleanup_fail("cannot copy untracked file: " + relative);
+        }
+    }
+    return true;
+}
+
 bool ResolvePackPath(const std::string& pack_arg, const tools::ToolContext& context,
                      fs::path* path, std::string* error) {
     if (pack_arg.empty()) {
@@ -222,6 +336,60 @@ ReviewTools::ReviewTools(ReviewToolOptions options, Mode mode,
           mode_(mode),
           history_provider_(std::move(history_provider)),
           pack_service_(ReviewPackServiceOptions{options_.config, options_.data_dir}) {}
+
+ReviewTools::~ReviewTools() {
+    CleanupCopyWorktree();
+}
+
+bool ReviewTools::EnsureCopyWorktree(const ReviewPack& pack, std::string* path,
+                                     std::string* error) {
+    std::lock_guard<std::mutex> lock(copy_mutex_);
+    std::error_code ec;
+    if (copy_worktree_review_id_ == pack.review_id &&
+        !copy_worktree_path_.empty() &&
+        std::filesystem::is_directory(
+                aiagent::platform::FromUtf8(copy_worktree_path_), ec) &&
+        !ec) {
+        if (path != nullptr) {
+            *path = copy_worktree_path_;
+        }
+        return true;
+    }
+    if (!copy_worktree_path_.empty()) {
+        RunArgvCapture({"git", "worktree", "remove", "--force", copy_worktree_path_},
+                       copy_worktree_repo_, 120, 65536);
+        std::filesystem::remove_all(aiagent::platform::FromUtf8(copy_worktree_path_), ec);
+        copy_worktree_path_.clear();
+        copy_worktree_repo_.clear();
+        copy_worktree_review_id_.clear();
+    }
+    WorktreeGuard guard;
+    if (!PrepareCopyWorktree(pack, options_.config, &guard, error)) {
+        return false;
+    }
+    guard.active = false;
+    copy_worktree_path_ = guard.path;
+    copy_worktree_repo_ = guard.repo;
+    copy_worktree_review_id_ = pack.review_id;
+    if (path != nullptr) {
+        *path = copy_worktree_path_;
+    }
+    return true;
+}
+
+void ReviewTools::CleanupCopyWorktree() {
+    std::lock_guard<std::mutex> lock(copy_mutex_);
+    if (copy_worktree_path_.empty()) {
+        return;
+    }
+    RunArgvCapture({"git", "worktree", "remove", "--force", copy_worktree_path_},
+                   copy_worktree_repo_, 120, 65536);
+    std::error_code ec;
+    std::filesystem::remove_all(aiagent::platform::FromUtf8(copy_worktree_path_), ec);
+    copy_worktree_path_.clear();
+    copy_worktree_repo_.clear();
+    copy_worktree_review_id_.clear();
+}
 
 void ReviewTools::EnsureClock(const ReviewPack& pack, const std::string& pack_relative,
                               ReviewState* state) {
@@ -1168,11 +1336,29 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
     if (!IsSafeRelativePath(selected->cwd, true)) {
         return Fail("verification cwd must stay inside the repository");
     }
-    const fs::path cwd =
-            aiagent::platform::ResolveCanonicalPath(repo_path, selected->cwd);
+    const bool copy_mode = options_.config.verify_mode == "copy";
+    fs::path run_root = repo_path;
+    fs::path cwd;
     std::error_code ec;
+    if (copy_mode) {
+        std::string copy_path;
+        std::string copy_error;
+        if (!EnsureCopyWorktree(pack, &copy_path, &copy_error)) {
+            return Fail(copy_error);
+        }
+        run_root = aiagent::platform::FromUtf8(copy_path);
+        cwd = aiagent::platform::ResolveCanonicalPath(run_root, selected->cwd);
+        if (!aiagent::platform::IsPathWithin(cwd, run_root)) {
+            return Fail("verification cwd escapes the verification copy");
+        }
+        if (!fs::is_directory(cwd, ec) && !ec) {
+            fs::create_directories(cwd, ec);
+        }
+    } else {
+        cwd = aiagent::platform::ResolveCanonicalPath(repo_path, selected->cwd);
+    }
     if (!fs::is_directory(cwd, ec) || ec ||
-        !aiagent::platform::IsPathWithin(cwd, repo_path)) {
+        !aiagent::platform::IsPathWithin(cwd, run_root)) {
         return Fail("verification cwd is not a directory inside the repository");
     }
 
@@ -1240,6 +1426,7 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
             {"truncated", run.truncated},
             {"source_modified", source_modified},
             {"invalid", source_modified || run.cancelled},
+            {"verify_mode", copy_mode ? "copy" : "in_place"},
             {"output", run.output},
             {"stale", false},
             {"stale_reasons", nlohmann::json::array()}};
@@ -1578,6 +1765,9 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     state.updated_at = LocalTimestampIso();
     std::string state_error;
     SaveReviewState(options_.config, pack.repo_root, state, &state_error);
+    if (input.status == "final") {
+        CleanupCopyWorktree();
+    }
 
     return Ok({{"path", written.path},
                {"bytes", written.bytes},

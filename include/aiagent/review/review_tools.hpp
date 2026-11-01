@@ -37,6 +37,7 @@ public:
 
     ReviewTools(ReviewToolOptions options, Mode mode,
                 HistoryProvider history_provider = {});
+    ~ReviewTools() override;
 
     std::vector<llm::ToolSpec> ListTools() override;
     std::vector<llm::ToolSpec> ListToolsFor(const std::string& working_directory) override;
@@ -89,6 +90,9 @@ private:
     bool LoadCachedLines(const std::string& path,
                          std::vector<std::string>* lines, bool* cache_hit,
                          std::string* error);
+    bool EnsureCopyWorktree(const ReviewPack& pack, std::string* path,
+                            std::string* error);
+    void CleanupCopyWorktree();
 
     ReviewPackService pack_service_;
     mutable std::mutex last_pack_mutex_;
@@ -98,6 +102,10 @@ private:
     mutable std::mutex read_cache_mutex_;
     mutable std::deque<ReadCacheEntry> read_cache_;
     mutable std::size_t read_cache_bytes_ = 0;
+    mutable std::mutex copy_mutex_;
+    std::string copy_worktree_path_;
+    std::string copy_worktree_repo_;
+    std::string copy_worktree_review_id_;
     // review_context/verify/report 记住当前 pack，供没有 pack 参数的
     // review_test_write 关联 state；多轮审核仍以显式 pack 参数为准。
     std::string last_pack_path_;

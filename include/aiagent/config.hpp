@@ -164,7 +164,7 @@ struct ReviewConfig {
     bool verify_enabled = true;
     long verify_timeout_s = 900;
     std::size_t verify_output_bytes = 32768;
-    // v1 只支持 in_place。
+    // in_place = 当前工作区；copy = git worktree 临时副本（P1）。
     std::string verify_mode = "in_place";
     // 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
     int max_tool_rounds = 64;

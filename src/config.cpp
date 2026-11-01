@@ -912,8 +912,8 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
                 return std::nullopt;
             }
         } else if (key == "verify_mode") {
-            if (value != "in_place") {
-                return bad("review.verify_mode only supports in_place in v1");
+            if (value != "in_place" && value != "copy") {
+                return bad("review.verify_mode must be in_place or copy");
             }
             config.verify_mode = value;
         } else if (key == "max_tool_rounds") {

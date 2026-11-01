@@ -143,7 +143,9 @@ model =
 verify_enabled = true
 verify_timeout_s = 900
 verify_output_bytes = 32768
-; v1 只支持 in_place。
+; in_place = 当前工作区执行；copy = git worktree 临时副本执行（P1）。
+; copy 会把 working-tree diff 与 untracked 文件叠加到副本，测试改副本不会影响
+; 原工作区；含 submodule 的仓库暂不支持 copy，会明确报错。
 verify_mode = in_place
 ; 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
 max_tool_rounds = 64
