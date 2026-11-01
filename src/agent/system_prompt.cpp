@@ -336,6 +336,14 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
                 "Use `review_verify(list=true)` before running commands; execute only "
                 "declared `pack:<id>` or `project:<id>` commands. Report the exit code, "
                 "duration, timeout, and `source_modified` exactly as returned.");
+        if (HasTool(tools, "review_setup")) {
+            rules.Add(
+                    "If `review_verify(list=true)` returns no commands, you MUST call "
+                    "`review_setup(action=detect)` before declaring verification "
+                    "unavailable. If detection finds candidates, ask the user to approve "
+                    "`review_setup(save)`; only when detection is empty or the user refuses "
+                    "may you proceed statically and record the gap in `unverified`.");
+        }
     }
     if (HasTool(tools, "review_test_write")) {
         rules.Add(

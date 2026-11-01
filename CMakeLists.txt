@@ -288,6 +288,14 @@ if(AIAGENT_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
   endif()
 
+  add_executable(review_truncated_test tests/review_truncated_test.cpp)
+  target_link_libraries(review_truncated_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_truncated COMMAND review_truncated_test)
+
+  add_executable(review_utf8_test tests/review_utf8_test.cpp)
+  target_link_libraries(review_utf8_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_utf8 COMMAND review_utf8_test)
+
   add_executable(review_job_test tests/review_job_test.cpp)
   target_link_libraries(review_job_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_review_job COMMAND review_job_test)

@@ -70,7 +70,7 @@ struct ReviewReportResult {
 // 路径完全由 pack 文件名推导，调用方不能指定。
 class ReviewReportWriter {
 public:
-    explicit ReviewReportWriter(ReviewConfig config);
+    explicit ReviewReportWriter(ReviewConfig config, std::string data_dir = {});
 
     ReviewReportResult Write(const std::string& repo_root, const ReviewPack& pack,
                              const std::string& pack_relative_path,
@@ -80,6 +80,7 @@ public:
 
 private:
     ReviewConfig config_;
+    std::string data_dir_;
 };
 
 std::string ReviewVerdictName(const std::string& verdict);

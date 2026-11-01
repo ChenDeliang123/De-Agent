@@ -126,30 +126,64 @@ std::string HexSuffix(std::size_t bytes) {
     return output;
 }
 
+std::string UnquoteGitPath(std::string value) {
+    value = Trim(value);
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        value = value.substr(1, value.size() - 2);
+        std::string unescaped;
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            if (value[i] == '\\' && i + 1 < value.size()) {
+                const char next = value[++i];
+                switch (next) {
+                    case 'n':
+                        unescaped.push_back('\n');
+                        break;
+                    case 't':
+                        unescaped.push_back('\t');
+                        break;
+                    case 'r':
+                        unescaped.push_back('\r');
+                        break;
+                    default:
+                        unescaped.push_back(next);
+                        break;
+                }
+            } else {
+                unescaped.push_back(value[i]);
+            }
+        }
+        return unescaped;
+    }
+    return value;
+}
+
+std::string DiffHeaderPath(const std::string& line, char side) {
+    const std::string prefix = side == 'b' ? "+++ " : "--- ";
+    if (line.rfind(prefix, 0) != 0) {
+        return {};
+    }
+    std::string value = UnquoteGitPath(Trim(line.substr(4)));
+    if (value.empty() || value == "/dev/null") {
+        return {};
+    }
+    if (value.size() >= 2 && value[0] == side && value[1] == '/') {
+        value = value.substr(2);
+    }
+    return value;
+}
+
 std::string PathFromDiffSection(const std::string& section) {
     std::istringstream lines(section);
     std::string line;
     std::string minus_path;
     while (std::getline(lines, line)) {
-        auto clean = [](std::string value) {
-            if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-                value = value.substr(1, value.size() - 2);
-            }
-            std::string unescaped;
-            for (std::size_t i = 0; i < value.size(); ++i) {
-                if (value[i] == '\\' && i + 1 < value.size()) {
-                    unescaped.push_back(value[++i]);
-                } else {
-                    unescaped.push_back(value[i]);
-                }
-            }
-            return value;
-        };
-        if (line.rfind("+++ b/", 0) == 0) {
-            return clean(line.substr(6));
+        const std::string plus = DiffHeaderPath(line, 'b');
+        if (!plus.empty()) {
+            return plus;
         }
-        if (line.rfind("--- a/", 0) == 0) {
-            minus_path = clean(line.substr(6));
+        const std::string minus = DiffHeaderPath(line, 'a');
+        if (!minus.empty()) {
+            minus_path = minus;
         }
     }
     return minus_path;
@@ -201,6 +235,7 @@ std::vector<std::string> ChangedPathsFromNameStatus(const std::string& text) {
         if (last_tab != std::string::npos) {
             rest = rest.substr(last_tab + 1);
         }
+        rest = UnquoteGitPath(rest);
         if (!rest.empty()) {
             paths.push_back(rest);
         }
@@ -215,7 +250,7 @@ std::string NormalizeRenamePath(std::string path) {
     }
     path.erase(std::remove(path.begin(), path.end(), '{'), path.end());
     path.erase(std::remove(path.begin(), path.end(), '}'), path.end());
-    return Trim(path);
+    return UnquoteGitPath(Trim(path));
 }
 
 std::string ReadFileLimited(const fs::path& path, std::size_t limit, bool* truncated,
@@ -375,6 +410,20 @@ ReviewWorkspaceDigest ComputeDigestInternal(
 }
 
 }  // namespace
+
+bool IsValidReviewId(const std::string& review_id) {
+    if (review_id.empty() || review_id.size() > 80) {
+        return false;
+    }
+    for (const char c : review_id) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
 
 std::string LocalTimestampCompact() {
     const auto now = std::chrono::system_clock::now();
@@ -608,6 +657,12 @@ bool LoadReviewPack(const std::string& path, ReviewPack* pack, std::string* erro
             return false;
         }
         parsed.review_id = json.value("review_id", std::string());
+        if (!IsValidReviewId(parsed.review_id)) {
+            if (error != nullptr) {
+                *error = "review pack has an invalid review_id";
+            }
+            return false;
+        }
         parsed.feature = json.value("feature", std::string());
         parsed.created_at = json.value("created_at", std::string());
         parsed.cwd = json.value("cwd", std::string());
@@ -732,6 +787,12 @@ ReviewStaleResult CheckReviewStale(const ReviewPack& pack, const ReviewConfig& c
     if (pack.git.base_commit.empty()) {
         result.stale = true;
         result.reasons.push_back("review pack has no base commit");
+        return result;
+    }
+    if (pack.diff_truncated) {
+        result.stale = true;
+        result.reasons.push_back(
+                "pack diff exceeded max_diff_bytes; freshness cannot be verified");
         return result;
     }
     result.digest = ComputeWorkspaceDigest(repo_root, pack.git.base_commit, config,
@@ -913,6 +974,7 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
                 if (last_tab != std::string::npos) {
                     candidate = candidate.substr(last_tab + 1);
                 }
+                candidate = UnquoteGitPath(candidate);
                 if (candidate == path) {
                     file.status = line.substr(0, first_tab).substr(0, 1);
                     break;

@@ -249,7 +249,8 @@ bool LoadPreviousReviewSummary(const std::string& repo_root,
 }
 
 
-ReviewReportWriter::ReviewReportWriter(ReviewConfig config) : config_(std::move(config)) {}
+ReviewReportWriter::ReviewReportWriter(ReviewConfig config, std::string data_dir)
+        : config_(std::move(config)), data_dir_(std::move(data_dir)) {}
 
 ReviewReportResult ReviewReportWriter::Write(
         const std::string& repo_root, const ReviewPack& pack,
@@ -303,7 +304,30 @@ ReviewReportResult ReviewReportWriter::Write(
     for (const auto& command : pack.verification) {
         declared.insert(command.source + ":" + command.id);
     }
+    // pack 创建后才通过 review_setup(save) 同意的 project 命令也应可引用；
+    // 仍然要求 state 里存在真实执行记录。
+    ProjectVerifyConfig project_config;
+    std::string project_error;
+    const bool has_project_config =
+            LoadProjectVerifyConfig(repo_root, &project_config, &project_error);
+    {
+        ReviewConsentStore consent(
+                data_dir_.empty()
+                        ? std::string()
+                        : aiagent::platform::ToUtf8(
+                                  aiagent::platform::FromUtf8(data_dir_) /
+                                  "review_consent.json"));
+        if (has_project_config &&
+            consent.Check(repo_root, project_config.sha256).status == "valid") {
+            for (const auto& command : project_config.commands) {
+                declared.insert("project:" + command.id);
+            }
+        }
+    }
     for (const auto& ref : input.verification) {
+        if (ref.command_id.empty()) {
+            return fail("verification entry has an empty command id");
+        }
         std::string source = ref.source;
         if (source.empty()) {
             for (const auto& command : pack.verification) {
@@ -313,9 +337,13 @@ ReviewReportResult ReviewReportWriter::Write(
                 }
             }
         }
+        if (source.empty() || (source != "pack" && source != "project")) {
+            return fail("verification entry must be a pack:<id> or project:<id> "
+                        "reference: " + ref.command_id);
+        }
         const std::string key = source + ":" + ref.command_id;
         if (declared.count(key) == 0) {
-            return fail("verification command is not declared in the pack: " + key);
+            return fail("verification command is not declared or consented: " + key);
         }
         if (FindVerification(state, ref.command_id, source) == nullptr) {
             return fail("verification command was not executed: " + key);
@@ -411,10 +439,8 @@ ReviewReportResult ReviewReportWriter::Write(
     }
 
     // reviewer-owned 测试文件：必须是状态记录里的文件，且内容未被外部改动。
-    ProjectVerifyConfig project_config;
-    std::string project_error;
     std::vector<std::string> test_globs;
-    if (LoadProjectVerifyConfig(repo_root, &project_config, &project_error)) {
+    if (has_project_config) {
         test_globs = project_config.test_globs;
     }
     std::set<std::string> reported_tests;

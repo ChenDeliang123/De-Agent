@@ -31,7 +31,8 @@ namespace fs = std::filesystem;
 tools::ToolExecutionResult Ok(nlohmann::json payload) {
     tools::ToolExecutionResult result;
     result.ok = true;
-    result.text = payload.dump(2);
+    result.text = payload.dump(2, ' ', false,
+                               nlohmann::json::error_handler_t::replace);
     return result;
 }
 
@@ -62,6 +63,17 @@ std::string RepoRootFor(const tools::ToolContext& context) {
     std::error_code ec;
     return aiagent::platform::ToUtf8(
             fs::weakly_canonical(aiagent::platform::FromUtf8(context.working_directory), ec));
+}
+
+std::size_t AlignUtf8Start(const std::string& text, std::size_t offset) {
+    if (offset >= text.size()) {
+        return text.size();
+    }
+    while (offset < text.size() &&
+           (static_cast<unsigned char>(text[offset]) & 0xC0U) == 0x80U) {
+        ++offset;
+    }
+    return offset;
 }
 
 std::string ConsentPath(const std::string& data_dir) {
@@ -96,6 +108,12 @@ bool PrepareCopyWorktree(const ReviewPack& pack, const ReviewConfig& config,
     if (fs::exists(repo / ".gitmodules", ec) && !ec) {
         if (error != nullptr) {
             *error = "verify_mode=copy does not support submodules yet; use in_place";
+        }
+        return false;
+    }
+    if (!IsValidReviewId(pack.review_id)) {
+        if (error != nullptr) {
+            *error = "review pack has an invalid review_id";
         }
         return false;
     }
@@ -219,31 +237,88 @@ void LoadState(const ReviewPack& pack, const std::string& pack_rel,
     }
 }
 
+std::string CleanDiffPath(std::string value) {
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
+                              value.back() == '\t')) {
+        value.pop_back();
+    }
+    while (!value.empty() &&
+           (value.front() == ' ' || value.front() == '\t')) {
+        value.erase(value.begin());
+    }
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        value = value.substr(1, value.size() - 2);
+        std::string unescaped;
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            if (value[i] == '\\' && i + 1 < value.size()) {
+                const char next = value[++i];
+                if (next == 'n') {
+                    unescaped.push_back('\n');
+                } else if (next == 't') {
+                    unescaped.push_back('\t');
+                } else if (next == 'r') {
+                    unescaped.push_back('\r');
+                } else {
+                    unescaped.push_back(next);
+                }
+            } else {
+                unescaped.push_back(value[i]);
+            }
+        }
+        return unescaped;
+    }
+    return value;
+}
+
+std::string DiffHeaderPathLocal(const std::string& line, char side) {
+    const std::string prefix = side == 'b' ? "+++ " : "--- ";
+    if (line.rfind(prefix, 0) != 0) {
+        return {};
+    }
+    std::string value = CleanDiffPath(line.substr(4));
+    if (value.empty() || value == "/dev/null") {
+        return {};
+    }
+    if (value.size() >= 2 && value[0] == side && value[1] == '/') {
+        value = value.substr(2);
+    }
+    return value;
+}
+
 std::string ExtractFileDiff(const std::string& diff, const std::string& path) {
     std::istringstream lines(diff);
     std::string line;
-    std::string current;
-    bool matched = false;
-    std::ostringstream output;
+    std::string section;
+    std::string section_path;
+    std::string output;
+    auto flush = [&]() {
+        if (!section.empty() && section_path == path) {
+            output += section;
+        }
+        section.clear();
+        section_path.clear();
+    };
     while (std::getline(lines, line)) {
         if (line.rfind("diff --git ", 0) == 0) {
-            if (matched) {
-                break;
-            }
-            matched = false;
-            current = line;
-            // 头部同时含 a/ 与 b/；用 b/ 路径做匹配。
-            const std::size_t b_pos = line.find(" b/");
-            if (b_pos != std::string::npos) {
-                const std::string candidate = line.substr(b_pos + 3);
-                matched = candidate == path;
-            }
+            flush();
+            section = line;
+            section.push_back('\n');
+            continue;
         }
-        if (matched) {
-            output << line << '\n';
+        if (section.empty()) {
+            continue;
+        }
+        section += line;
+        section.push_back('\n');
+        if (section_path.empty()) {
+            section_path = DiffHeaderPathLocal(line, 'b');
+            if (section_path.empty()) {
+                section_path = DiffHeaderPathLocal(line, 'a');
+            }
         }
     }
-    return output.str();
+    flush();
+    return output;
 }
 
 std::vector<ReviewCommand> ParseCommands(const nlohmann::json& value, std::string* error) {
@@ -670,7 +745,10 @@ std::vector<llm::ToolSpec> ReviewTools::ListTools() {
             "draft can be incomplete; final requires a verdict and consistent findings.",
             "Write the review report",
             {"Write a draft during long reviews, then a final report with verdict.",
-             "Every finding needs path:line, evidence, impact, trigger, suggestion, confidence."},
+             "Every finding needs path:line, evidence, impact, trigger, suggestion, confidence.",
+             "verification[] only contains refs (pack:<id> / project:<id>) that were "
+             "executed via review_verify; put human-readable verification notes in "
+             "checked/unverified/notes."},
             ObjectSchema({{"pack", StringProp("Review pack path")},
                           {"status", {{"type", "string"}, {"enum", {"draft", "final"}}}},
                           {"verdict", {{"type", "string"},
@@ -692,7 +770,18 @@ std::vector<llm::ToolSpec> ReviewTools::ListTools() {
                                                      {"confidence", StringProp("high/medium/low")},
                                                      {"status", StringProp("open/resolved/still_open/regressed")}}}}}}},
                           {"checked", {{"type", "array"}, {"items", {{"type", "string"}}}}},
-                          {"verification", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                          {"verification",
+                           {{"type", "array"},
+                            {"items",
+                             {{"oneOf",
+                               {{{"type", "string"}},
+                                {{"type", "object"},
+                                 {"properties",
+                                  {{"command_id", StringProp("command id")},
+                                   {"source", StringProp("pack or project")}}}}}}}},
+                            {"description",
+                             "Only command refs (pack:<id> / project:<id>) that were "
+                             "actually executed via review_verify; do not put prose here."}}},
                           {"test_files", {{"type", "array"}, {"items", {{"type", "string"}}}}},
                           {"unverified", {{"type", "array"}, {"items", {{"type", "string"}}}}},
                           {"open_questions", {{"type", "array"}, {"items", {{"type", "string"}}}}},
@@ -956,7 +1045,10 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
         if (offset > content.size()) {
             offset = content.size();
         }
-        const std::string slice = content.substr(offset, limit);
+        // 分页边界不能落在 UTF-8 续字节上，否则 JSON 序列化会拒绝整页。
+        offset = AlignUtf8Start(content, offset);
+        std::string slice = content.substr(offset, limit);
+        aiagent::platform::TrimIncompleteUtf8Suffix(&slice);
         nlohmann::json payload = stale_json();
         payload["mode"] = "diff";
         payload["path"] = path;
@@ -1517,6 +1609,21 @@ tools::ToolExecutionResult ReviewTools::TestWrite(const nlohmann::json& argument
         final_content += content;
     }
 
+    // 任何写盘动作之前先检查总时限与 stale；避免超时/过期后仍留下测试文件。
+    ReviewState state;
+    LoadState(pack, rel_path, options_.config, &state);
+    EnsureClock(pack, rel_path, &state);
+    if (DeadlineExceeded()) {
+        return Fail("review_timeout_s exceeded; write a partial blocked report instead of "
+                    "adding more tests");
+    }
+    const auto owned_before_write = ReviewerOwnedTestPaths(state, pack.repo_root);
+    const ReviewStaleResult stale_before_write =
+            CheckReviewStale(pack, options_.config, pack.repo_root, owned_before_write);
+    if (stale_before_write.stale) {
+        return Fail("review pack is stale; write a blocked report instead of adding tests");
+    }
+
     const fs::path parent = target.parent_path();
     if (!parent.empty()) {
         fs::create_directories(parent, ec);
@@ -1545,13 +1652,6 @@ tools::ToolExecutionResult ReviewTools::TestWrite(const nlohmann::json& argument
     }
     const std::string sha = aiagent::util::Sha256Hex(final_content);
 
-    ReviewState state;
-    LoadState(pack, rel_path, options_.config, &state);
-    EnsureClock(pack, rel_path, &state);
-    if (DeadlineExceeded()) {
-        return Fail("review_timeout_s exceeded; write a partial blocked report instead of "
-                    "adding more tests");
-    }
     bool replaced = false;
     for (auto& record : state.reviewer_tests) {
         if (record.path == path) {
@@ -1755,7 +1855,7 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     if (pack_sha.empty()) {
         return Fail("cannot hash review pack: " + error);
     }
-    ReviewReportWriter writer(options_.config);
+    ReviewReportWriter writer(options_.config, options_.data_dir);
     const ReviewReportResult written =
             writer.Write(pack.repo_root, pack, rel_path, pack_sha, stale, state, input);
     if (!written.ok) {

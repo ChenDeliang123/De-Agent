@@ -71,6 +71,8 @@ int main() {
                 repo + "/mutate.cmake",
                 "file(WRITE \"${CMAKE_CURRENT_LIST_DIR}/src/foo.cpp\" "
                 "\"int foo() { return 77; }\\n\")\n");
+        review_test_support::WriteFile(repo + "/tests/quote\"name_test.cpp",
+                                       "TEST(Quote, Base) {}\n");
         review_test_support::WriteFile(repo + "/.gitignore", "build/\n");
         Expect(review_test_support::CommitAll(repo, "base"), "commit base");
 
@@ -126,6 +128,8 @@ int main() {
         // 生成 pack：改源码 + untracked 测试 + 声明 ctest 命令。
         review_test_support::WriteFile(repo + "/src/foo.cpp",
                                        "int foo() { return 2; }\n");
+        review_test_support::WriteFile(repo + "/tests/quote\"name_test.cpp",
+                                       "TEST(Quote, Base) {}\nTEST(Quote, Changed) {}\n");
         review_test_support::WriteFile(repo + "/tests/original_test.cpp",
                                        "TEST(Original, Case) {}\n");
         review::ReviewPackServiceOptions pack_options;
@@ -169,8 +173,26 @@ int main() {
         auto diff = Parse(reviewer.Execute(
                 "review_context",
                 {{"pack", pack_path}, {"mode", "diff"}, {"path", "src/foo.cpp"}}, context));
-        Expect(diff["content"].get<std::string>().find("return 2") != std::string::npos,
+        Expect(!diff.contains("__error") && diff["content"].is_string() &&
+                       diff["content"].get<std::string>().find("return 2") != std::string::npos,
                "diff slice: " + diff.dump());
+        auto quoted_diff = Parse(reviewer.Execute(
+                "review_context",
+                {{"pack", pack_path},
+                 {"mode", "diff"},
+                 {"path", "tests/quote\"name_test.cpp"}},
+                context));
+        Expect(!quoted_diff.contains("__error") &&
+                       quoted_diff["content"].get<std::string>().find("TEST(Quote, Changed)") !=
+                               std::string::npos,
+               "quoted diff path should resolve: " + quoted_diff.dump());
+        bool quoted_changed_file = false;
+        for (const auto& file : manifest["changed_files"]) {
+            if (file.value("path", std::string()) == "tests/quote\"name_test.cpp") {
+                quoted_changed_file = true;
+            }
+        }
+        Expect(quoted_changed_file, "quoted changed path should be unescaped");
         auto untracked = Parse(reviewer.Execute(
                 "review_context",
                 {{"pack", pack_path}, {"mode", "untracked"},
@@ -278,6 +300,18 @@ int main() {
                 context);
         Expect(draft.ok, "draft report: " + draft.error);
 
+        auto prose_verification = reviewer.Execute(
+                "review_report",
+                {{"pack", pack_path},
+                 {"status", "draft"},
+                 {"summary", "prose verification"},
+                 {"verification", {"V1 cmake --build build -j: exit=0"}}},
+                context);
+        Expect(!prose_verification.ok &&
+                       prose_verification.error.find("reference") != std::string::npos,
+               "verification must be command refs, not prose: " +
+                       prose_verification.error);
+
         auto fabricated = reviewer.Execute(
                 "review_report",
                 {{"pack", pack_path},
@@ -303,6 +337,12 @@ int main() {
                 {"suggestion", "return 1"},
                 {"confidence", "high"},
                 {"status", "open"}};
+        auto project_verified = reviewer.Execute(
+                "review_verify",
+                {{"pack", pack_path}, {"source", "project"}, {"command_id", "test"}},
+                context);
+        Expect(project_verified.ok, "project verification executed: " + project_verified.error);
+
         auto final = reviewer.Execute(
                 "review_report",
                 {{"pack", pack_path},
@@ -311,7 +351,7 @@ int main() {
                  {"summary", "one major issue"},
                  {"findings", nlohmann::json::array({finding})},
                  {"checked", {"manifest", "diff"}},
-                 {"verification", {"pack:v1"}},
+                 {"verification", {"pack:v1", "project:test"}},
                  {"test_files", {"tests/review_owned_test.cpp"}},
                  {"unverified", {"project test command not run"}}},
                 context);
@@ -348,6 +388,20 @@ int main() {
         auto stale = Parse(reviewer.Execute(
                 "review_context", {{"pack", pack_path}, {"mode", "manifest"}}, context));
         Expect(stale.value("stale", false), "source change marks stale");
+
+        const std::string stale_test = "tests/review_stale_should_not_write.cpp";
+        auto stale_write = reviewer.Execute(
+                "review_test_write",
+                {{"pack", pack_path},
+                 {"path", stale_test},
+                 {"content", "TEST(Stale, MustNotWrite) {}\n"},
+                 {"mode", "create"}},
+                context);
+        Expect(!stale_write.ok &&
+                       stale_write.error.find("stale") != std::string::npos,
+               "stale test write must be rejected: " + stale_write.error);
+        Expect(!std::filesystem::exists(repo + "/" + stale_test),
+               "stale test write must not create a file");
         auto blocked = reviewer.Execute(
                 "review_report",
                 {{"pack", pack_path},
@@ -386,6 +440,19 @@ int main() {
                     "review_context", {{"pack", pack_path}, {"mode", "manifest"}}, context));
             Expect(expired["review_state"].value("timed_out", false),
                    "manifest should report timeout: " + expired.dump());
+            const std::string timeout_test = "tests/review_timeout_should_not_write.cpp";
+            auto timeout_write = reviewer.Execute(
+                    "review_test_write",
+                    {{"pack", pack_path},
+                     {"path", timeout_test},
+                     {"content", "TEST(Timeout, MustNotWrite) {}\n"},
+                     {"mode", "create"}},
+                    context);
+            Expect(!timeout_write.ok &&
+                           timeout_write.error.find("review_timeout_s") != std::string::npos,
+                   "timeout test write must be rejected: " + timeout_write.error);
+            Expect(!std::filesystem::exists(repo + "/" + timeout_test),
+                   "timeout test write must not create a file");
             const auto denied = reviewer.Execute(
                     "review_read",
                     {{"files", nlohmann::json::array({{{"path", "README.md"}}})}},

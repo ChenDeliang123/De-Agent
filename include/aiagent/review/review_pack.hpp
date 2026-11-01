@@ -135,6 +135,9 @@ struct ReviewPackServiceOptions {
 // 失败时返回空并写 error。
 std::string NormalizeFeature(const std::string& feature, std::string* error = nullptr);
 
+// review_id 会进入 state/worktree 文件名；只允许安全文件名字符，防止路径穿越。
+bool IsValidReviewId(const std::string& review_id);
+
 std::string LocalTimestampCompact();
 std::string LocalTimestampIso();
 std::string NewReviewId();

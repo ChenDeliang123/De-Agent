@@ -89,6 +89,9 @@ nlohmann::json ToJson(const ReviewState& state) {
 
 std::string ReviewStatePath(const ReviewConfig& config, const std::string& repo_root,
                             const std::string& review_id) {
+    if (!IsValidReviewId(review_id)) {
+        return {};
+    }
     return aiagent::platform::ToUtf8(
             aiagent::platform::FromUtf8(ReviewStateDir(config, repo_root)) /
             aiagent::platform::FromUtf8(review_id + ".json"));
@@ -104,6 +107,12 @@ bool LoadReviewState(const ReviewConfig& config, const std::string& repo_root,
         return false;
     }
     const std::string path = ReviewStatePath(config, repo_root, review_id);
+    if (path.empty()) {
+        if (error != nullptr) {
+            *error = "invalid review_id for review state";
+        }
+        return false;
+    }
     std::ifstream input(aiagent::platform::FromUtf8(path));
     if (!input) {
         if (error != nullptr) {
@@ -170,6 +179,12 @@ bool LoadReviewState(const ReviewConfig& config, const std::string& repo_root,
 bool SaveReviewState(const ReviewConfig& config, const std::string& repo_root,
                      const ReviewState& state, std::string* error) {
     const std::string path = ReviewStatePath(config, repo_root, state.review_id);
+    if (path.empty()) {
+        if (error != nullptr) {
+            *error = "invalid review_id for review state";
+        }
+        return false;
+    }
     return WriteAtomic(aiagent::platform::FromUtf8(path), ToJson(state).dump(2), error);
 }
 

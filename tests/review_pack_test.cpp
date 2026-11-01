@@ -236,6 +236,19 @@ int main() {
         Expect(weak_pack.request_text.find("Recent commits") != std::string::npos,
                "git log excerpt present");
 
+        // review_id 必须能安全进入 state/worktree 文件名。
+        const std::string bad_pack = repo + "/docs/review/inbox/bad-id.json";
+        review_test_support::WriteFile(
+                bad_pack,
+                R"({"schema":1,"review_id":"../../evil","feature":"x","repo_root":")" +
+                        repo + R"(","git":{"base_commit":"HEAD"}})");
+        review::ReviewPack bad_loaded;
+        Expect(!review::LoadReviewPack(bad_pack, &bad_loaded, &error) &&
+                       error.find("invalid review_id") != std::string::npos,
+               "path-traversal review_id must be rejected: " + error);
+        Expect(review::ReviewStatePath(options.config, repo, "../../evil").empty(),
+               "invalid review_id must not produce a state path");
+
         // 文件名安全化。
         std::string feature_error;
         Expect(review::NormalizeFeature("a b\tc") == "a-b-c", "whitespace collapse");

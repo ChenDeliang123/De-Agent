@@ -50,6 +50,9 @@ int main() {
         Expect(prompt.find("Simplified Chinese") != std::string::npos &&
                        prompt.find("report prose") != std::string::npos,
                "report prose language should default to Simplified Chinese");
+        Expect(prompt.find("review_setup(action=detect)") != std::string::npos &&
+                       prompt.find("returns no commands") != std::string::npos,
+               "empty verification list should force review_setup(detect)");
         Expect(prompt.find("<report_contract>") != std::string::npos &&
                        prompt.find("approved_with_notes") != std::string::npos,
                "report contract should be present");
