@@ -269,7 +269,12 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
              "`unverified`.\n"
              "- If a tool reports `review_timeout_s exceeded`, stop reading/running "
              "commands and immediately write a partial final report with `verdict=blocked` "
-             "and the findings/evidence you already have.\n",
+             "and the findings/evidence you already have.\n"
+             "- Write the report prose in Simplified Chinese (中文正文): summary, finding "
+             "titles, evidence prose, impact, trigger, suggestion, checked/unverified/"
+             "open_questions, and notes. Keep code, file paths, command names, finding ids, "
+             "and severity/verdict/status enum values in English. If the user writes "
+             "Chinese, reply in Chinese.\n",
              true});
 
     sections.push_back(
