@@ -154,7 +154,8 @@ checkpoint = true
 draft_report = true
 chunk_files = 20
 chunk_diff_bytes = 262144
-; 后台队列（P1 预留）。
+; 后台队列（P1）：true 时 de review --background 可用。
+; 同一仓库并发 1 个、排队上限 4；同 repo+feature+branch 新任务顶掉旧任务。
 background_enabled = false
 max_concurrent_jobs = 1
 max_queued_jobs = 4

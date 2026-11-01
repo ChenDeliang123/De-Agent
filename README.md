@@ -631,6 +631,30 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 - `review_report`：固定写到 `docs/review/<feature>-<YYYYMMDD-HHMM>.md`；
   final 报告必须有 verdict，且 finding/验证/测试文件与状态记录一致。
 
+第二轮（P1）：生成 pack 时带 `--previous-report <上一份报告>`，reviewer 用
+`review_context(mode=delta)` 看两轮之间的文件变化，并沿用旧 finding id 标记
+`resolved` / `still_open` / `regressed`；新问题从旧 id 之后编号。
+
+后台审核（P1，需 `[review] background_enabled=true`）：
+
+```bash
+de review --background docs/review/inbox/<pack>.json [--session <coding-session>]
+de review status [job_id]
+de review cancel <job_id>
+de review attach <job_id>
+```
+
+后台任务使用独立 reviewer 会话与工具实例；同一仓库同时只跑 1 个任务，排队上限
+`max_queued_jobs`；同 repo+feature+branch 的新 pack 会顶掉旧的 queued/running 任务
+（`superseded`）。后端重启后 running 任务标 `interrupted`，可从 checkpoint
+`--resume`。后台只自动执行“用户已同意的 project 验证命令”；pack 特有命令、
+`review_test_write`、`review_setup(save)` 会拒绝并要求写进 `unverified`。
+完成后向发起会话推送 `review_ready` 事件（无活跃流时用 `de review status` 查询）。
+
+`[review] verify_mode=copy` 时，`review_verify` 在 `git worktree` 临时副本中执行声明
+的 argv（叠加 working-tree diff 与 untracked 文件），测试改副本不会污染原工作区；
+含 submodule 的仓库暂不支持 copy。
+
 没有通用 `write`/`edit`/`bash`/`task`/MCP 工具；`full` 权限下 reviewer 也不能读
 仓库外路径。`[review] enabled=false` 时 coding 工具集不出现 `review_handoff`，
 `de review` 在启动前明确报错。配置项见 `conf/app.ini.example` 的 `[review]`。
