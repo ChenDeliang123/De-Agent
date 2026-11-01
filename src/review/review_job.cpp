@@ -232,12 +232,34 @@ bool ReviewJobManager::Submit(const std::string& pack_path,
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (stopping_) {
+        return fail("review job manager is shutting down");
+    }
     const std::string normalized_repo =
             aiagent::platform::NormalizePathKey(repo);
+    auto same_key = [&](const ReviewJob& existing) {
+        return aiagent::platform::NormalizePathKey(existing.repo_root) ==
+                       normalized_repo &&
+               existing.feature == pack.feature &&
+               existing.branch == pack.git.branch;
+    };
+    // 先按“顶掉同 key 旧任务后”的队列数判断容量，避免为了新任务先丢掉旧任务、
+    // 最后却因其它 feature 占满队列而拒绝。
+    int queued_after_supersede = 0;
+    for (const auto& [id, existing] : jobs_) {
+        (void)id;
+        if (existing.state == "queued" && !same_key(existing)) {
+            ++queued_after_supersede;
+        }
+    }
+    if (config_.max_queued_jobs > 0 &&
+        queued_after_supersede >= config_.max_queued_jobs) {
+        return fail("review queue is full (" + std::to_string(config_.max_queued_jobs) +
+                    ")");
+    }
+
     for (auto& [id, existing] : jobs_) {
-        if (aiagent::platform::NormalizePathKey(existing.repo_root) != normalized_repo ||
-            existing.feature != pack.feature ||
-            existing.branch != pack.git.branch) {
+        if (!same_key(existing)) {
             continue;
         }
         if (existing.state == "queued" || existing.state == "running" ||
@@ -249,18 +271,6 @@ bool ReviewJobManager::Submit(const std::string& pack_path,
             }
             queue_.erase(std::remove(queue_.begin(), queue_.end(), id), queue_.end());
         }
-    }
-
-    int queued = 0;
-    for (const auto& [id, existing] : jobs_) {
-        (void)id;
-        if (existing.state == "queued") {
-            ++queued;
-        }
-    }
-    if (config_.max_queued_jobs > 0 && queued >= config_.max_queued_jobs) {
-        return fail("review queue is full (" + std::to_string(config_.max_queued_jobs) +
-                    ")");
     }
 
     ReviewJob created;
