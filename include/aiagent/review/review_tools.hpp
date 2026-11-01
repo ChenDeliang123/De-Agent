@@ -3,6 +3,8 @@
 #include <json.hpp>
 
 #include <atomic>
+#include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -64,10 +66,23 @@ private:
     void EnsureClock(const ReviewPack& pack, const std::string& pack_relative,
                      ReviewState* state);
     bool DeadlineExceeded() const;
+    bool LoadPack(const std::string& pack_arg, const tools::ToolContext& context,
+                  ReviewPack* pack, std::string* abs_path, std::string* rel_path,
+                  std::string* error);
+
+    struct PackCacheEntry {
+        std::string path;
+        std::filesystem::file_time_type mtime;
+        std::uintmax_t size = 0;
+        std::string relative_path;
+        ReviewPack pack;
+    };
 
     ReviewPackService pack_service_;
     mutable std::mutex last_pack_mutex_;
     std::atomic<long long> deadline_epoch_s_{0};
+    mutable std::mutex cache_mutex_;
+    mutable std::deque<PackCacheEntry> pack_cache_;
     // review_context/verify/report 记住当前 pack，供没有 pack 参数的
     // review_test_write 关联 state；多轮审核仍以显式 pack 参数为准。
     std::string last_pack_path_;

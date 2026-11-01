@@ -1087,6 +1087,10 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
     if (pack.producer.kind.empty()) {
         pack.producer.kind = "manual";
     }
+    if (pack.producer.kind != "de-session" && pack.producer.kind != "external" &&
+        pack.producer.kind != "manual") {
+        return fail("producer.kind must be de-session, external, or manual");
+    }
     pack.request_text = request_text;
     pack.notes = request.notes;
     pack.context_paths = std::move(context_paths);

@@ -70,47 +70,22 @@ std::string ConsentPath(const std::string& data_dir) {
                                      "review_consent.json");
 }
 
-bool LoadPackForTool(const std::string& pack_arg, const tools::ToolContext& context,
-                     const ReviewConfig& config, ReviewPack* pack,
-                     std::string* abs_path, std::string* rel_path, std::string* error) {
+bool ResolvePackPath(const std::string& pack_arg, const tools::ToolContext& context,
+                     fs::path* path, std::string* error) {
     if (pack_arg.empty()) {
         if (error != nullptr) {
             *error = "pack is required";
         }
         return false;
     }
-    const fs::path path = aiagent::platform::ResolveCanonicalPath(
+    *path = aiagent::platform::ResolveCanonicalPath(
             aiagent::platform::FromUtf8(context.working_directory), pack_arg);
     std::error_code ec;
-    if (!fs::is_regular_file(path, ec) || ec) {
+    if (!fs::is_regular_file(*path, ec) || ec) {
         if (error != nullptr) {
             *error = "review pack not found: " + pack_arg;
         }
         return false;
-    }
-    if (!LoadReviewPack(aiagent::platform::ToUtf8(path), pack, error)) {
-        return false;
-    }
-    const std::string repo = aiagent::platform::ToUtf8(
-            fs::weakly_canonical(aiagent::platform::FromUtf8(pack->repo_root), ec));
-    if (ec) {
-        if (error != nullptr) {
-            *error = "review pack has an invalid repo_root";
-        }
-        return false;
-    }
-    const std::string rel = PackRelative(repo, path);
-    if (rel.empty() || !IsUnderReviewDir(rel, config)) {
-        if (error != nullptr) {
-            *error = "review pack must live inside the configured review directory";
-        }
-        return false;
-    }
-    if (abs_path != nullptr) {
-        *abs_path = aiagent::platform::ToUtf8(path);
-    }
-    if (rel_path != nullptr) {
-        *rel_path = rel;
     }
     return true;
 }
@@ -264,6 +239,68 @@ void ReviewTools::EnsureClock(const ReviewPack& pack, const std::string& pack_re
 bool ReviewTools::DeadlineExceeded() const {
     const long long deadline = deadline_epoch_s_.load();
     return deadline > 0 && static_cast<long long>(std::time(nullptr)) > deadline;
+}
+
+bool ReviewTools::LoadPack(const std::string& pack_arg,
+                           const tools::ToolContext& context, ReviewPack* pack,
+                           std::string* abs_path, std::string* rel_path,
+                           std::string* error) {
+    fs::path path;
+    std::string rel;
+    if (!ResolvePackPath(pack_arg, context, &path, error)) {
+        return false;
+    }
+    std::error_code ec;
+    const auto mtime = fs::last_write_time(path, ec);
+    const auto size = ec ? 0 : fs::file_size(path, ec);
+    const std::string abs = aiagent::platform::ToUtf8(path);
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        for (const auto& entry : pack_cache_) {
+            if (entry.path == abs && !ec && entry.mtime == mtime && entry.size == size) {
+                *pack = entry.pack;
+                if (abs_path != nullptr) {
+                    *abs_path = abs;
+                }
+                if (rel_path != nullptr) {
+                    *rel_path = entry.relative_path;
+                }
+                return true;
+            }
+        }
+    }
+    if (!LoadReviewPack(abs, pack, error)) {
+        return false;
+    }
+    const std::string repo = aiagent::platform::ToUtf8(
+            fs::weakly_canonical(aiagent::platform::FromUtf8(pack->repo_root), ec));
+    if (ec) {
+        if (error != nullptr) {
+            *error = "review pack has an invalid repo_root";
+        }
+        return false;
+    }
+    rel = PackRelative(repo, path);
+    if (rel.empty() || !IsUnderReviewDir(rel, options_.config)) {
+        if (error != nullptr) {
+            *error = "review pack must live inside the configured review directory";
+        }
+        return false;
+    }
+    if (!ec) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        pack_cache_.push_back(PackCacheEntry{abs, mtime, size, rel, *pack});
+        while (pack_cache_.size() > 4) {
+            pack_cache_.pop_front();
+        }
+    }
+    if (abs_path != nullptr) {
+        *abs_path = abs;
+    }
+    if (rel_path != nullptr) {
+        *rel_path = rel;
+    }
+    return true;
 }
 
 std::vector<llm::ToolSpec> ReviewTools::ListTools() {
@@ -518,8 +555,7 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
     std::string abs_path;
     std::string rel_path;
     std::string error;
-    if (!LoadPackForTool(pack_arg, context, options_.config, &pack, &abs_path, &rel_path,
-                         &error)) {
+    if (!LoadPack(pack_arg, context, &pack, &abs_path, &rel_path, &error)) {
         return Fail(error);
     }
     {
@@ -834,8 +870,8 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
     std::string abs_path;
     std::string rel_path;
     std::string error;
-    if (!LoadPackForTool(arguments.value("pack", std::string()), context, options_.config,
-                         &pack, &abs_path, &rel_path, &error)) {
+    if (!LoadPack(arguments.value("pack", std::string()), context, &pack, &abs_path,
+                  &rel_path, &error)) {
         return Fail(error);
     }
     {
@@ -1047,8 +1083,7 @@ tools::ToolExecutionResult ReviewTools::TestWrite(const nlohmann::json& argument
     std::string abs_path;
     std::string rel_path;
     std::string error;
-    if (!LoadPackForTool(pack_arg, context, options_.config, &pack, &abs_path, &rel_path,
-                         &error)) {
+    if (!LoadPack(pack_arg, context, &pack, &abs_path, &rel_path, &error)) {
         return Fail(error.empty() ? "call review_context(pack) first or pass pack" : error);
     }
     {
@@ -1276,8 +1311,8 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     std::string abs_path;
     std::string rel_path;
     std::string error;
-    if (!LoadPackForTool(arguments.value("pack", std::string()), context, options_.config,
-                         &pack, &abs_path, &rel_path, &error)) {
+    if (!LoadPack(arguments.value("pack", std::string()), context, &pack, &abs_path,
+                  &rel_path, &error)) {
         return Fail(error);
     }
     {

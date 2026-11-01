@@ -835,7 +835,7 @@ ConsentState ReviewConsentStore::Check(const std::string& repo_root,
                                        const std::string& current_config_sha256) const {
     std::lock_guard<std::mutex> lock(mutex_);
     ConsentState state;
-    const auto it = entries_.find(repo_root);
+    const auto it = entries_.find(aiagent::platform::NormalizePathKey(repo_root));
     if (it == entries_.end()) {
         state.status = "missing";
         return state;
@@ -859,7 +859,8 @@ bool ReviewConsentStore::Approve(const std::string& repo_root,
         return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    entries_[repo_root] = {config_sha256, NowIsoLocal()};
+    entries_[aiagent::platform::NormalizePathKey(repo_root)] = {config_sha256,
+                                                               NowIsoLocal()};
     if (!SaveLocked()) {
         if (error != nullptr) {
             *error = "cannot write review consent file";
