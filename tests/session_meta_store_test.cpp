@@ -34,10 +34,15 @@ int main() {
             store.SetCwd("s1", project);
             Expect(store.GetCwd("s1").value_or("") == project,
                    "cwd should round-trip");
+            Expect(!store.GetRole("s1").has_value(), "role absent by default");
+            store.SetRole("s1", "reviewer");
+            Expect(store.GetRole("s1").value_or("") == "reviewer",
+                   "role should round-trip");
             Expect(store.Size() == 1, "size should count titles");
             store.Remove("s1");
             Expect(!store.GetTitle("s1").has_value(), "removed title should be gone");
             Expect(!store.GetCwd("s1").has_value(), "removed cwd should be gone");
+            Expect(!store.GetRole("s1").has_value(), "removed role should be gone");
             Expect(store.Size() == 0, "size should drop after remove");
         }
 
@@ -56,6 +61,8 @@ int main() {
             store.SetTitle("s2", "second");
             store.SetCwd("s1", test_support::TempPath("aiagent_session_meta_a"));
             store.SetCwd("s2", test_support::TempPath("aiagent_session_meta_b"));
+            store.SetRole("s1", "reviewer");
+            store.SetRole("s2", "coding");
         }
         {
             aiagent::agent::SessionMetaStore reloaded(path);
@@ -69,6 +76,10 @@ int main() {
             Expect(reloaded.GetCwd("s2").value_or("") ==
                            test_support::TempPath("aiagent_session_meta_b"),
                    "second cwd should persist across instances");
+            Expect(reloaded.GetRole("s1").value_or("") == "reviewer",
+                   "role should persist across instances");
+            Expect(reloaded.GetRole("s2").value_or("") == "coding",
+                   "coding role should persist");
             Expect(reloaded.Size() == 2, "persisted size should match");
             reloaded.Remove("s1");
         }
@@ -78,6 +89,8 @@ int main() {
                    "removed title should stay removed after reload");
             Expect(!reloaded.GetCwd("s1").has_value(),
                    "removed cwd should stay removed after reload");
+            Expect(!reloaded.GetRole("s1").has_value(),
+                   "removed role should stay removed after reload");
             Expect(reloaded.GetTitle("s2").value_or("") == "second",
                    "other titles should survive removal");
             Expect(reloaded.GetCwd("s2").value_or("") ==
@@ -91,6 +104,8 @@ int main() {
             Expect(reloaded.Size() == 0, "cleared store should stay empty after reload");
             Expect(!reloaded.GetCwd("s2").has_value(),
                    "cleared cwd should stay empty after reload");
+            Expect(!reloaded.GetRole("s2").has_value(),
+                   "cleared role should stay empty after reload");
         }
 
         // 损坏文件不应抛异常，按空处理。

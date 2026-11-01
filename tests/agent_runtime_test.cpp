@@ -356,6 +356,7 @@ class ContextCapturingToolProvider final : public aiagent::tools::IToolProvider 
 public:
     std::string session_id;
     std::string tool_call_id;
+    std::string incoming_text;
     bool has_emit = false;
     bool has_cancel = false;
     int executions = 0;
@@ -373,6 +374,7 @@ public:
         ++executions;
         session_id = context.session_id;
         tool_call_id = context.tool_call_id;
+        incoming_text = context.incoming_text;
         has_emit = static_cast<bool>(context.emit);
         has_cancel = static_cast<bool>(context.should_cancel);
         if (context.emit) {
@@ -1320,6 +1322,8 @@ int main() {
                "tool context should carry the session id");
         Expect(tools->tool_call_id == "call-1",
                "tool context should carry the current tool call id");
+        Expect(tools->incoming_text == "channel task",
+               "tool context should carry the current user message");
         Expect(tools->has_emit, "tool context should expose the event callback");
         Expect(tools->has_cancel, "tool context should expose the cancel callback");
 

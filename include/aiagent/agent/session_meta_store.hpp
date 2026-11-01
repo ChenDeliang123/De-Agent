@@ -33,6 +33,11 @@ public:
     std::optional<std::string> GetCwd(const std::string& session_id) const;
     void SetCwd(const std::string& session_id, const std::string& cwd);
 
+    // 会话角色（coding / reviewer）。未记录时返回 nullopt，调用方按 coding 处理。
+    // 角色只在会话没有历史时设置；已有历史时由 API 层拒绝切换。
+    std::optional<std::string> GetRole(const std::string& session_id) const;
+    void SetRole(const std::string& session_id, const std::string& role);
+
     // 删除某个会话的显式标题。
     void Remove(const std::string& session_id);
 
@@ -53,6 +58,7 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, std::string> titles_;
     std::map<std::string, std::string> cwds_;
+    std::map<std::string, std::string> roles_;
 };
 
 }  // namespace aiagent::agent

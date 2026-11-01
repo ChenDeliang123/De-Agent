@@ -772,6 +772,7 @@ a2a::models::SendMessageResponse AgentRuntime::HandleMessage(
 
     tools::ToolContext tool_context = BuildToolContext({}, /*interactive=*/false);
     tool_context.session_id = context_id;
+    tool_context.incoming_text = FirstText(incoming);
 
     std::vector<llm::ChatMessage> chat_messages;
 
@@ -1016,6 +1017,7 @@ std::string AgentRuntime::RunStreaming(
     // 依赖它们把进度事件写回父会话流，并在取消时尽快返回。
     tools::ToolContext tool_context = BuildToolContext(working_directory);
     tool_context.session_id = context_id;
+    tool_context.incoming_text = FirstText(incoming);
     // 子 Agent 的 kSubAgentEnd 也走这条通道：转发前先把它计入本次运行总量。
     if (on_event) {
         tool_context.emit = [on_event, run_tokens](const AgentEvent& event) {

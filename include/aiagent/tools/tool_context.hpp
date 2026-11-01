@@ -27,6 +27,9 @@ struct ToolContext {
 
     std::string session_id;
     std::string tool_call_id;
+    // 当前回合用户消息的原文（TaskStore 在回合结束才落库，review_handoff 需要
+    // 把“实现 X 并准备审核”这类同回合请求带进 pack）。
+    std::string incoming_text;
     agent::AgentEventCallback emit;
     std::function<bool()> should_cancel;
 };

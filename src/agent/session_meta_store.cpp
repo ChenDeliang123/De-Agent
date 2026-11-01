@@ -34,6 +34,7 @@ void SessionMetaStore::Load() {
         std::lock_guard<std::mutex> lock(mutex_);
         titles_.clear();
         cwds_.clear();
+        roles_.clear();
         if (json.contains("titles") && json["titles"].is_object()) {
             for (auto it = json["titles"].begin(); it != json["titles"].end(); ++it) {
                 if (it.value().is_string()) {
@@ -45,6 +46,13 @@ void SessionMetaStore::Load() {
             for (auto it = json["cwds"].begin(); it != json["cwds"].end(); ++it) {
                 if (it.value().is_string()) {
                     cwds_[it.key()] = it.value().get<std::string>();
+                }
+            }
+        }
+        if (json.contains("roles") && json["roles"].is_object()) {
+            for (auto it = json["roles"].begin(); it != json["roles"].end(); ++it) {
+                if (it.value().is_string()) {
+                    roles_[it.key()] = it.value().get<std::string>();
                 }
             }
         }
@@ -65,6 +73,10 @@ void SessionMetaStore::SaveLocked() const {
     json["cwds"] = nlohmann::json::object();
     for (const auto& [session_id, cwd] : cwds_) {
         json["cwds"][session_id] = cwd;
+    }
+    json["roles"] = nlohmann::json::object();
+    for (const auto& [session_id, role] : roles_) {
+        json["roles"][session_id] = role;
     }
     const std::filesystem::path target = aiagent::platform::FromUtf8(path_);
     std::error_code ec;
@@ -117,11 +129,27 @@ void SessionMetaStore::SetCwd(const std::string& session_id, const std::string& 
     SaveLocked();
 }
 
+std::optional<std::string> SessionMetaStore::GetRole(const std::string& session_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = roles_.find(session_id);
+    if (it == roles_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+void SessionMetaStore::SetRole(const std::string& session_id, const std::string& role) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    roles_[session_id] = role;
+    SaveLocked();
+}
+
 void SessionMetaStore::Remove(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     const bool removed_title = titles_.erase(session_id) > 0;
     const bool removed_cwd = cwds_.erase(session_id) > 0;
-    if (removed_title || removed_cwd) {
+    const bool removed_role = roles_.erase(session_id) > 0;
+    if (removed_title || removed_cwd || removed_role) {
         SaveLocked();
     }
 }
@@ -130,6 +158,7 @@ void SessionMetaStore::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     titles_.clear();
     cwds_.clear();
+    roles_.clear();
     SaveLocked();
 }
 
