@@ -33,7 +33,7 @@ int main() {
     {
         const std::vector<aiagent::llm::ToolSpec> tools = {
                 Tool("read"), Tool("review_context"), Tool("review_read"), Tool("review_git"),
-                Tool("review_verify"), Tool("review_test_write"),
+                Tool("review_scout"), Tool("review_verify"), Tool("review_test_write"),
                 Tool("review_setup"), Tool("review_report"),
         };
         const std::string prompt = aiagent::agent::BuildReviewerSystemPrompt(tools);
@@ -65,6 +65,9 @@ int main() {
         Expect(prompt.find("find bugs the author wants fixed before merge") !=
                        std::string::npos,
                "review goal should be merge-gate focused");
+        Expect(prompt.find("review_scout") != std::string::npos &&
+                       prompt.find("max 4 tasks") != std::string::npos,
+               "review_scout guidance should be present when the tool is active");
         for (const auto& tool : tools) {
             Expect(prompt.find("- " + tool.name + ":") != std::string::npos,
                    "active tool should be listed: " + tool.name);

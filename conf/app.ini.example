@@ -150,6 +150,8 @@ verify_mode = in_place
 ; 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
 max_tool_rounds = 128
 review_timeout_s = 3600
+; P1 受控分片：0 关闭 review_scout；1–4 为只读 scout 并发上限。
+scout_max = 0
 checkpoint = true
 draft_report = true
 chunk_files = 20

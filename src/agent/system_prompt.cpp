@@ -369,6 +369,13 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
                     "may you proceed statically and record the gap in `unverified`.");
         }
     }
+    if (HasTool(tools, "review_scout")) {
+        rules.Add(
+                "Use `review_scout` only for bounded, independent slices after "
+                "`review_context(mode=plan)`; max 4 tasks. Scouts are read-only candidates: "
+                "re-read every cited path:line yourself before a finding enters the report, "
+                "and do not let scout coverage replace parent coverage.");
+    }
     if (HasTool(tools, "review_git")) {
         rules.Add(
                 "Use `review_git` for read-only diff/log/show/blame/ls-files/status checks. "

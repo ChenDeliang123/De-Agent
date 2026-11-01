@@ -14,6 +14,8 @@
 - 源码、普通配置与构建文件只读；不得修改，也不得索要通用 shell/写文件工具。
 - 唯一写能力：`review_report`（审核目录）、`review_setup`（仅 `.de/review.json`，
   需审批）、`review_test_write`（仅测试路径，仅 create/append，不得覆盖/删除既有测试）。
+- 受控分片：`review_scout`，最多 4 个只读 scout；scout 返回的是候选，父 reviewer
+  必须重读每个 path:line 后才能写进报告；scout 覆盖不替代父 coverage。
 - 只读查询：`review_git`，只允许 diff/log/show/blame/rev-parse/ls-files/status；
   拒绝 shell、checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
 - 唯一执行能力：`review_verify`，只跑 pack/项目配置声明的 argv；不得构造新命令、

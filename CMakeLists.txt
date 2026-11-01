@@ -157,6 +157,7 @@ add_library(aiagent_agent STATIC
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
   src/tools/composite_tool_provider.cpp
+  src/tools/review_scout_tool.cpp
   src/tools/filtered_tool_provider.cpp
   src/tools/skill_tool.cpp
   src/tools/sub_agent_tool.cpp
@@ -311,6 +312,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(review_tools_test tests/review_tools_test.cpp)
   target_link_libraries(review_tools_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_review_tools COMMAND review_tools_test)
+
+  add_executable(review_scout_test tests/review_scout_test.cpp)
+  target_link_libraries(review_scout_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_scout COMMAND review_scout_test)
 
   add_executable(review_pack_test tests/review_pack_test.cpp)
   target_link_libraries(review_pack_test PRIVATE aiagent_agent)

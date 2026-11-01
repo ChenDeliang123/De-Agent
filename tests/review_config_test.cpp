@@ -27,6 +27,7 @@ int main() {
         Expect(config->max_diff_bytes == 2 * 1024 * 1024, "default max_diff_bytes");
         Expect(config->verify_timeout_s == 900, "default verify timeout");
         Expect(config->max_tool_rounds == 128, "default max tool rounds");
+        Expect(config->scout_max == 0, "default scout max");
         Expect(config->chunk_files == 20, "default chunk size");
     }
 
@@ -44,6 +45,7 @@ int main() {
                 "verify_output_bytes = 4096\n"
                 "verify_mode = copy\n"
                 "max_tool_rounds = 32\n"
+                "scout_max = 4\n"
                 "review_timeout_s = 600\n"
                 "checkpoint = false\n"
                 "draft_report = false\n"
@@ -58,6 +60,7 @@ int main() {
         Expect(config->max_diff_bytes == 1048576, "max_diff_bytes override");
         Expect(config->verify_output_bytes == 4096, "verify output override");
         Expect(config->max_tool_rounds == 32, "max rounds override");
+        Expect(config->scout_max == 4, "scout max override");
         Expect(!config->checkpoint && !config->draft_report, "bool overrides");
         Expect(config->chunk_files == 5, "chunk override");
         Expect(config->max_queued_jobs == 3, "queue override");
@@ -85,6 +88,8 @@ int main() {
                 "[review]\nverify_mode = rsync\n",
                 "[review]\nmax_tool_rounds = 7\n",
                 "[review]\nmax_tool_rounds = 513\n",
+                "[review]\nscout_max = -1\n",
+                "[review]\nscout_max = 5\n",
                 "[review]\nreview_timeout_s = 59\n",
                 "[review]\nsupersede_policy = queue\n",
                 "[review]\nmax_queued_jobs = -1\n",

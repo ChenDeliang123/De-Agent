@@ -169,6 +169,8 @@ struct ReviewConfig {
     // 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
     int max_tool_rounds = 128;
     long review_timeout_s = 3600;
+    // P1 受控分片：0 = 不暴露 review_scout；1–4 = 同时运行的只读 scout 上限。
+    int scout_max = 0;
     bool checkpoint = true;
     bool draft_report = true;
     std::size_t chunk_files = 20;

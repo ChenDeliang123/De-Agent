@@ -67,6 +67,7 @@
 #include "aiagent/tools/composite_tool_provider.hpp"
 #include "aiagent/tools/filtered_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
+#include "aiagent/tools/review_scout_tool.hpp"
 #include "aiagent/tools/skill_tool.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
 #include "aiagent/version.hpp"
@@ -955,53 +956,27 @@ int main(int argc, char** argv) {
         // 生命周期：task 工具只持有 Manager 的 weak_ptr，这里必须保留强引用到进程结束
         // （否则子 Agent 能力在注册后立刻失效）。
         std::shared_ptr<aiagent::agent::SubAgentManager> agent_manager;
-        if (agents_config.enabled) {
-            std::vector<std::string> prompt_dirs;
-            if (!share_dir.empty()) {
-                prompt_dirs.push_back(share_dir + "/prompts");
+        std::vector<std::string> prompt_dirs;
+        if (!share_dir.empty()) {
+            prompt_dirs.push_back(share_dir + "/prompts");
+        }
+        prompt_dirs.push_back("prompts");
+        std::string searched_dirs;
+        for (const auto& dir : prompt_dirs) {
+            if (!searched_dirs.empty()) {
+                searched_dirs += ", ";
             }
-            prompt_dirs.push_back("prompts");
-            std::string searched_dirs;
-            for (const auto& dir : prompt_dirs) {
-                if (!searched_dirs.empty()) {
-                    searched_dirs += ", ";
-                }
-                searched_dirs += dir;
-            }
-            std::vector<aiagent::agent::AgentDefinition> agent_definitions;
-            if (auto loaded = aiagent::agent::LoadAgentDefinitions(agents_config, prompt_dirs,
-                                                                   &agents_error);
-                loaded.has_value()) {
-                agent_definitions = std::move(loaded->definitions);
-                // 内置提示词缺失 = 安装不完整：只降级该定义（全缺则整体关闭子 Agent），
-                // 不拖垮后端；用户显式配置的定义缺提示词仍按配置错误处理。
-                for (const auto& skipped : loaded->skipped_builtins) {
-                    aiagent::DefaultLogger().Log(
-                            aiagent::LogLevel::kWarning, "main",
-                            "agent prompt missing for builtin definition '" + skipped +
-                                    "'; skipping it (searched: " + searched_dirs + ")");
-                }
-                if (agent_definitions.empty()) {
-                    aiagent::DefaultLogger().Log(
-                            aiagent::LogLevel::kWarning, "main",
-                            "no sub-agent prompts found; sub-agents disabled (searched: " +
-                                    searched_dirs + ")");
-                }
-            } else {
-                std::cerr << "配置错误: " << agents_error << '\n';
-                return 1;
-            }
-
-            const aiagent::DeepSeekConfig parent_model_config = *config;
-            agent_manager = std::make_shared<aiagent::agent::SubAgentManager>(
-                    agents_config, agent_definitions,
-                    [parent_model_config, permission_store, permission_settings, bash_policy,
-                     project_config_cache, trust_store, compaction_settings,
-                     fallback_working_directory, approval_broker, skill_loader,
-                     &background_injector,
-                     timeout = permissions_config.approval_timeout_seconds](
-                            const aiagent::agent::SubAgentManager::ChildRuntimeSpec& spec)
-                            -> std::shared_ptr<aiagent::agent::AgentRuntime> {
+            searched_dirs += dir;
+        }
+        const aiagent::DeepSeekConfig parent_model_config = *config;
+        auto child_runtime_factory =
+                [parent_model_config, permission_store, permission_settings, bash_policy,
+                 project_config_cache, trust_store, compaction_settings,
+                 fallback_working_directory, approval_broker, skill_loader,
+                 &background_injector,
+                 timeout = permissions_config.approval_timeout_seconds](
+                        const aiagent::agent::SubAgentManager::ChildRuntimeSpec& spec)
+                -> std::shared_ptr<aiagent::agent::AgentRuntime> {
                         aiagent::DeepSeekConfig child_config = parent_model_config;
                         if (!spec.model.empty()) {
                             child_config.model = spec.model;
@@ -1057,9 +1032,35 @@ int main(int argc, char** argv) {
                                             std::chrono::seconds(timeout));
                                 });
                         return child_runtime;
-                    },
-                    tools);
+                };
 
+        if (agents_config.enabled) {
+            std::vector<aiagent::agent::AgentDefinition> agent_definitions;
+            if (auto loaded = aiagent::agent::LoadAgentDefinitions(agents_config, prompt_dirs,
+                                                                   &agents_error);
+                loaded.has_value()) {
+                agent_definitions = std::move(loaded->definitions);
+                // 内置提示词缺失 = 安装不完整：只降级该定义（全缺则整体关闭子 Agent），
+                // 不拖垮后端；用户显式配置的定义缺提示词仍按配置错误处理。
+                for (const auto& skipped : loaded->skipped_builtins) {
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kWarning, "main",
+                            "agent prompt missing for builtin definition '" + skipped +
+                                    "'; skipping it (searched: " + searched_dirs + ")");
+                }
+                if (agent_definitions.empty()) {
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kWarning, "main",
+                            "no sub-agent prompts found; sub-agents disabled (searched: " +
+                                    searched_dirs + ")");
+                }
+            } else {
+                std::cerr << "配置错误: " << agents_error << '\n';
+                return 1;
+            }
+
+            agent_manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                    agents_config, agent_definitions, child_runtime_factory, tools);
             agents_info = "agents:";
             for (const auto& definition : agent_definitions) {
                 agents_info += " " + definition.name;
@@ -1084,9 +1085,20 @@ int main(int argc, char** argv) {
         // reviewer runtime：独立系统提示词、独立历史、路径受限工具集。
         // 与 coding runtime 共享权限存储/审批/压缩/项目配置，但工具白名单在
         // Execute 层再次过滤，不暴露 write/edit/bash/task/MCP。
+        auto scout_manager_holder =
+                std::make_shared<std::weak_ptr<aiagent::agent::SubAgentManager>>();
+        auto scout_runner = [scout_manager_holder](
+                                    const std::vector<aiagent::agent::SubAgentRequest>& requests,
+                                    int depth) {
+            const auto manager = scout_manager_holder->lock();
+            if (!manager) {
+                return std::vector<aiagent::agent::SubAgentResult>{};
+            }
+            return manager->RunBatch(requests, depth);
+        };
+        std::shared_ptr<aiagent::tools::CompositeToolProvider> reviewer_composite;
         auto make_reviewer_provider = [&]() -> std::shared_ptr<aiagent::tools::IToolProvider> {
-            auto reviewer_composite =
-                    std::make_shared<aiagent::tools::CompositeToolProvider>();
+            reviewer_composite = std::make_shared<aiagent::tools::CompositeToolProvider>();
             reviewer_composite->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
                     aiagent::platform::ToUtf8(std::filesystem::current_path()),
                     tools_config.sandbox_roots));
@@ -1100,6 +1112,11 @@ int main(int argc, char** argv) {
                       "review_test_write", "review_setup", "review_report"}) {
                     review_allow.push_back(name);
                 }
+                if (review_config.scout_max > 0 && agents_config.enabled) {
+                    reviewer_composite->Add(aiagent::tools::MakeReviewScoutToolProvider(
+                            scout_runner, review_config.scout_max));
+                    review_allow.push_back(aiagent::tools::kReviewScoutToolName);
+                }
             }
             if (skills_config.enabled) {
                 reviewer_composite->Add(aiagent::tools::MakeSkillToolProvider(
@@ -1111,6 +1128,57 @@ int main(int argc, char** argv) {
         };
         std::shared_ptr<aiagent::tools::IToolProvider> reviewer_tool_provider =
                 make_reviewer_provider();
+
+        std::shared_ptr<aiagent::agent::SubAgentManager> review_scout_manager;
+        if (review_config.enabled && review_config.scout_max > 0 && agents_config.enabled) {
+            aiagent::AgentsConfig scout_config = agents_config;
+            scout_config.enabled = true;
+            scout_config.max_depth = 1;
+            scout_config.max_concurrent = review_config.scout_max;
+            scout_config.max_background = 0;
+            scout_config.default_timeout_s = 120;
+            scout_config.max_rounds = 16;
+            scout_config.result_max_chars = 8192;
+            scout_config.agents.clear();
+            aiagent::AgentDefinitionConfig scout_definition;
+            scout_definition.name = "review-scout";
+            scout_definition.description =
+                    "Read-only review scout for bounded files/focus; never writes or executes.";
+            scout_definition.system_prompt_file = "review-scout.md";
+            scout_definition.tools = {"read", "grep", "glob", "ls", "review_git"};
+            scout_config.agents.push_back(std::move(scout_definition));
+
+            std::string scout_error;
+            auto loaded = aiagent::agent::LoadAgentDefinitions(scout_config, prompt_dirs,
+                                                               &scout_error);
+            if (loaded.has_value()) {
+                std::vector<aiagent::agent::AgentDefinition> scout_definitions;
+                for (auto& definition : loaded->definitions) {
+                    if (definition.name == "review-scout") {
+                        scout_definitions.push_back(std::move(definition));
+                    }
+                }
+                if (!scout_definitions.empty()) {
+                    review_scout_manager = std::make_shared<aiagent::agent::SubAgentManager>(
+                            scout_config, scout_definitions, child_runtime_factory,
+                            reviewer_tool_provider);
+                    *scout_manager_holder = review_scout_manager;
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kInfo, "main",
+                            "review_scout enabled: max=" +
+                                    std::to_string(review_config.scout_max));
+                } else {
+                    aiagent::DefaultLogger().Log(
+                            aiagent::LogLevel::kWarning, "main",
+                            "review_scout prompt missing; review_scout disabled (searched: " +
+                                    searched_dirs + ")");
+                }
+            } else {
+                aiagent::DefaultLogger().Log(
+                        aiagent::LogLevel::kWarning, "main",
+                        "review_scout definition failed: " + scout_error);
+            }
+        }
 
         auto configure_review_runtime =
                 [&](aiagent::agent::AgentRuntime& runtime,
