@@ -1,3 +1,5 @@
+#include <json.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -53,11 +55,16 @@
 #include "aiagent/permissions/permission_store.hpp"
 #include "aiagent/permissions/project_config.hpp"
 #include "aiagent/permissions/trust_store.hpp"
+#include "aiagent/review/project_verify_config.hpp"
+#include "aiagent/review/review_pack.hpp"
+#include "aiagent/review/review_report.hpp"
+#include "aiagent/review/review_tools.hpp"
 #include "aiagent/platform/console.hpp"
 #include "aiagent/platform/paths.hpp"
 #include "aiagent/platform/text_file.hpp"
 #include "aiagent/skills/skill_loader.hpp"
 #include "aiagent/tools/composite_tool_provider.hpp"
+#include "aiagent/tools/filtered_tool_provider.hpp"
 #include "aiagent/tools/local_tools.hpp"
 #include "aiagent/tools/skill_tool.hpp"
 #include "aiagent/tools/sub_agent_tool.hpp"
@@ -222,6 +229,15 @@ bool LoadPromptFile(const std::string& value, const std::string& config_path,
 
 // 缓存优先地取某个会话的最新历史（见 session_history.hpp）。
 using aiagent::agent::LoadLatestHistory;
+
+std::string MessageText(const a2a::models::Message& message) {
+    for (const auto& part : message.parts) {
+        if (part.text.has_value()) {
+            return *part.text;
+        }
+    }
+    return {};
+}
 
 // 进程退出守卫：后台任务的 worker 是 detach 的，可能在 main 的局部对象析构之后才收敛
 // 并回调（推送/注入）。这里保证「标记退出」与「回调执行」互斥：退出后的回调直接返回，
@@ -674,6 +690,28 @@ int main(int argc, char** argv) {
             tools_config = *parsed_tools;
         }
 
+        // 代码审核：[review] 配置与用户级数据目录（同意记录存放处）。
+        aiagent::ReviewConfig review_config;
+        std::string review_config_error;
+        if (const auto parsed_review =
+                    aiagent::LoadReviewConfigFile(config_path, &review_config_error);
+            parsed_review.has_value()) {
+            review_config = *parsed_review;
+        } else if (!review_config_error.empty()) {
+            std::cerr << "配置错误: " << review_config_error << '\n';
+            return 1;
+        }
+        std::string review_data_dir = app_paths.data_dir;
+        if (review_data_dir.empty()) {
+            review_data_dir = aiagent::platform::ToUtf8(db_path.parent_path());
+        }
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "main",
+                "review enabled=" +
+                        std::string(review_config.enabled ? "true" : "false") +
+                        " dir=" + review_config.dir +
+                        " data_dir=" + review_data_dir);
+
         // 用户级权限存储。
         std::string permissions_path = storage_config.permissions_file;
         if (permissions_path.empty()) {
@@ -1042,6 +1080,110 @@ int main(int argc, char** argv) {
                                          "sub-agents enabled: " + agents_info);
         }
 
+        // reviewer runtime：独立系统提示词、独立历史、路径受限工具集。
+        // 与 coding runtime 共享权限存储/审批/压缩/项目配置，但工具白名单在
+        // Execute 层再次过滤，不暴露 write/edit/bash/task/MCP。
+        aiagent::agent::AgentRuntime review_runtime(model);
+        std::shared_ptr<aiagent::tools::IToolProvider> reviewer_tool_provider;
+        {
+            auto reviewer_composite =
+                    std::make_shared<aiagent::tools::CompositeToolProvider>();
+            reviewer_composite->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
+                    aiagent::platform::ToUtf8(std::filesystem::current_path()),
+                    tools_config.sandbox_roots));
+            std::vector<std::string> review_allow = {"read", "grep", "glob", "ls"};
+            if (review_config.enabled) {
+                reviewer_composite->Add(std::make_shared<aiagent::review::ReviewTools>(
+                        aiagent::review::ReviewToolOptions{review_config, review_data_dir},
+                        aiagent::review::ReviewTools::Mode::kReviewer));
+                for (const char* name :
+                     {"review_context", "review_read", "review_verify",
+                      "review_test_write", "review_setup", "review_report"}) {
+                    review_allow.push_back(name);
+                }
+            }
+            if (skills_config.enabled) {
+                reviewer_composite->Add(aiagent::tools::MakeSkillToolProvider(
+                        skill_loader, fallback_working_directory));
+                review_allow.push_back(aiagent::tools::kSkillToolName);
+            }
+            reviewer_tool_provider = std::make_shared<aiagent::tools::FilteredToolProvider>(
+                    reviewer_composite, review_allow, std::vector<std::string>{});
+        }
+        review_runtime.SetFallbackWorkingDirectory(fallback_working_directory);
+        review_runtime.SetProjectInstructionsLoader(instructions_loader);
+        if (skills_config.enabled) {
+            review_runtime.SetSkillLoader(skill_loader);
+        }
+        review_runtime.SetCompactionSettings(compaction_settings);
+        review_runtime.SetCompactionCallback(
+                [&](const std::string& context_id,
+                    const aiagent::agent::CompactionRecord& record) {
+                    std::lock_guard<std::mutex> lock(compaction_records_mutex);
+                    compaction_records[context_id] = record;
+                });
+        review_runtime.SetPermissionStore(permission_store);
+        review_runtime.SetPermissionSettings(permission_settings);
+        review_runtime.SetBashPolicy(bash_policy);
+        review_runtime.SetProjectConfigProvider(
+                [project_config_cache](const std::string& cwd) {
+                    return project_config_cache->Get(cwd);
+                });
+        review_runtime.SetTrustStore(trust_store);
+        review_runtime.SetApprovalHandler(
+                [approval_broker, timeout = permissions_config.approval_timeout_seconds](
+                        const aiagent::agent::ApprovalRequest& request) {
+                    return approval_broker->Wait(request.context_id, request.tool_call_id,
+                                                 std::chrono::seconds(timeout));
+                });
+        review_runtime.SetWorkspaceSandboxOnly(true);
+        review_runtime.SetMaxToolRounds(review_config.max_tool_rounds);
+        review_runtime.SetToolProvider(reviewer_tool_provider);
+        review_runtime.SetSystemPromptBuilder(
+                [](const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
+                    return aiagent::agent::BuildReviewerSystemPrompt(tool_specs);
+                });
+
+        // review_handoff 只挂在 coding 顶层工具集；reviewer 不提供。
+        std::shared_ptr<aiagent::review::ReviewTools> review_handoff_tools;
+        if (review_config.enabled) {
+            review_handoff_tools = std::make_shared<aiagent::review::ReviewTools>(
+                    aiagent::review::ReviewToolOptions{review_config, review_data_dir},
+                    aiagent::review::ReviewTools::Mode::kCodingHandoff,
+                    [task_store, &history_cache, &session_meta](
+                            const std::string& session_id, std::string* title,
+                            std::vector<std::string>* user_messages, int* message_count) {
+                        const auto history =
+                                LoadLatestHistory(&history_cache, *task_store, session_id);
+                        if (history.empty()) {
+                            return false;
+                        }
+                        if (title != nullptr) {
+                            if (auto stored = session_meta.GetTitle(session_id);
+                                stored.has_value()) {
+                                *title = *stored;
+                            } else {
+                                *title = DeriveShortTitle(history);
+                            }
+                        }
+                        if (message_count != nullptr) {
+                            *message_count = static_cast<int>(history.size());
+                        }
+                        if (user_messages != nullptr) {
+                            for (const auto& message : history) {
+                                if (message.role == a2a::models::Role::kUser) {
+                                    const std::string text = MessageText(message);
+                                    if (!text.empty()) {
+                                        user_messages->push_back(text);
+                                    }
+                                }
+                            }
+                        }
+                        return true;
+                    });
+            tools->Add(review_handoff_tools);
+        }
+
         a2a::server::AgentServer agent_server(BuildAgentCard(options.port), task_store);
 
         agent_server.task_manager().SetMessageHandler(
@@ -1052,7 +1194,11 @@ int main(int argc, char** argv) {
                     std::vector<a2a::models::Message> history =
                             LoadLatestHistory(&history_cache, *task_store, session);
                     history.push_back(request.message);
-                    auto response = runtime.HandleMessage(
+                    const std::string role =
+                            session_meta.GetRole(session).value_or("coding");
+                    aiagent::agent::AgentRuntime& selected_runtime =
+                            role == "reviewer" ? review_runtime : runtime;
+                    auto response = selected_runtime.HandleMessage(
                             request.message, history, request.message.context_id);
                     if (!request.message.context_id.empty() && response.IsTask()) {
                         // 响应携带的 task.history 即本次落库内容，同步更新缓存。
@@ -1187,9 +1333,13 @@ int main(int argc, char** argv) {
                     std::vector<a2a::models::Message> compacted;
                     aiagent::agent::CompactionRecord record;
                     std::string compact_error;
-                    if (!runtime.CompactHistory(session_id, history, &compacted,
-                                                &record, &compact_error,
-                                                effective_cwd)) {
+                    const std::string role =
+                            session_meta.GetRole(session_id).value_or("coding");
+                    aiagent::agent::AgentRuntime& selected_runtime =
+                            role == "reviewer" ? review_runtime : runtime;
+                    if (!selected_runtime.CompactHistory(session_id, history, &compacted,
+                                                         &record, &compact_error,
+                                                         effective_cwd)) {
                         if (error != nullptr) {
                             *error = compact_error;
                         }
@@ -1311,6 +1461,10 @@ int main(int argc, char** argv) {
                         source_cwd.has_value()) {
                         session_meta.SetCwd(target, *source_cwd);
                     }
+                    if (auto source_role = session_meta.GetRole(source_id);
+                        source_role.has_value()) {
+                        session_meta.SetRole(target, *source_role);
+                    }
                     if (new_id != nullptr) {
                         *new_id = target;
                     }
@@ -1320,11 +1474,18 @@ int main(int argc, char** argv) {
                                     target);
                     return true;
                 });
-        // 工具清单：内置 coding 工具 + MCP 工具；按请求 cwd 过滤技能等动态工具。
-        web_gateway.SetToolsHandler([&](const std::string& cwd) {
+        // 工具清单：按会话角色返回 coding 或 reviewer 的真实工具集。
+        web_gateway.SetToolsHandler([&](const std::string& cwd,
+                                        const std::string& session_id) {
             const std::string directory = cwd.empty() ? fallback_working_directory : cwd;
+            const std::string role =
+                    session_id.empty()
+                            ? "coding"
+                            : session_meta.GetRole(session_id).value_or("coding");
+            const auto& provider =
+                    role == "reviewer" ? reviewer_tool_provider : tools;
             std::vector<aiagent::web::ToolInfo> tools_info;
-            for (const auto& spec : tools->ListToolsFor(directory)) {
+            for (const auto& spec : provider->ListToolsFor(directory)) {
                 tools_info.push_back({spec.name, spec.description});
             }
             return tools_info;
@@ -1610,10 +1771,96 @@ int main(int argc, char** argv) {
                         }
                     });
         }
+        // POST /api/v1/reviews：CLI/外部 Agent/CI 共用的 pack 构建入口。
+        aiagent::review::ReviewPackService review_pack_service(
+                aiagent::review::ReviewPackServiceOptions{review_config, review_data_dir});
+        web_gateway.SetReviewEnabledHandler(
+                [review_config]() { return review_config.enabled; });
+        web_gateway.SetReviewCreateHandler(
+                [&](const aiagent::web::ReviewCreateRequest& request)
+                        -> aiagent::web::ReviewCreateResult {
+                    aiagent::web::ReviewCreateResult output;
+                    if (!review_config.enabled) {
+                        output.error = "review is disabled";
+                        return output;
+                    }
+                    aiagent::review::ReviewPackRequest pack_request;
+                    pack_request.cwd = request.cwd;
+                    pack_request.feature = request.feature;
+                    pack_request.base = request.base;
+                    pack_request.request_file = request.request_file;
+                    pack_request.request_text = request.request_text;
+                    pack_request.context_paths = request.context_paths;
+                    pack_request.notes = request.notes;
+                    pack_request.previous_report = request.previous_report;
+                    pack_request.producer.kind = request.producer;
+                    if (pack_request.producer.kind.empty()) {
+                        pack_request.producer.kind =
+                                request.session_id.empty() ? "manual" : "de-session";
+                    }
+                    pack_request.producer.agent = request.agent;
+                    if (!request.verification.empty()) {
+                        for (const auto& item : request.verification) {
+                            aiagent::review::ReviewCommand command;
+                            command.id = item.value("id", std::string());
+                            command.cwd = item.value("cwd", std::string("."));
+                            command.timeout_s = item.value("timeout_s", 300L);
+                            command.declared_exit_code =
+                                    item.value("declared_exit_code", 0);
+                            command.summary = item.value("summary", std::string());
+                            if (item.contains("argv") && item["argv"].is_array()) {
+                                command.argv =
+                                        item["argv"].get<std::vector<std::string>>();
+                            }
+                            pack_request.verification.push_back(std::move(command));
+                        }
+                    }
+                    if (!request.session_id.empty()) {
+                        const auto history = LoadLatestHistory(&history_cache, *task_store,
+                                                               request.session_id);
+                        aiagent::review::ReviewSessionExcerpt session;
+                        session.id = request.session_id;
+                        if (auto stored = session_meta.GetTitle(request.session_id);
+                            stored.has_value()) {
+                            session.title = *stored;
+                        } else if (!history.empty()) {
+                            session.title = DeriveShortTitle(history);
+                        }
+                        session.message_count = static_cast<int>(history.size());
+                        for (const auto& message : history) {
+                            if (message.role == a2a::models::Role::kUser) {
+                                const std::string text = MessageText(message);
+                                if (!text.empty()) {
+                                    session.user_messages.push_back(text);
+                                }
+                            }
+                        }
+                        if (!session.user_messages.empty() || !session.title.empty()) {
+                            pack_request.session = std::move(session);
+                        }
+                    }
+                    const auto result = review_pack_service.CreatePack(pack_request);
+                    if (!result.ok) {
+                        output.error = result.error;
+                        return output;
+                    }
+                    output.ok = true;
+                    output.review_id = result.review_id;
+                    output.pack_path = result.pack_path;
+                    output.report_path_hint = result.report_path_hint;
+                    output.intent_source = result.intent_source;
+                    output.context_missing = result.context_missing;
+                    output.truncated = result.truncated;
+                    output.changed_files = result.changed_files;
+                    output.diff_bytes = result.diff_bytes;
+                    return output;
+                });
+
         web_gateway.SetStreamEventHandler(
                 [&](const std::string& session_id,
                     const std::string& content,
                     const std::string& cwd,
+                    const std::string& role,
                     const aiagent::agent::AgentEventCallback& on_event,
                     const aiagent::web::WebGateway::CancelCallback& should_cancel,
                     const std::shared_ptr<aiagent::agent::MessageInbox>& inbox) {
@@ -1638,7 +1885,9 @@ int main(int argc, char** argv) {
                             steered_texts.push_back(text);
                         });
                     }
-                    const std::string reply = runtime.HandleMessageStreamingEvents(
+                    aiagent::agent::AgentRuntime& selected_runtime =
+                            role == "reviewer" ? review_runtime : runtime;
+                    const std::string reply = selected_runtime.HandleMessageStreamingEvents(
                             user, history, session_id, on_event, cwd, should_cancel, inbox);
 
                     a2a::models::Task task;

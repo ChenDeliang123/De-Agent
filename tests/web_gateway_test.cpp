@@ -223,6 +223,7 @@ int main() {
         // 结构化事件：approval_request 帧应带工具名与原因。
         gateway.SetStreamEventHandler(
                 [](const std::string&, const std::string&, const std::string&,
+                   const std::string&,
                    const aiagent::agent::AgentEventCallback& on_event,
                    const aiagent::web::WebGateway::CancelCallback&,
                    const std::shared_ptr<aiagent::agent::MessageInbox>&) {
@@ -257,6 +258,7 @@ int main() {
         // subagent_start / subagent_end 帧；根 Agent 的事件不带这两个字段。
         gateway.SetStreamEventHandler(
                 [](const std::string&, const std::string&, const std::string&,
+                   const std::string&,
                    const aiagent::agent::AgentEventCallback& on_event,
                    const aiagent::web::WebGateway::CancelCallback&,
                    const std::shared_ptr<aiagent::agent::MessageInbox>&) {
@@ -631,11 +633,145 @@ int main() {
                     return true;
                 });
         std::string tools_cwd;
-        gateway.SetToolsHandler([&tools_cwd](const std::string& cwd) {
+        std::string tools_session;
+        gateway.SetToolsHandler([&tools_cwd, &tools_session](const std::string& cwd,
+                                                             const std::string& session) {
             tools_cwd = cwd;
+            tools_session = session;
             return std::vector<aiagent::web::ToolInfo>{{"read", "Read a file"},
                                                        {"bash", "Run a command"}};
         });
+
+        // ---- 会话角色与 review pack 创建 ----
+        {
+            std::string stream_role;
+            gateway.SetStreamEventHandler(
+                    [&stream_role](const std::string&, const std::string&,
+                                   const std::string&, const std::string& role,
+                                   const aiagent::agent::AgentEventCallback& on_event,
+                                   const aiagent::web::WebGateway::CancelCallback&,
+                                   const std::shared_ptr<aiagent::agent::MessageInbox>&) {
+                        stream_role = role;
+                        aiagent::agent::AgentEvent token;
+                        token.kind = aiagent::agent::AgentEventKind::kToken;
+                        token.content = "role-ok";
+                        on_event(token);
+                    });
+            std::string role_body;
+            const auto role_stream = http.PostStream(
+                    base + "/api/v1/chat/stream",
+                    R"({"session_id":"sess-reviewer","message":"review this","role":"reviewer"})",
+                    "application/json",
+                    [&role_body](std::string_view chunk) {
+                        role_body.append(chunk.data(), chunk.size());
+                    });
+            Expect(role_stream.IsSuccess() && stream_role == "reviewer",
+                   "stream should carry reviewer role");
+            Expect(meta_store.GetRole("sess-reviewer").value_or("") == "reviewer",
+                   "new session role should be persisted");
+            Expect(role_body.find("role-ok") != std::string::npos,
+                   "reviewer stream should complete");
+
+            const auto invalid_role = http.Post(
+                    base + "/api/v1/chat/stream",
+                    R"({"session_id":"sess-bad-role","message":"x","role":"admin"})",
+                    "application/json");
+            Expect(invalid_role.status_code == 400, "invalid role should be 400");
+
+            // 已有历史的 coding 会话不能中途切成 reviewer。
+            const auto mismatch = http.Post(
+                    base + "/api/v1/chat/stream",
+                    nlohmann::json{{"session_id", session_id},
+                                   {"message", "x"},
+                                   {"role", "reviewer"}}
+                            .dump(),
+                    "application/json");
+            Expect(mismatch.status_code == 409,
+                   "existing coding session role switch should be 409, got: " +
+                           std::to_string(mismatch.status_code));
+
+            // 让 reviewer 会话出现在 /sessions。
+            a2a::models::Task role_task;
+            role_task.id = std::string(a2a::core::NewUuid());
+            role_task.context_id = "sess-reviewer";
+            role_task.status =
+                    a2a::models::MakeTaskStatus(a2a::models::TaskState::kCompleted);
+            role_task.history.push_back(a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "review this", "text/plain"));
+            task_store->Put(std::move(role_task));
+            const auto sessions = http.Get(base + "/api/v1/sessions");
+            Expect(sessions.IsSuccess(), "sessions should succeed");
+            bool reviewer_listed = false;
+            bool coding_listed = false;
+            for (const auto& item : nlohmann::json::parse(sessions.body)) {
+                if (item.value("id", std::string()) == "sess-reviewer" &&
+                    item.value("role", std::string()) == "reviewer") {
+                    reviewer_listed = true;
+                }
+                if (item.value("id", std::string()) == session_id &&
+                    item.value("role", std::string()) == "coding") {
+                    coding_listed = true;
+                }
+            }
+            Expect(reviewer_listed, "/sessions should report reviewer role");
+            Expect(coding_listed, "/sessions should default missing roles to coding");
+
+            const auto tools = http.Get(
+                    base + "/api/v1/tools?path=/tmp&session_id=sess-reviewer");
+            Expect(tools.IsSuccess(), "tools with session should succeed");
+            Expect(tools_cwd == "/tmp" && tools_session == "sess-reviewer",
+                   "tools handler should receive cwd and session_id");
+
+            gateway.SetReviewCreateHandler(
+                    [](const aiagent::web::ReviewCreateRequest& create) {
+                        aiagent::web::ReviewCreateResult result;
+                        if (create.feature == "bad") {
+                            result.ok = false;
+                            result.error = "feature is invalid";
+                            return result;
+                        }
+                        result.ok = true;
+                        result.review_id = "rv-test";
+                        result.pack_path = "docs/review/inbox/" + create.feature + ".json";
+                        result.report_path_hint = "docs/review/" + create.feature + ".md";
+                        result.intent_source =
+                                create.request_text.empty() ? "git-log" : "request-file";
+                        result.context_missing = create.request_text.empty();
+                        result.changed_files = 2;
+                        result.diff_bytes = create.notes.size();
+                        return result;
+                    });
+            const auto review_created = http.Post(
+                    base + "/api/v1/reviews",
+                    nlohmann::json{{"cwd", "/repo"},
+                                   {"feature", "feature-x"},
+                                   {"request_text", "acceptance"},
+                                   {"notes", "note"},
+                                   {"producer", "external"},
+                                   {"agent", "claude-code"},
+                                   {"verification",
+                                    nlohmann::json::array(
+                                            {{{"id", "v1"},
+                                              {"argv", {"ctest"}}}})}}
+                            .dump(),
+                    "application/json");
+            Expect(review_created.IsSuccess(), "reviews endpoint should succeed");
+            const auto review_json = nlohmann::json::parse(review_created.body);
+            Expect(review_json.value("review_id", std::string()) == "rv-test" &&
+                           review_json.value("intent_source", std::string()) ==
+                                   "request-file" &&
+                           review_json.value("changed_files", 0) == 2,
+                   "reviews response fields");
+            const auto review_bad = http.Post(
+                    base + "/api/v1/reviews",
+                    R"({"cwd":"/repo","feature":"bad"})", "application/json");
+            Expect(review_bad.status_code == 400,
+                   "failed review creation should return 400");
+            const auto review_missing = http.Post(
+                    base + "/api/v1/reviews", R"({"feature":"x"})", "application/json");
+            Expect(review_missing.status_code == 400,
+                   "reviews requires cwd and feature");
+        }
 
         // ---- 权限模式 REST ----
         aiagent::permissions::PermissionStore permission_store;
@@ -974,7 +1110,7 @@ int main() {
         // 回合外事件推送：活跃流内到达的帧按序补发；无活跃流时静默丢弃。
         gateway.SetStreamEventHandler(
                 [&gateway](const std::string& session_id, const std::string&,
-                           const std::string&,
+                           const std::string&, const std::string&,
                            const aiagent::agent::AgentEventCallback& on_event,
                            const aiagent::web::WebGateway::CancelCallback&,
                    const std::shared_ptr<aiagent::agent::MessageInbox>&) {
@@ -1033,6 +1169,7 @@ int main() {
             std::vector<std::string> inbox_seen;
             gateway.SetStreamEventHandler(
                     [&](const std::string&, const std::string&, const std::string&,
+                        const std::string&,
                         const aiagent::agent::AgentEventCallback&,
                         const aiagent::web::WebGateway::CancelCallback&,
                         const std::shared_ptr<aiagent::agent::MessageInbox>& inbox) {

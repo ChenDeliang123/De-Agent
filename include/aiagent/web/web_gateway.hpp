@@ -1,5 +1,7 @@
 #pragma once
 
+#include <json.hpp>
+
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -119,6 +121,36 @@ struct InstructionSourceInfo {
     bool truncated = false;
 };
 
+// 创建 review pack（POST /api/v1/reviews）。session_id 可空：外部 Agent/CI
+// 用 request_file/request_text 提供意图，不读 de 会话历史。
+struct ReviewCreateRequest {
+    std::string session_id;
+    std::string cwd;
+    std::string feature;
+    std::string base;
+    std::string request_file;
+    std::string request_text;
+    std::string producer;
+    std::string agent;
+    std::vector<std::string> context_paths;
+    std::string notes;
+    nlohmann::json verification = nlohmann::json::array();
+    std::string previous_report;
+};
+
+struct ReviewCreateResult {
+    bool ok = false;
+    std::string error;
+    std::string review_id;
+    std::string pack_path;
+    std::string report_path_hint;
+    std::string intent_source;
+    bool context_missing = false;
+    bool truncated = false;
+    std::size_t changed_files = 0;
+    std::size_t diff_bytes = 0;
+};
+
 // 面向 Node/浏览器前端的 REST + SSE Gateway。
 // 只做协议转换与会话编排，业务逻辑仍由 AgentServer/TaskManager 承担。
 class WebGateway {
@@ -137,6 +169,7 @@ public:
             const std::string& session_id,
             const std::string& message,
             const std::string& cwd,
+            const std::string& role,
             const aiagent::agent::AgentEventCallback& on_event,
             const CancelCallback& should_cancel,
             const std::shared_ptr<aiagent::agent::MessageInbox>& inbox)>;
@@ -162,8 +195,10 @@ public:
     using CloneHandler = std::function<bool(const std::string& source_id, std::string* new_id,
                                             std::string* error)>;
 
-    // 工具清单（GET /api/v1/tools?path=）。cwd 为空时由装配方使用默认目录。
-    using ToolsHandler = std::function<std::vector<ToolInfo>(const std::string& cwd)>;
+    // 工具清单（GET /api/v1/tools?path=&session_id=）。cwd 为空时由装配方
+    // 使用默认目录；session_id 非空时按会话角色返回工具集。
+    using ToolsHandler = std::function<std::vector<ToolInfo>(const std::string& cwd,
+                                                             const std::string& session_id)>;
 
     // 技能目录（GET /api/v1/skills?path=）。cwd 为空时由装配方使用默认目录。
     using SkillsHandler = std::function<SkillsSnapshot(const std::string& cwd)>;
@@ -303,6 +338,14 @@ public:
     void SetProjectPermissionHandler(ProjectPermissionHandler handler);
     void SetTrustSetHandler(TrustSetHandler handler);
     void SetPermissionInitHandler(PermissionInitHandler handler);
+
+    // 注入 review pack 创建逻辑（POST /api/v1/reviews）。未设置时返回 501。
+    using ReviewCreateHandler = std::function<ReviewCreateResult(const ReviewCreateRequest&)>;
+    void SetReviewCreateHandler(ReviewCreateHandler handler);
+
+    // review 总开关（GET /api/v1/reviews/config）：启动器/CLI 在进入 review 前检查。
+    using ReviewEnabledHandler = std::function<bool()>;
+    void SetReviewEnabledHandler(ReviewEnabledHandler handler);
 
     // 注入工具审批处理逻辑。未设置时 /chat/approve 返回 501。
     void SetApproveHandler(ApproveHandler handler);

@@ -303,6 +303,14 @@ public:
         tools_handler_ = std::move(handler);
     }
 
+    void SetReviewCreateHandler(WebGateway::ReviewCreateHandler handler) {
+        review_create_handler_ = std::move(handler);
+    }
+
+    void SetReviewEnabledHandler(WebGateway::ReviewEnabledHandler handler) {
+        review_enabled_handler_ = std::move(handler);
+    }
+
     void SetSkillsHandler(WebGateway::SkillsHandler handler) {
         skills_handler_ = std::move(handler);
     }
@@ -390,6 +398,55 @@ public:
     }
 
 private:
+    std::string StoredRole(const std::string& session_id) const {
+        if (session_meta_store_ == nullptr) {
+            return "coding";
+        }
+        return session_meta_store_->GetRole(session_id).value_or("coding");
+    }
+
+    // 校验/写入会话角色。角色只能在空会话上设置；已有历史且角色不一致 -> 409。
+    bool ResolveRole(const std::string& session_id, const std::string& requested,
+                     std::string* effective, std::string* error, int* status) {
+        *status = 200;
+        if (!requested.empty() && requested != "coding" && requested != "reviewer") {
+            *status = 400;
+            if (error != nullptr) {
+                *error = "role must be coding or reviewer";
+            }
+            return false;
+        }
+        const bool has_history =
+                !LatestHistory(task_store_, history_cache_, session_id).empty();
+        const std::optional<std::string> stored =
+                session_meta_store_ != nullptr ? session_meta_store_->GetRole(session_id)
+                                               : std::nullopt;
+        if (stored.has_value()) {
+            if (!requested.empty() && requested != *stored) {
+                *status = 409;
+                if (error != nullptr) {
+                    *error = "session role mismatch: " + *stored;
+                }
+                return false;
+            }
+            *effective = *stored;
+            return true;
+        }
+        const std::string role = requested.empty() ? "coding" : requested;
+        if (has_history && role == "reviewer") {
+            *status = 409;
+            if (error != nullptr) {
+                *error = "cannot switch an existing coding session to reviewer";
+            }
+            return false;
+        }
+        if (session_meta_store_ != nullptr) {
+            session_meta_store_->SetRole(session_id, role);
+        }
+        *effective = role;
+        return true;
+    }
+
     void SetupRoutes() {
         server_.Get("/health", [this](const httplib::Request&, httplib::Response& response) {
             response.set_content(R"({"status":"ok"})", "application/json");
@@ -456,7 +513,9 @@ private:
                             if (title.empty()) {
                                 title = SessionTitleFromHistory(entry.history);
                             }
-                            nlohmann::json item = {{"id", entry.id}, {"title", title}};
+                            nlohmann::json item = {{"id", entry.id},
+                                                   {"title", title},
+                                                   {"role", StoredRole(entry.id)}};
                             if (entry.updated.has_value()) {
                                 item["updated_at"] =
                                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -751,8 +810,12 @@ private:
             }
             const std::string cwd =
                     request.has_param("path") ? request.get_param_value("path") : std::string();
+            const std::string session_id =
+                    request.has_param("session_id")
+                            ? request.get_param_value("session_id")
+                            : std::string();
             nlohmann::json payload = nlohmann::json::array();
-            for (const auto& tool : tools_handler_(cwd)) {
+            for (const auto& tool : tools_handler_(cwd, session_id)) {
                 payload.push_back({{"name", tool.name}, {"description", tool.description}});
             }
             response.set_content(payload.dump(), "application/json");
@@ -1231,6 +1294,17 @@ private:
                              if (session_id.empty()) {
                                  session_id = std::string(a2a::core::NewUuid());
                              }
+                             std::string role;
+                             std::string role_error;
+                             int role_status = 200;
+                             if (!ResolveRole(session_id, StringValue(body, "role"), &role,
+                                              &role_error, &role_status)) {
+                                 response.status = role_status;
+                                 response.set_content(
+                                         nlohmann::json{{"error", role_error}}.dump(),
+                                         "application/json");
+                                 return;
+                             }
                              const auto result = ChatOnce(session_id, content);
                              response.set_content(result.dump(), "application/json");
                          } catch (const nlohmann::json::exception& e) {
@@ -1263,8 +1337,19 @@ private:
                              if (session_id.empty()) {
                                  session_id = std::string(a2a::core::NewUuid());
                              }
+                             std::string role;
+                             std::string role_error;
+                             int role_status = 200;
+                             if (!ResolveRole(session_id, StringValue(body, "role"), &role,
+                                              &role_error, &role_status)) {
+                                 response.status = role_status;
+                                 response.set_content(
+                                         nlohmann::json{{"error", role_error}}.dump(),
+                                         "application/json");
+                                 return;
+                             }
                              const std::string cwd = StringValue(body, "cwd");
-                             StreamChat(session_id, content, cwd, response);
+                             StreamChat(session_id, content, cwd, role, response);
                          } catch (const std::exception& e) {
                              response.status = 400;
                              response.set_content(
@@ -1352,6 +1437,92 @@ private:
                          }
                      });
 
+        server_.Get("/api/v1/reviews/config",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        const bool enabled =
+                                review_enabled_handler_ && review_enabled_handler_();
+                        response.set_content(
+                                nlohmann::json{{"enabled", enabled}}.dump(),
+                                "application/json");
+                    });
+
+        // 创建 review pack（外部 Agent/CI/人类与 de 会话共用）。
+        server_.Post("/api/v1/reviews",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!review_create_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"review pack creation not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             ReviewCreateRequest create;
+                             create.session_id = StringValue(body, "session_id");
+                             create.cwd = StringValue(body, "cwd");
+                             create.feature = StringValue(body, "feature");
+                             create.base = StringValue(body, "base");
+                             create.request_file = StringValue(body, "request_file");
+                             create.request_text = StringValue(body, "request_text");
+                             create.producer = StringValue(body, "producer");
+                             create.agent = StringValue(body, "agent");
+                             create.notes = StringValue(body, "notes");
+                             create.previous_report = StringValue(body, "previous_report");
+                             if (body.contains("context_paths") &&
+                                 body["context_paths"].is_array()) {
+                                 create.context_paths =
+                                         body["context_paths"].get<std::vector<std::string>>();
+                             }
+                             if (body.contains("verification")) {
+                                 if (!body["verification"].is_array()) {
+                                     response.status = 400;
+                                     response.set_content(
+                                             R"({"error":"verification must be an array"})",
+                                             "application/json");
+                                     return;
+                                 }
+                                 create.verification = body["verification"];
+                             }
+                             if (create.cwd.empty() || create.feature.empty()) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         R"({"error":"cwd and feature are required"})",
+                                         "application/json");
+                                 return;
+                             }
+                             const ReviewCreateResult result =
+                                     review_create_handler_(create);
+                             if (!result.ok) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         nlohmann::json{{"error", result.error}}.dump(),
+                                         "application/json");
+                                 return;
+                             }
+                             response.set_content(
+                                     nlohmann::json{{"review_id", result.review_id},
+                                                    {"pack_path", result.pack_path},
+                                                    {"report_path_hint",
+                                                     result.report_path_hint},
+                                                    {"changed_files", result.changed_files},
+                                                    {"diff_bytes", result.diff_bytes},
+                                                    {"truncated", result.truncated},
+                                                    {"intent_source", result.intent_source},
+                                                    {"context_missing",
+                                                     result.context_missing}}
+                                             .dump(),
+                                     "application/json");
+                         } catch (const nlohmann::json::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                     e.what()}}
+                                             .dump(),
+                                     "application/json");
+                         }
+                     });
+
         server_.Post("/api/v1/chat/cancel",
                      [this](const httplib::Request& request, httplib::Response& response) {
                          try {
@@ -1415,7 +1586,8 @@ private:
     }
 
     void StreamChat(const std::string& session_id, const std::string& content,
-                    const std::string& cwd, httplib::Response& response) {
+                    const std::string& cwd, const std::string& role,
+                    httplib::Response& response) {
         const auto started = std::chrono::steady_clock::now();
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "web",
@@ -1424,8 +1596,8 @@ private:
         response.status = 200;
         response.set_chunked_content_provider(
                 "text/event-stream",
-                [this, session_id, content, cwd, started](size_t offset,
-                                                          httplib::DataSink& sink) {
+                [this, session_id, content, cwd, role, started](size_t offset,
+                                                               httplib::DataSink& sink) {
                     if (offset != 0) {
                         sink.done();
                         return false;
@@ -1478,6 +1650,7 @@ private:
                                     session_id,
                                     content,
                                     cwd,
+                                    role,
                                     [&write, &flush_queued](
                                             const aiagent::agent::AgentEvent& event) {
                                         flush_queued();
@@ -1545,6 +1718,8 @@ private:
     WebGateway::DeleteHandler delete_handler_;
     WebGateway::CloneHandler clone_handler_;
     WebGateway::ToolsHandler tools_handler_;
+    WebGateway::ReviewCreateHandler review_create_handler_;
+    WebGateway::ReviewEnabledHandler review_enabled_handler_;
     WebGateway::SkillsHandler skills_handler_;
     WebGateway::AgentsInfoHandler agents_handler_;
     WebGateway::BackgroundStopHandler background_stop_handler_;
@@ -1605,6 +1780,14 @@ void WebGateway::SetCloneHandler(WebGateway::CloneHandler handler) {
 
 void WebGateway::SetToolsHandler(WebGateway::ToolsHandler handler) {
     impl_->SetToolsHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewCreateHandler(WebGateway::ReviewCreateHandler handler) {
+    impl_->SetReviewCreateHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewEnabledHandler(WebGateway::ReviewEnabledHandler handler) {
+    impl_->SetReviewEnabledHandler(std::move(handler));
 }
 
 void WebGateway::SetSkillsHandler(WebGateway::SkillsHandler handler) {
