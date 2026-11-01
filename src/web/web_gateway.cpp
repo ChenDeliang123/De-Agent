@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -1819,12 +1820,47 @@ private:
                             stream->inbox->Close();
                         }
                     };
-                    const auto write = [&sink](const std::string& event,
+                    std::mutex sink_mutex;
+                    std::atomic<bool> sink_failed{false};
+                    std::atomic<bool> stream_finished{false};
+                    const auto write = [&sink, &sink_mutex, &sink_failed](
+                                               const std::string& event,
                                                const nlohmann::json& payload) {
                         const std::string frame =
                                 "event: " + event + "\ndata: " + payload.dump() + "\n\n";
-                        return sink.write(frame.data(), frame.size());
+                        std::lock_guard<std::mutex> lock(sink_mutex);
+                        if (sink_failed.load()) {
+                            return false;
+                        }
+                        if (!sink.write(frame.data(), frame.size())) {
+                            sink_failed.store(true);
+                            return false;
+                        }
+                        return true;
                     };
+                    // Node/undici fetch 的 bodyTimeout 默认 300s；review_verify 跑长构建时
+                    // 可能 5 分钟没有任何事件。定期写 SSE comment 保活，避免 CLI 把
+                    // 正常的长时间工具执行误判为连接 terminated。
+                    std::thread heartbeat([&sink, &sink_mutex, &sink_failed,
+                                           &stream_finished]() {
+                        const std::string ping = ": keepalive\n\n";
+                        while (!stream_finished.load()) {
+                            for (int i = 0; i < 150 && !stream_finished.load(); ++i) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                            if (stream_finished.load()) {
+                                break;
+                            }
+                            std::lock_guard<std::mutex> lock(sink_mutex);
+                            if (sink_failed.load()) {
+                                break;
+                            }
+                            if (!sink.write(ping.data(), ping.size())) {
+                                sink_failed.store(true);
+                                break;
+                            }
+                        }
+                    });
                     // 回合外事件（后台任务的派发/结果）先出队再写本回合自己的帧：
                     // 队列由 worker 线程入队，写 socket 只发生在当前（provider）线程。
                     const auto flush_queued = [stream, &write]() {
@@ -1873,6 +1909,10 @@ private:
                                 "session=" + session_id +
                                         " event=stream_error message=" + e.what());
                         write("error", {{"error", e.what()}});
+                    }
+                    stream_finished.store(true);
+                    if (heartbeat.joinable()) {
+                        heartbeat.join();
                     }
                     const auto duration_ms =
                             std::chrono::duration_cast<std::chrono::milliseconds>(
