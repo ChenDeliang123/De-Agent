@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -8,8 +11,11 @@ import {
   renderHelp,
   runCommand,
 } from "../../src/app/commands/index.mjs";
-import { parseReviewPrepareArgs } from "../../src/app/review-prepare.mjs";
-import { reviewPrepare } from "../../src/app/review-prepare.mjs";
+import {
+  findLatestReviewPack,
+  parseReviewPrepareArgs,
+  reviewPrepare,
+} from "../../src/app/review-prepare.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -167,4 +173,25 @@ test("reviewPrepare rejects request and request-file together", async () => {
     }),
     /mutually exclusive/,
   );
+});
+
+
+test("findLatestReviewPack resolves newest pack and feature filter", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "de-review-latest-"));
+  try {
+    const inbox = path.join(root, "docs", "review", "inbox");
+    fs.mkdirSync(inbox, { recursive: true });
+    const older = path.join(inbox, "alpha-20260101-0000.json");
+    const newer = path.join(inbox, "beta-20260101-0000.json");
+    fs.writeFileSync(older, "{}");
+    fs.writeFileSync(newer, "{}");
+    fs.utimesSync(older, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+    fs.utimesSync(newer, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+    assert.equal(findLatestReviewPack(root), newer);
+    assert.equal(findLatestReviewPack(root, "alpha"), older);
+    assert.equal(findLatestReviewPack(root, "missing"), null);
+    assert.equal(findLatestReviewPack(path.join(root, "nope")), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

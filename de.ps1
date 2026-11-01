@@ -172,6 +172,8 @@ commands:
   doctor           check runtime environment and resolved paths
   purge            delete user data dir (asks to confirm; --yes skips)
   review prepare   create a review pack without entering the CLI
+  review latest    open the newest pack under docs/review/inbox
+  review <feature> open the newest pack for a feature name
   review <pack>    start an independent reviewer session for a pack
   review --background <pack>   submit a background review job
   review status [job_id]       list/query background review jobs
@@ -630,8 +632,12 @@ switch ($Action) {
                     exit 2
                 }
                 $cliArgsOut += @("--review-resume", $CliArgs[1])
-            } else {
+            } elseif ($CliArgs[0] -eq "latest" -or $CliArgs[0] -eq "-l") {
+                $cliArgsOut += @("--review-latest")
+            } elseif (Test-Path -LiteralPath $CliArgs[0]) {
                 $cliArgsOut += @("--review-pack", $CliArgs[0])
+            } else {
+                $cliArgsOut += @("--review-feature", $CliArgs[0])
             }
             & $node.Source @cliArgsOut
             $cliStatus = $LASTEXITCODE

@@ -37,6 +37,7 @@ import {
 } from "./src/app/commands/index.mjs";
 import { PROMPT_LABEL, formatStatusLine, gitBranch, shortCwd } from "./src/ui/statusbar.mjs";
 import { askUser, askYesNo } from "./src/ui/prompt.mjs";
+import { findLatestReviewPack } from "./src/app/review-prepare.mjs";
 
 const defaultBackend = "http://127.0.0.1:18081";
 // 与 renderer / editor 共享的 styler，支持运行时换主题。
@@ -119,6 +120,8 @@ function parseArgs(argv) {
     role: null,
     prompt: null,
     reviewPack: null,
+    reviewLatest: false,
+    reviewFeature: null,
     reviewResume: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -145,6 +148,10 @@ function parseArgs(argv) {
       options.prompt = argv[++i];
     } else if (arg === "--review-pack" && i + 1 < argv.length) {
       options.reviewPack = argv[++i];
+    } else if (arg === "--review-latest") {
+      options.reviewLatest = true;
+    } else if (arg === "--review-feature" && i + 1 < argv.length) {
+      options.reviewFeature = argv[++i];
     } else if (arg === "--review-resume" && i + 1 < argv.length) {
       options.reviewResume = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
@@ -170,6 +177,8 @@ options:
   --role <role>     coding | reviewer (default coding; cannot switch existing sessions)
   --prompt <text>   send one message automatically after startup
   --review-pack <p> start a reviewer session for a review pack
+  --review-latest   open the newest pack under docs/review/inbox
+  --review-feature <name> open the newest pack for <name>
   --review-resume <id> resume a review from its checkpoint
   -h, --help        show this help
 `);
@@ -482,6 +491,20 @@ function resolveReviewInputs(options) {
     }
     options.reviewPack = path.resolve(base, state.pack_path);
     options.reviewResumePrompt = `Resume review ${options.reviewResume} from its checkpoint. Read the manifest again and continue with the remaining changed files; do not repeat already-verified findings unless the source changed.`;
+  }
+  if (options.reviewLatest || options.reviewFeature) {
+    if (options.reviewPack) {
+      throw new Error("--review-pack cannot be combined with --review-latest/--review-feature");
+    }
+    const base = options.cwd ? path.resolve(options.cwd) : process.cwd();
+    const resolved = findLatestReviewPack(base, options.reviewFeature);
+    if (!resolved) {
+      throw new Error(
+        `no review pack found under ${path.join(base, "docs", "review", "inbox")}` +
+          (options.reviewFeature ? ` for feature ${options.reviewFeature}` : ""),
+      );
+    }
+    options.reviewPack = resolved;
   }
   if (options.reviewPack) {
     const packPath = path.resolve(options.reviewPack);

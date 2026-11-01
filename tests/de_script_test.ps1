@@ -147,6 +147,7 @@ try {
     Assert-Exit 0 "launcher help"
     Assert ($launcherHelp -match "review --background") "launcher help lists review jobs"
     Assert ($launcherHelp -match "review prepare") "launcher help lists review prepare"
+    Assert ($launcherHelp -match "review latest") "launcher help lists review latest"
 
     & $de purge --yes *> (Join-Path $temp "purge.out")
     Assert-Exit 0 "source purge"

@@ -56,6 +56,28 @@ export function parseReviewPrepareArgs(argv) {
   return options;
 }
 
+// 默认 review 目录下按 mtime 找最新 pack；feature 非空时只匹配 `<feature>-*.json`。
+// 返回绝对路径；找不到返回 null。只用于交互便利，不改变 pack 的权威来源。
+export function findLatestReviewPack(cwd, feature = null) {
+  const inbox = path.join(path.resolve(cwd), "docs", "review", "inbox");
+  let entries;
+  try {
+    entries = fs.readdirSync(inbox, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const prefix = feature ? `${feature}-` : "";
+  const candidates = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .filter((entry) => !prefix || entry.name.startsWith(prefix))
+    .map((entry) => {
+      const full = path.join(inbox, entry.name);
+      return { full, mtime: fs.statSync(full).mtimeMs };
+    })
+    .sort((left, right) => right.mtime - left.mtime);
+  return candidates.length > 0 ? candidates[0].full : null;
+}
+
 export function reviewPrepareHelp() {
   return [
     "usage: de review prepare --feature <name> [options]",

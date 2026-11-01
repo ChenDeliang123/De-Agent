@@ -125,6 +125,8 @@ commands:
   doctor           check runtime environment and resolved paths
   purge            delete user data dir (sessions/permissions/logs/conf), asks to confirm
   review prepare   create a review pack without entering the CLI
+  review latest    open the newest pack under docs/review/inbox
+  review <feature> open the newest pack for a feature name
   review <pack>    start an independent reviewer session for a pack
   review --background <pack>   submit a background review job
   review status [job_id]       list/query background review jobs
@@ -626,8 +628,12 @@ case "${ACTION}" in
         exit 2
       fi
       review_cli_args=(--review-resume "${CLI_ARGS[1]}")
-    else
+    elif [ "${CLI_ARGS[0]}" = "latest" ] || [ "${CLI_ARGS[0]}" = "-l" ]; then
+      review_cli_args=(--review-latest)
+    elif [ -f "${CLI_ARGS[0]}" ]; then
       review_cli_args=(--review-pack "${CLI_ARGS[0]}")
+    else
+      review_cli_args=(--review-feature "${CLI_ARGS[0]}")
     fi
     AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
     AIAGENT_SHARE_DIR="${SHARE_DIR}" \

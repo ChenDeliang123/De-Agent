@@ -607,7 +607,9 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 de review prepare --feature skill-loader --base master \
   --request-file .de/review/request.md --agent claude-code --json
 
-# 2) 新终端启动独立 reviewer
+# 2) 新终端启动独立 reviewer（路径可省略）
+de review latest                       # 打开 docs/review/inbox 里最新的 pack
+de review skill-loader                 # 打开该 feature 最新的 pack
 de review docs/review/inbox/skill-loader-20261101-1430.json
 
 # 3) reviewer 写报告后，回到编码会话按报告修复，再生成带 --previous-report 的第二轮

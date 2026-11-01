@@ -49,6 +49,10 @@ case "${help_out}" in
   *"review --background"*) ;;
   *) fail "de help missing review --background" ;;
 esac
+case "${help_out}" in
+  *"review latest"*) ;;
+  *) fail "de help missing review latest" ;;
+esac
 
 if ! out="$("${DE}" init 2>&1)"; then
   echo "${out}"
