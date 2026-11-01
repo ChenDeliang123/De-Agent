@@ -314,8 +314,17 @@ tools::ToolContext AgentRuntime::BuildToolContext(
             working_directory.empty() ? fallback_working_directory_ : working_directory;
     context.policy =
             permissions::PolicyForMode(ResolvePermissionMode(working_directory, interactive));
+    if (workspace_sandbox_only_) {
+        // reviewer：权限档位只决定“是否需要审批”，不扩大到仓库外。
+        context.policy.allow_outside = false;
+        context.policy.allow_temp = false;
+    }
     context.bash_policy = BuildEffectiveBashPolicy(context.working_directory);
     return context;
+}
+
+void AgentRuntime::SetWorkspaceSandboxOnly(bool enabled) {
+    workspace_sandbox_only_ = enabled;
 }
 
 void AgentRuntime::SetApprovalHandler(ApprovalHandler handler) {
@@ -340,9 +349,11 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         const tools::ToolContext& context,
         const std::string& context_id,
         const std::string& bash_command,
-        const std::string& tool_path) const {
+        const std::string& tool_path,
+        const std::string& tool_arguments) const {
     const permissions::PermissionPolicy& policy = context.policy;
-    if (tool_name == "read") {
+    if (tool_name == "read" || tool_name == "review_context" ||
+        tool_name == "review_read") {
         if (!policy.allow_read) {
             return {ToolGate::kDeny,
                     "permission denied: read is disabled by the current permission mode"};
@@ -357,7 +368,45 @@ AgentRuntime::ToolGateResult AgentRuntime::CheckToolGate(
         }
         return {ToolGate::kAllow, {}};
     }
-    if (tool_name == "write" || tool_name == "edit") {
+    if (tool_name == "review_report" || tool_name == "review_handoff") {
+        // 审核产物写入：路径/大小/格式由工具内部硬校验，不弹审批。
+        return {ToolGate::kAllow, {}};
+    }
+    if (tool_name == "review_setup") {
+        bool save = false;
+        try {
+            if (!tool_arguments.empty()) {
+                const auto args = nlohmann::json::parse(tool_arguments);
+                save = args.value("action", std::string()) == "save";
+            }
+        } catch (const nlohmann::json::exception&) {
+            return {ToolGate::kDeny, "permission denied: invalid review_setup arguments"};
+        }
+        if (!save) {
+            if (!policy.allow_read) {
+                return {ToolGate::kDeny,
+                        "permission denied: review_setup requires read access"};
+            }
+            return {ToolGate::kAllow, {}};
+        }
+        // save 每次都必须展示完整命令；不允许“本会话总是允许”跳过。
+        return {ToolGate::kNeedsApproval,
+                "writing .de/review.json and recording user consent needs approval"};
+    }
+    if (tool_name == "review_verify") {
+        if (!policy.allow_command) {
+            return {ToolGate::kDeny,
+                    "permission denied: review verification is disabled by the current "
+                    "permission mode"};
+        }
+        if (policy.require_confirm_command && !SessionAllows(context_id, tool_name)) {
+            return {ToolGate::kNeedsApproval,
+                    "review verification command execution needs approval"};
+        }
+        return {ToolGate::kAllow, {}};
+    }
+    if (tool_name == "write" || tool_name == "edit" ||
+        tool_name == "review_test_write") {
         if (!policy.allow_write) {
             return {ToolGate::kDeny,
                     "permission denied: file writes are disabled by the current "
@@ -415,11 +464,12 @@ AgentRuntime::ToolDecision AgentRuntime::DecideTool(
         bash_command = BashCommandFromArguments(call.arguments);
     }
     std::string tool_path;
-    if (call.name == "write" || call.name == "edit") {
+    if (call.name == "write" || call.name == "edit" ||
+        call.name == "review_test_write") {
         tool_path = ToolPathFromArguments(call.arguments);
     }
-    const ToolGateResult gate =
-            CheckToolGate(call.name, context, context_id, bash_command, tool_path);
+    const ToolGateResult gate = CheckToolGate(call.name, context, context_id,
+                                              bash_command, tool_path, call.arguments);
     if (gate.gate == ToolGate::kAllow) {
         return {true, {}};
     }
@@ -448,7 +498,10 @@ AgentRuntime::ToolDecision AgentRuntime::DecideTool(
     request.reason = gate.reason;
     const ApprovalDecision decision = approval_handler_(request);
     if (decision == ApprovalDecision::kAllowSession) {
-        GrantSessionAllow(context_id, call.name);
+        // review_setup(save) 必须每次展示完整 argv，不允许会话级免审。
+        if (call.name != "review_setup") {
+            GrantSessionAllow(context_id, call.name);
+        }
         return {true, {}};
     }
     if (decision == ApprovalDecision::kAllowOnce) {

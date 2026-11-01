@@ -35,4 +35,9 @@ struct SystemPromptOptions {
 std::string BuildCodingSystemPrompt(const SystemPromptOptions& options);
 std::string BuildCodingSystemPrompt(const std::vector<llm::ToolSpec>& tools);
 
+// 顶层审核 Agent 的系统提示词。身份、写边界、时效、证据门槛与报告契约
+// 硬编码在二进制里（项目 AGENTS.md / skill 只能补充，不能覆盖）；工具清单
+// 与工具贡献的规则仍按本次真实激活集动态渲染。
+std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools);
+
 }  // namespace aiagent::agent

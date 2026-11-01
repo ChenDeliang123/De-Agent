@@ -2166,6 +2166,26 @@ int main() {
                    "full temp write should reach the file directly");
         }
 
+        // reviewer：即使 permissions=full，也只允许读工作目录内。
+        {
+            auto model = std::make_shared<OneShotToolModel>(
+                    "read", nlohmann::json{{"path", temp_full}}.dump());
+            aiagent::agent::AgentRuntime runtime(model);
+            runtime.SetToolProvider(
+                    std::make_shared<aiagent::tools::LocalCodingTools>(WorkDir()));
+            runtime.SetPermissionSettings(settings_for(PermissionMode::kFull));
+            runtime.SetWorkspaceSandboxOnly(true);
+            a2a::models::Message user = a2a::models::MakeTextMessage(
+                    a2a::models::Role::kUser, "read outside", "text/plain");
+            runtime.HandleMessageStreamingEvents(
+                    user, {user}, "ctx-review-sandbox", nullptr, WorkDir(),
+                    []() { return false; });
+            Expect(model->last_tool_content.find("path escapes sandbox") !=
+                           std::string::npos,
+                   "reviewer must not read outside the workspace even in full mode: " +
+                           model->last_tool_content);
+        }
+
         std::filesystem::remove(temp_read);
         std::filesystem::remove(temp_write);
         std::filesystem::remove(temp_full);

@@ -106,6 +106,10 @@ public:
     // 避免子 Agent 工具白名单不含 skill 时误导模型。
     void SetSkillLoader(std::shared_ptr<const skills::SkillLoader> loader);
 
+    // reviewer 专用：即使权限档位是 full，也只允许读写工作目录内的路径。
+    // 审核不应把仓库外的用户目录/临时目录带进上下文。
+    void SetWorkspaceSandboxOnly(bool enabled);
+
     // 设置上下文压缩参数；默认 enabled，阈值见 CompactionSettings。
     void SetCompactionSettings(const CompactionSettings& settings);
 
@@ -200,7 +204,8 @@ private:
                                  const tools::ToolContext& context,
                                  const std::string& context_id,
                                  const std::string& bash_command,
-                                 const std::string& tool_path) const;
+                                 const std::string& tool_path,
+                                 const std::string& tool_arguments) const;
 
     // 解析 cwd 对应项目的只读配置（可能为空）。
     std::shared_ptr<const permissions::ProjectConfig> ResolveProjectConfig(
@@ -258,6 +263,7 @@ private:
     std::map<std::string, std::set<std::string>> session_allow_;
     std::string fallback_working_directory_;
     std::string system_prompt_;
+    bool workspace_sandbox_only_ = false;
     // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。
     // 显式设置正数时作为可选安全上限。
     int max_tool_rounds_ = 0;
