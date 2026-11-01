@@ -62,6 +62,9 @@ async function openSession(ctx, all, target) {
     return false;
   }
   ctx.state.sessionId = sessionId(entry);
+  if (entry && typeof entry === "object" && entry.role) {
+    ctx.state.role = entry.role;
+  }
   const restoredCwd = await restoreSessionCwd(ctx);
   if (restoredCwd) {
     ctx.print(`cwd: ${restoredCwd}`);

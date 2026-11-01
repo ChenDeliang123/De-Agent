@@ -666,12 +666,18 @@ async function main() {
   // 启动会话解析顺序：--session > --continue > --resume。
   if (!state.sessionId && options.continueSession && sessions.length > 0) {
     state.sessionId = sessionEntryId(sessions[0]);
+    if (sessions[0] && typeof sessions[0] === "object" && sessions[0].role) {
+      state.role = sessions[0].role;
+    }
     emit(`continuing session ${state.sessionId}`);
   } else if (!state.sessionId && options.resume && sessions.length > 0) {
     if (editor) {
       const index = await ctx.selectSession(sessions);
       if (index !== null && index !== undefined && sessions[index]) {
         state.sessionId = sessionEntryId(sessions[index]);
+        if (sessions[index].role) {
+          state.role = sessions[index].role;
+        }
       }
     } else {
       sessions.forEach((entry, index) => {
