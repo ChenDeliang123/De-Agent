@@ -123,6 +123,41 @@ follow_symlinks = false
 sandbox_enabled = true
 sandbox_roots =
 
+[review]
+; 代码审核 Agent：独立 reviewer 会话 + review pack/report 文件契约。
+; 语义见 docs/planning/agent/代码审核Agent规划.md。
+enabled = true
+; 审核产物目录；相对工作目录，必须是仓库内相对路径（拒绝 ..）。
+dir = docs/review
+; pack 上限。
+max_diff_bytes = 2097152
+max_file_bytes = 262144
+max_untracked_bytes = 524288
+max_files = 500
+; 用户消息摘录与报告上限。
+session_excerpt_bytes = 16384
+max_report_bytes = 1048576
+; 空 = 继承父模型（P2 才真正使用）。
+model =
+; 受限验证：只执行 pack/项目配置声明的 argv；默认开启。
+verify_enabled = true
+verify_timeout_s = 900
+verify_output_bytes = 32768
+; v1 只支持 in_place。
+verify_mode = in_place
+; 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
+max_tool_rounds = 64
+review_timeout_s = 3600
+checkpoint = true
+draft_report = true
+chunk_files = 20
+chunk_diff_bytes = 262144
+; 后台队列（P1 预留）。
+background_enabled = false
+max_concurrent_jobs = 1
+max_queued_jobs = 4
+supersede_policy = latest
+
 [agents]
 ; 多 Agent 协同：父 Agent 可用 task 工具把自包含子任务派给子 Agent（独立上下文，
 ; 只回传压缩后的结果）。规划与语义见 docs/planning/agent/多Agent协同规划.md。
@@ -156,11 +191,9 @@ default_model =
 ; tools = read,grep,glob,ls
 ; model = deepseek-v4-flash
 
-; 可选示例：需要写权限的代码审查子 Agent（按需打开）。
-; [agents.reviewer]
-; description = Review a diff or patch and report concrete defects.
-; system_prompt_file = prompts/reviewer.md
-; tools = read,grep,glob,bash
+; 顶层审核用 [review] + prompts/reviewer.md；需要进程内审核子 Agent 时，
+; 自行定义 [agents.<name>] 并指向独立提示词文件，避免与顶层 reviewer 复用同一份
+; 工具集语义。
 
 [storage]
 ; 用户级数据目录（权限等与用户相关的状态）。

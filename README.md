@@ -22,6 +22,9 @@ DeepSeek 进行对话、按需调用 MCP 与内置文件/命令工具，并以 A
 - 文件工具路径沙箱：`read`/`write`/`edit` 默认只能访问工作目录及其子目录。
 - 权限模式：按工作路径选择 `confirm` / `workspace` / `full`，后端据此裁决工具调用。
 - 内置本地 REST + SSE 后端，配套零 npm 依赖的终端 coding 客户端。
+- 代码审核 Agent：`de review` 打开独立 `reviewer` 会话；编码方先生成 review pack
+  （diff/untracked/digest/意图/验证声明），reviewer 只读源码、按声明 argv 复跑
+  构建/测试，并把报告写到 `docs/review/`。
 
 [a2a-protocol]: https://gitee.com/chen_dl/a2a-protocol
 [mcp-extension-platform]: https://gitee.com/chen_dl/mcp-extension-platform
@@ -527,6 +530,9 @@ de logs      # 查看后端日志
 /agents           查看子 Agent 开关、定义与运行统计（含 token 用量）（/api/v1/agents）
 /cwd [dir]        查看/切换工具工作目录
 /permissions [m]  查看/切换当前工作路径的权限模式（confirm|workspace|full|list|reset|show）
+/review prepare [feature] [--base <ref>]  生成 review pack（编码会话）
+/review cancel    取消当前 review 回合（已写 draft 保留）
+/review setup     查看 reviewer 如何检测/同意项目验证命令
 /clear            清屏
 /help             显示全部指令
 /hotkeys          显示键盘快捷键
@@ -570,6 +576,10 @@ CLI 启动参数：
 --cwd <dir>        工具工作目录（默认当前目录）
 --editor <cmd>     Ctrl+G 使用的外部编辑器（默认见上）
 --cli-config <f>   CLI 设置文件（默认 conf/cli.ini，可用 AIAGENT_CLI_CONFIG 覆盖）
+--role <role>      coding | reviewer（默认 coding；已有会话不能中途切换）
+--prompt <text>    启动后自动发送一条消息
+--review-pack <p>  为 review pack 启动 reviewer 会话（等价 de review <p>）
+--review-resume <id>  从 checkpoint 恢复未完成的 review
 ```
 
 也可以直接指定会话进入：
@@ -584,6 +594,48 @@ de --session <session-id>
 ./build/aiagent_app --config conf/conf.ini --db build/db/aiagent_tasks.db
 node cli/cli.mjs --backend http://127.0.0.1:18081
 ```
+
+## 代码审核 Agent（reviewer）
+
+审核是**独立顶层会话**，不是 `task` 子 Agent：独立 history、独立系统提示词、
+路径受限工具集；与编码会话只通过 review pack / review report 文件交接。
+
+```bash
+# 1) 编码会话或外部 Agent 生成 pack
+/review prepare skill-loader --base master
+# 或外部编码方（不要求是 de）：
+de review prepare --feature skill-loader --base master \
+  --request-file .de/review/request.md --agent claude-code --json
+
+# 2) 新终端启动独立 reviewer
+de review docs/review/inbox/skill-loader-20261101-1430.json
+
+# 3) reviewer 写报告后，回到编码会话按报告修复，再生成带 --previous-report 的第二轮
+```
+
+review pack 记录：base/head、tracked diff、untracked 文件（敏感文件只记路径）、
+diff/untracked sha256、producer、request 文件/文本、上下文路径 hash、声明的
+验证 argv。pack 之后代码一变，reviewer 的 `review_context` 就会返回 `stale`，
+此时只能写 `blocked` 报告。
+
+reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
+
+- `review_context`：manifest/diff/untracked/session（P1 增加 delta）。
+- `review_read`：批量按行读真实文件与调用方。
+- `review_verify`：只执行 pack 或 `.de/review.json` 声明的 argv（无 shell），
+  执行前后比较源码 digest；源码被测试改动会返回 `source_modified=true`。
+- `review_test_write`：只允许新建测试或向既有测试 append，不能覆盖/删除测试，
+  更不能写源码/普通配置。
+- `review_setup`：检测/展示/写入 `.de/review.json`；`save` 每次都要完整 argv 审批，
+  用户同意记录绑定配置 sha256，配置被改动后旧同意失效。
+- `review_report`：固定写到 `docs/review/<feature>-<YYYYMMDD-HHMM>.md`；
+  final 报告必须有 verdict，且 finding/验证/测试文件与状态记录一致。
+
+没有通用 `write`/`edit`/`bash`/`task`/MCP 工具；`full` 权限下 reviewer 也不能读
+仓库外路径。`[review] enabled=false` 时 coding 工具集不出现 `review_handoff`，
+`de review` 在启动前明确报错。配置项见 `conf/app.ini.example` 的 `[review]`。
+
+报告默认落在本地 `docs/`（该目录已被 gitignore），不自动提交。
 
 ## 本地后端 API（终端 CLI 使用）
 
@@ -601,7 +653,9 @@ node cli/cli.mjs --backend http://127.0.0.1:18081
 | `GET` | `/api/v1/sessions/:id/stats` | 会话统计（消息数/字符数/任务数/压缩） |
 | `GET` | `/api/v1/sessions` | 会话列表（`id` + `title` + `updated_at`，按最近使用排序） |
 | `GET` | `/api/v1/sessions/:id/messages` | 会话历史消息 |
-| `GET` | `/api/v1/tools` | 可用工具清单（coding + MCP） |
+| `GET` | `/api/v1/tools?session_id=<id>` | 按会话角色返回工具清单（coding + MCP / 路径受限 reviewer） |
+| `GET` | `/api/v1/reviews/config` | review 总开关 |
+| `POST` | `/api/v1/reviews` | 创建 review pack（session 可空；request 文件/文本 + 声明 argv） |
 | `GET` | `/api/v1/agents` | 子 Agent 开关/定义/运行统计（含 token 用量；关闭时返回 `{"enabled":false}`） |
 | `GET` | `/api/v1/permissions` | 权限配置列表（默认模式 + 显式路径） |
 | `GET` | `/api/v1/permissions/effective?path=<abs>` | 查询某路径的有效权限模式 |
