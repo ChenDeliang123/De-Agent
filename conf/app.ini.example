@@ -87,6 +87,10 @@ agents_md_max_depth = 16
 system_prompt_file =
 ; 非空时作为 <addendum> 追加到基础提示词后、项目指令前。
 append_system_prompt_file =
+; 非空时注入 <harness_docs>，列出 <root>/README.md 与 <root>/docs；
+; 只在用户询问 harness 本身（配置/权限/技能/MCP/打包/SDK）时读取。
+; 相对路径相对本配置文件所在目录解析；留空 = 不注入。
+harness_docs_root =
 ; 两个提示词文件的字节上限；超过直接报错，避免半截提示词上线。
 max_system_prompt_bytes = 32768
 

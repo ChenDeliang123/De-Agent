@@ -172,6 +172,7 @@ void TestParsePromptConfig() {
             "[prompt]\n"
             "system_prompt_file = SYSTEM.md\n"
             "append_system_prompt_file = APPEND.md\n"
+            "harness_docs_root = docs\n"
             "max_system_prompt_bytes = 4096\n",
             &error);
     Expect(parsed.has_value(), "prompt config should parse");
@@ -180,6 +181,8 @@ void TestParsePromptConfig() {
                "system_prompt_file should parse");
         Expect(parsed->append_system_prompt_file == "APPEND.md",
                "append_system_prompt_file should parse");
+        Expect(parsed->harness_docs_root == "docs",
+               "harness_docs_root should parse");
         Expect(parsed->max_system_prompt_bytes == 4096,
                "max_system_prompt_bytes should parse");
     }
@@ -191,6 +194,8 @@ void TestParsePromptConfig() {
                "system_prompt_file default should be empty");
         Expect(defaults->append_system_prompt_file.empty(),
                "append_system_prompt_file default should be empty");
+        Expect(defaults->harness_docs_root.empty(),
+               "harness_docs_root default should be empty");
         Expect(defaults->max_system_prompt_bytes == 32768,
                "max_system_prompt_bytes default should be 32768");
     }

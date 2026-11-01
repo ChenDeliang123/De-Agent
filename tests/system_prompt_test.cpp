@@ -103,6 +103,8 @@ void TestFullToolSet() {
     ExpectContains(prompt, "</tools>", "prompt should close the tools section");
     ExpectContains(prompt, "<rules>\n", "prompt should open a rules section");
     ExpectContains(prompt, "</rules>", "prompt should close the rules section");
+    ExpectNotContains(prompt, "<harness_docs>",
+                      "harness docs should stay off unless configured");
 
     // 工具清单只列本次激活的内置工具。
     for (const char* name : {"read", "write", "edit", "bash", "ls", "glob", "grep"}) {
@@ -247,6 +249,24 @@ void TestOverrideAndAppend() {
                    "append-only should still add the addendum");
 }
 
+void TestHarnessDocs() {
+    aiagent::agent::SystemPromptOptions options;
+    options.tools = BuiltinTools();
+    options.harness_docs =
+            "Read these only when the user asks about the harness itself:\n"
+            "- Main documentation: /docs/README.md\n"
+            "- Additional docs: /docs";
+
+    const std::string prompt = aiagent::agent::BuildCodingSystemPrompt(options);
+    ExpectContains(prompt, "<harness_docs>\nRead these only when",
+                   "harness docs should be rendered as a section");
+    ExpectContains(prompt, "</harness_docs>", "harness docs section should be closed");
+    ExpectContains(prompt, "- Main documentation: /docs/README.md",
+                   "harness docs should include the main documentation path");
+    Expect(prompt.find("<rules>") < prompt.find("<harness_docs>"),
+           "harness docs should follow the rules section");
+}
+
 void TestRuleDedup() {
     auto tools = BuiltinTools();
     aiagent::llm::ToolSpec extra;
@@ -268,6 +288,7 @@ int main() {
     TestSubsetToolSet();
     TestTaskMetadata();
     TestOverrideAndAppend();
+    TestHarnessDocs();
     TestRuleDedup();
 
     if (g_failures != 0) {

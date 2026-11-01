@@ -653,6 +653,8 @@ std::optional<PromptConfig> ParsePromptConfig(const std::string& content,
             config.system_prompt_file = value;
         } else if (key == "append_system_prompt_file") {
             config.append_system_prompt_file = value;
+        } else if (key == "harness_docs_root") {
+            config.harness_docs_root = value;
         } else if (key == "max_system_prompt_bytes") {
             if (!parse_size(key, value, 1, 1048576, &config.max_system_prompt_bytes)) {
                 return std::nullopt;

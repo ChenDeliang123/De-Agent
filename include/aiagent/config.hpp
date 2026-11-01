@@ -138,6 +138,9 @@ struct PromptConfig {
     std::string system_prompt_file;
     // 空 = 不追加；非空 = 作为 <addendum> 追加到基础提示词后、项目指令前。
     std::string append_system_prompt_file;
+    // 空 = 不注入自身文档指针；非空 = 注入 <harness_docs>，列出
+    // <root>/README.md 与 <root>/docs。相对路径相对配置文件目录解析。
+    std::string harness_docs_root;
     std::size_t max_system_prompt_bytes = 32768;
 };
 

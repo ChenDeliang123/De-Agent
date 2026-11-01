@@ -133,6 +133,7 @@ add_library(aiagent_agent STATIC
   src/agent/approval_broker.cpp
   src/agent/background_delivery.cpp
   src/agent/compaction.cpp
+  src/agent/harness_docs.cpp
   src/agent/history_cache.cpp
   src/agent/message_inbox.cpp
   src/agent/project_instructions.cpp
@@ -299,6 +300,10 @@ if(AIAGENT_BUILD_TESTS)
   add_executable(system_prompt_test tests/system_prompt_test.cpp)
   target_link_libraries(system_prompt_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_system_prompt COMMAND system_prompt_test)
+
+  add_executable(harness_docs_test tests/harness_docs_test.cpp)
+  target_link_libraries(harness_docs_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_harness_docs COMMAND harness_docs_test)
 
   add_executable(history_cache_test tests/history_cache_test.cpp)
   target_link_libraries(history_cache_test PRIVATE aiagent_agent)

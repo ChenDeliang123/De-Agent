@@ -35,6 +35,7 @@
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/agent_runtime.hpp"
 #include "aiagent/agent/approval_broker.hpp"
+#include "aiagent/agent/harness_docs.hpp"
 #include "aiagent/agent/history_cache.hpp"
 #include "aiagent/agent/project_instructions.hpp"
 #include "aiagent/agent/background_delivery.hpp"
@@ -504,6 +505,7 @@ int main(int argc, char** argv) {
         prompt_config = *parsed_prompt;
         std::string system_prompt_override;
         std::string system_prompt_append;
+        std::string harness_docs;
         std::string prompt_file_error;
         if (!LoadPromptFile(prompt_config.system_prompt_file, config_path,
                             prompt_config.max_system_prompt_bytes,
@@ -512,7 +514,10 @@ int main(int argc, char** argv) {
             !LoadPromptFile(prompt_config.append_system_prompt_file, config_path,
                             prompt_config.max_system_prompt_bytes,
                             "append_system_prompt_file", &system_prompt_append,
-                            &prompt_file_error)) {
+                            &prompt_file_error) ||
+            !aiagent::agent::BuildHarnessDocsInfo(prompt_config.harness_docs_root,
+                                                  config_path, &harness_docs,
+                                                  &prompt_file_error)) {
             std::cerr << "配置错误: " << prompt_file_error << '\n';
             return 1;
         }
@@ -521,7 +526,8 @@ int main(int argc, char** argv) {
                 "system prompt source=" +
                         std::string(system_prompt_override.empty() ? "builtin" : "file") +
                         " override_bytes=" + std::to_string(system_prompt_override.size()) +
-                        " append_bytes=" + std::to_string(system_prompt_append.size()));
+                        " append_bytes=" + std::to_string(system_prompt_append.size()) +
+                        " harness_docs_bytes=" + std::to_string(harness_docs.size()));
 
         const std::string fallback_working_directory =
                 aiagent::platform::ToUtf8(std::filesystem::current_path());
@@ -800,12 +806,13 @@ int main(int argc, char** argv) {
         }
         runtime.SetToolProvider(tools);
         runtime.SetSystemPromptBuilder(
-                [system_prompt_override, system_prompt_append](
+                [system_prompt_override, system_prompt_append, harness_docs](
                         const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
                     aiagent::agent::SystemPromptOptions prompt_options;
                     prompt_options.tools = tool_specs;
                     prompt_options.override_prompt = system_prompt_override;
                     prompt_options.append_prompt = system_prompt_append;
+                    prompt_options.harness_docs = harness_docs;
                     return aiagent::agent::BuildCodingSystemPrompt(prompt_options);
                 });
 

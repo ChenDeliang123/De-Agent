@@ -763,6 +763,9 @@ agents_md_max_depth = 16
 system_prompt_file =
 ; 非空 = 作为 <addendum> 追加到基础提示词后、项目指令前。
 append_system_prompt_file =
+; 非空 = 注入 <harness_docs>，列出 <root>/README.md 与 <root>/docs。
+; 只在用户询问 harness 本身（配置/权限/技能/MCP/打包/SDK）时读取。
+harness_docs_root =
 ; 两个文件的字节上限；超过直接报错。
 max_system_prompt_bytes = 32768
 ```
@@ -771,8 +774,11 @@ max_system_prompt_bytes = 32768
 - 覆盖只影响根 Agent；子 Agent 继续使用 `[agents.<name>]` 的
   `system_prompt_file`。
 - 覆盖/追加不能绕过权限层；工具调用仍受权限模式、审批与 bash 策略约束。
+- `harness_docs_root` 只注入路径指针（`README.md` / `docs`），不读正文；
+  配置了但目录不存在/没有文档时启动期直接报错。
 - 基础提示词按 section 渲染：preamble 无标签，`<tools>`、`<rules>`、
-  `<environment>`、`<project_context>`、`<skills>`、`<delegation>` 各自有边界。
+  `<harness_docs>`、`<addendum>`、`<environment>`、`<project_context>`、
+  `<skills>`、`<delegation>` 各自有边界。
 
 ## Skills
 

@@ -210,6 +210,11 @@ std::string BuildCodingSystemPrompt(const SystemPromptOptions& options) {
         sections.push_back({"rules", RenderRules(options.tools), true});
     }
 
+    const std::string harness_docs = Trim(options.harness_docs);
+    if (!harness_docs.empty()) {
+        sections.push_back({"harness_docs", harness_docs, true});
+    }
+
     const std::string append_prompt = Trim(options.append_prompt);
     if (!append_prompt.empty()) {
         sections.push_back({"addendum", append_prompt, true});

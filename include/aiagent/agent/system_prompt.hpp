@@ -28,6 +28,8 @@ struct SystemPromptOptions {
     std::vector<llm::ToolSpec> tools;
     std::string override_prompt;
     std::string append_prompt;
+    // 非空时渲染为 <harness_docs>；由 main 根据 [prompt] harness_docs_root 构造。
+    std::string harness_docs;
 };
 
 std::string BuildCodingSystemPrompt(const SystemPromptOptions& options);
