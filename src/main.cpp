@@ -1211,9 +1211,14 @@ int main(int argc, char** argv) {
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
         web_gateway.SetHistoryCache(&history_cache);
         // 子 Agent 快照（GET /api/v1/agents）：定义 + 累计统计；未启用时 enabled=false。
-        web_gateway.SetAgentsInfoHandler([agent_manager, agents_config](
+        web_gateway.SetAgentsInfoHandler([agent_manager, agents_config, &session_meta](
                                                           const std::string& session_id) {
             aiagent::web::SubAgentSnapshot snapshot;
+            if (!session_id.empty() &&
+                session_meta.GetRole(session_id).value_or("coding") == "reviewer") {
+                // reviewer 没有 task 工具；不要把 coding 子 Agent 的定义/统计混进审核界面。
+                return snapshot;
+            }
             snapshot.enabled = agent_manager != nullptr && agent_manager->Enabled() &&
                                agents_config.max_depth > 0;
             snapshot.max_depth = agents_config.max_depth;
