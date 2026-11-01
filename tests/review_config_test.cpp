@@ -26,7 +26,7 @@ int main() {
         Expect(config->dir == "docs/review", "default review dir");
         Expect(config->max_diff_bytes == 2 * 1024 * 1024, "default max_diff_bytes");
         Expect(config->verify_timeout_s == 900, "default verify timeout");
-        Expect(config->max_tool_rounds == 64, "default max tool rounds");
+        Expect(config->max_tool_rounds == 128, "default max tool rounds");
         Expect(config->chunk_files == 20, "default chunk size");
     }
 
@@ -63,6 +63,15 @@ int main() {
         Expect(config->max_queued_jobs == 3, "queue override");
     }
 
+    // 轮次上限边界：8 与 512 合法，7 与 513 非法。
+    {
+        std::string error;
+        const auto high = aiagent::ParseReviewConfig("[review]\nmax_tool_rounds = 512\n",
+                                                     &error);
+        Expect(high.has_value() && high->max_tool_rounds == 512,
+               "max rounds 512 accepted: " + error);
+    }
+
     // 非法值必须 fail-fast，而不是静默回退。
     {
         const std::string bad_cases[] = {
@@ -75,6 +84,7 @@ int main() {
                 "[review]\nverify_timeout_s = 1801\n",
                 "[review]\nverify_mode = rsync\n",
                 "[review]\nmax_tool_rounds = 7\n",
+                "[review]\nmax_tool_rounds = 513\n",
                 "[review]\nreview_timeout_s = 59\n",
                 "[review]\nsupersede_policy = queue\n",
                 "[review]\nmax_queued_jobs = -1\n",

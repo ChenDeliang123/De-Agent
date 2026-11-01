@@ -622,8 +622,12 @@ diff/untracked sha256、producer、request 文件/文本、上下文路径 hash�
 
 reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 
-- `review_context`：manifest/diff/untracked/session（P1 增加 delta）。
-- `review_read`：批量按行读真实文件与调用方。
+- `review_context`：manifest/plan/diff/untracked/session（P1 增加 delta）；
+  manifest 返回 `coverage`（covered/uncovered/omitted）与预算，`plan` 返回按目录
+  分组的覆盖计划与 focus。
+- `review_read`：批量按行读真实文件与调用方；读完整文件会记入覆盖账本。
+- `review_git`：只读 `diff/log/show/blame/rev-parse/ls-files/status`；拒绝 shell、
+  checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
 - `review_verify`：只执行 pack 或 `.de/review.json` 声明的 argv（无 shell），
   执行前后比较源码 digest；源码被测试改动会返回 `source_modified=true`。
 - `review_test_write`：只允许新建测试或向既有测试 append，不能覆盖/删除测试，
@@ -632,6 +636,7 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
   用户同意记录绑定配置 sha256，配置被改动后旧同意失效。
 - `review_report`：固定写到 `docs/review/<feature>-<YYYYMMDD-HHMM>.md`；
   final 报告必须有 verdict，且 finding/验证/测试文件与状态记录一致。
+  有未覆盖文件时 final 只能写 `blocked`，不能静默漏审。
 
 第二轮（P1）：生成 pack 时带 `--previous-report <上一份报告>`，reviewer 用
 `review_context(mode=delta)` 看两轮之间的文件变化，并沿用旧 finding id 标记

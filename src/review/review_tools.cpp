@@ -65,6 +65,239 @@ std::string RepoRootFor(const tools::ToolContext& context) {
             fs::weakly_canonical(aiagent::platform::FromUtf8(context.working_directory), ec));
 }
 
+struct ReviewCoverageSummary {
+    std::vector<std::string> required;
+    std::vector<std::string> omitted;
+    std::vector<std::string> covered;
+    std::vector<std::string> uncovered;
+};
+
+std::string NormalizeReviewPath(const std::string& path) {
+    return NormalizeRelativePath(path);
+}
+
+ReviewCoverageSummary BuildReviewCoverage(const ReviewPack& pack,
+                                          const ReviewState& state) {
+    std::set<std::string> required;
+    std::set<std::string> omitted;
+    for (const auto& file : pack.omitted) {
+        const std::string path = NormalizeReviewPath(file.path);
+        if (!path.empty()) {
+            omitted.insert(path);
+        }
+    }
+    for (const auto& file : pack.changed_files) {
+        const std::string path = NormalizeReviewPath(file.path);
+        if (path.empty()) {
+            continue;
+        }
+        if (file.binary) {
+            omitted.insert(path);
+            continue;
+        }
+        if (omitted.count(path) == 0) {
+            required.insert(path);
+        }
+    }
+    for (const auto& file : pack.untracked) {
+        const std::string path = NormalizeReviewPath(file.path);
+        if (path.empty()) {
+            continue;
+        }
+        if (file.redacted || !file.reason.empty()) {
+            omitted.insert(path);
+            continue;
+        }
+        if (omitted.count(path) == 0) {
+            required.insert(path);
+        }
+    }
+
+    std::set<std::string> reviewed;
+    for (const auto& path : state.reviewed_files) {
+        const std::string normalized = NormalizeReviewPath(path);
+        if (!normalized.empty()) {
+            reviewed.insert(normalized);
+        }
+    }
+
+    ReviewCoverageSummary coverage;
+    coverage.required.assign(required.begin(), required.end());
+    coverage.omitted.assign(omitted.begin(), omitted.end());
+    for (const auto& path : coverage.required) {
+        if (reviewed.count(path) > 0) {
+            coverage.covered.push_back(path);
+        } else {
+            coverage.uncovered.push_back(path);
+        }
+    }
+    return coverage;
+}
+
+std::vector<std::string> SplitReviewPath(const std::string& path) {
+    std::vector<std::string> parts;
+    std::string current;
+    for (const char c : path) {
+        if (c == '/') {
+            if (!current.empty()) {
+                parts.push_back(current);
+                current.clear();
+            }
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) {
+        parts.push_back(current);
+    }
+    return parts;
+}
+
+std::string ReviewGroupKey(const std::string& path) {
+    const auto parts = SplitReviewPath(path);
+    if (parts.empty()) {
+        return "other";
+    }
+    if (parts[0] == "src" && parts.size() > 1) {
+        return parts[1];
+    }
+    if (parts[0] == "include" && parts.size() > 2 && parts[1] == "aiagent") {
+        return parts[2];
+    }
+    if (parts[0] == "tests" && parts.size() > 1) {
+        const std::string& second = parts[1];
+        if (second.rfind("review", 0) == 0) {
+            return "review";
+        }
+        if (second.rfind("skill", 0) == 0) {
+            return "skills";
+        }
+        if (second.rfind("web", 0) == 0) {
+            return "web";
+        }
+        return "tests";
+    }
+    if (parts[0] == "cli") {
+        return "cli";
+    }
+    if (parts[0] == "docs" || parts[0] == "conf") {
+        return "docs-config";
+    }
+    if (parts[0] == "vendor") {
+        return "vendor";
+    }
+    if (parts[0] == "CMakeLists.txt" || parts[0] == "README.md" ||
+        parts[0] == "AGENTS.md" || parts[0] == ".gitignore") {
+        return "build-docs";
+    }
+    return "other";
+}
+
+std::vector<std::string> ReviewGroupFocus(const std::string& group) {
+    if (group == "review") {
+        return {"producer->consumer dispatch", "path traversal/symlink/TOCTOU",
+                "argv/shell/allowlist", "state/report atomic write",
+                "lifetime/cancel/join"};
+    }
+    if (group == "skills") {
+        return {"discovery precedence", "frontmatter/limits", "path/symlink",
+                "cache/TTL", "prompt injection"};
+    }
+    if (group == "agent") {
+        return {"prompt assembly", "lifetime/concurrency", "tool visibility",
+                "permissions", "UTF-8/truncation"};
+    }
+    if (group == "web") {
+        return {"auth/role", "route/consumer", "background lifetime", "path/JSON",
+                "error mapping"};
+    }
+    if (group == "cli") {
+        return {"argv/shell", "path normalization", "review dir", "job state",
+                "Windows quoting"};
+    }
+    if (group == "tools") {
+        return {"path sandbox", "command allowlist", "output caps", "cache",
+                "error paths"};
+    }
+    if (group == "tests") {
+        return {"assert behavior", "negative paths", "fixtures", "platform"};
+    }
+    if (group == "docs-config") {
+        return {"config consumed", "defaults", "docs/impl consistency", "examples"};
+    }
+    if (group == "build-docs") {
+        return {"build/test wiring", "config", "docs"};
+    }
+    return {"contracts/callers", "boundaries/UTF-8", "lifetime/concurrency",
+            "error paths"};
+}
+
+struct ReviewPlanGroup {
+    std::string group_id;
+    std::vector<std::string> files;
+    std::vector<std::string> focus;
+};
+
+std::vector<ReviewPlanGroup> BuildReviewPlanGroups(
+        const std::vector<std::string>& required) {
+    std::map<std::string, std::vector<std::string>> buckets;
+    for (const auto& path : required) {
+        buckets[ReviewGroupKey(path)].push_back(path);
+    }
+    while (buckets.size() > 8) {
+        auto smallest = buckets.end();
+        for (auto it = buckets.begin(); it != buckets.end(); ++it) {
+            if (it->first == "other") {
+                continue;
+            }
+            if (smallest == buckets.end() || it->second.size() < smallest->second.size()) {
+                smallest = it;
+            }
+        }
+        if (smallest == buckets.end()) {
+            break;
+        }
+        auto& other = buckets["other"];
+        other.insert(other.end(), smallest->second.begin(), smallest->second.end());
+        buckets.erase(smallest);
+    }
+
+    std::vector<ReviewPlanGroup> groups;
+    for (auto& [key, files] : buckets) {
+        std::sort(files.begin(), files.end());
+        for (std::size_t start = 0; start < files.size(); start += 20) {
+            ReviewPlanGroup group;
+            group.group_id = key;
+            if (files.size() > 20) {
+                group.group_id += "#" + std::to_string(start / 20 + 1);
+            }
+            const std::size_t end = std::min<std::size_t>(files.size(), start + 20);
+            group.files.assign(files.begin() + start, files.begin() + end);
+            group.focus = ReviewGroupFocus(key);
+            groups.push_back(std::move(group));
+        }
+    }
+    std::sort(groups.begin(), groups.end(),
+              [](const ReviewPlanGroup& a, const ReviewPlanGroup& b) {
+                  return a.group_id < b.group_id;
+              });
+    return groups;
+}
+
+bool MarkReviewCovered(ReviewState* state, const std::string& path) {
+    const std::string normalized = NormalizeReviewPath(path);
+    if (normalized.empty()) {
+        return false;
+    }
+    if (std::find(state->reviewed_files.begin(), state->reviewed_files.end(), normalized) !=
+        state->reviewed_files.end()) {
+        return false;
+    }
+    state->reviewed_files.push_back(normalized);
+    state->updated_at = LocalTimestampIso();
+    return true;
+}
+
 std::size_t Utf8CharLength(const std::string& text, std::size_t offset) {
     if (offset >= text.size()) {
         return 0;
@@ -680,14 +913,17 @@ std::vector<llm::ToolSpec> ReviewTools::ListTools() {
 
     tools.push_back(MakeSpec(
             "review_context",
-            "Read the review pack. Modes: manifest (summary + stale), diff (single file slice), "
-            "untracked (inline content), session (request/session excerpt).",
-            "Read the review pack manifest/diff/untracked/session",
+            "Read the review pack. Modes: manifest (summary + stale + coverage), plan "
+            "(coverage groups/focus), diff (single file slice), untracked (inline content), "
+            "session (request/session excerpt).",
+            "Read the review pack manifest/plan/diff/untracked/session",
             {"Always start with mode=manifest and check stale=false.",
+             "Use mode=plan to cover every group before writing a final report.",
              "Read the diff per file; do not dump a huge diff at once."},
             ObjectSchema({{"pack", StringProp("Review pack path")},
                           {"mode", {{"type", "string"},
-                                    {"enum", {"manifest", "diff", "untracked", "session", "delta"}}}},
+                                    {"enum", {"manifest", "plan", "diff", "untracked", "session",
+                                              "delta"}}}},
                           {"path", StringProp("Changed/untracked file path for diff/untracked")},
                           {"offset", {{"type", "integer"}}},
                           {"limit", {{"type", "integer"}}}},
@@ -707,6 +943,20 @@ std::vector<llm::ToolSpec> ReviewTools::ListTools() {
                                                   {"limit", {{"type", "integer"}}}}}}}}},
                           {"max_bytes", {{"type", "integer"}}}},
                          {"files"})));
+
+    tools.push_back(MakeSpec(
+            "review_git",
+            "Read-only git query. Allowed subcommands: diff, log, show, blame, rev-parse, "
+            "ls-files, status. No shell, no writes, no other branches/reflog.",
+            "Inspect git diff/history for the current review",
+            {"Use review_git instead of a generic shell; it is argv-only and read-only.",
+             "Do not request checkout/reset/restore/stash/clean or --all/--reflog."},
+            ObjectSchema({{"subcommand", {{"type", "string"},
+                                          {"enum", {"diff", "log", "show", "blame",
+                                                    "rev-parse", "ls-files", "status"}}}},
+                          {"args", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                          {"max_bytes", {{"type", "integer"}}}},
+                         {"subcommand"})));
 
     tools.push_back(MakeSpec(
             "review_verify",
@@ -831,6 +1081,9 @@ tools::ToolExecutionResult ReviewTools::Execute(const std::string& name,
     if (name == "review_read") {
         return Read(arguments, context);
     }
+    if (name == "review_git") {
+        return Git(arguments, context);
+    }
     if (name == "review_verify") {
         return Verify(arguments, context);
     }
@@ -932,6 +1185,51 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                               {"stale_reasons", stale.reasons},
                               {"head_changed", stale.head_changed}};
     };
+    const ReviewCoverageSummary coverage = BuildReviewCoverage(pack, state);
+    const std::vector<ReviewPlanGroup> plan_groups =
+            BuildReviewPlanGroups(coverage.required);
+    auto coverage_json = [&coverage, &plan_groups]() {
+        return nlohmann::json{
+                {"total_changed_files",
+                 coverage.required.size() + coverage.omitted.size()},
+                {"covered_files", coverage.covered.size()},
+                {"uncovered_files", coverage.uncovered.size()},
+                {"omitted_files", coverage.omitted.size()},
+                {"groups", plan_groups.size()},
+                {"uncovered", coverage.uncovered}};
+    };
+    auto budget_json = [this, &state]() {
+        return nlohmann::json{
+                {"max_tool_rounds", options_.config.max_tool_rounds},
+                {"review_timeout_s", options_.config.review_timeout_s},
+                {"deadline_epoch_s",
+                 state.started_at_epoch_s + options_.config.review_timeout_s},
+                {"timed_out", DeadlineExceeded() || state.timed_out}};
+    };
+    bool coverage_dirty = false;
+    auto persist_coverage = [&]() {
+        if (!coverage_dirty) {
+            return;
+        }
+        state.updated_at = LocalTimestampIso();
+        std::string save_error;
+        if (!SaveReviewState(options_.config, pack.repo_root, state, &save_error)) {
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "review",
+                    "event=coverage_save_failed review_id=" + pack.review_id +
+                            " error=" + save_error);
+        } else {
+            const ReviewCoverageSummary current = BuildReviewCoverage(pack, state);
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kInfo, "review",
+                    "event=review_coverage review_id=" + pack.review_id +
+                            " covered=" + std::to_string(current.covered.size()) +
+                            " uncovered=" + std::to_string(current.uncovered.size()) +
+                            " omitted=" + std::to_string(current.omitted.size()) +
+                            " groups=" + std::to_string(plan_groups.size()));
+        }
+        coverage_dirty = false;
+    };
 
     if (mode == "manifest") {
         ReviewConsentStore consent(ConsentPath(options_.data_dir));
@@ -1024,7 +1322,65 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                 {"deadline_epoch_s",
                  state.started_at_epoch_s + options_.config.review_timeout_s},
                 {"timed_out", DeadlineExceeded() || state.timed_out}};
+        manifest["coverage"] = coverage_json();
+        manifest["budget"] = budget_json();
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kInfo, "review",
+                "event=review_manifest review_id=" + pack.review_id +
+                        " files=" + std::to_string(coverage.required.size() + coverage.omitted.size()) +
+                        " covered=" + std::to_string(coverage.covered.size()) +
+                        " uncovered=" + std::to_string(coverage.uncovered.size()) +
+                        " groups=" + std::to_string(plan_groups.size()));
         return Ok(manifest);
+    }
+
+    if (mode == "plan") {
+        std::map<std::string, nlohmann::json> file_info;
+        for (const auto& file : pack.changed_files) {
+            file_info[NormalizeReviewPath(file.path)] = {
+                    {"path", file.path},
+                    {"status", file.status},
+                    {"added", file.added},
+                    {"removed", file.removed},
+                    {"binary", file.binary},
+                    {"untracked", false}};
+        }
+        for (const auto& file : pack.untracked) {
+            file_info[NormalizeReviewPath(file.path)] = {
+                    {"path", file.path},
+                    {"status", "untracked"},
+                    {"added", 0},
+                    {"removed", 0},
+                    {"binary", false},
+                    {"untracked", true}};
+        }
+        std::set<std::string> covered_set(coverage.covered.begin(), coverage.covered.end());
+        nlohmann::json groups = nlohmann::json::array();
+        for (const auto& group : plan_groups) {
+            nlohmann::json files = nlohmann::json::array();
+            nlohmann::json uncovered = nlohmann::json::array();
+            for (const auto& path : group.files) {
+                const auto it = file_info.find(path);
+                files.push_back(it == file_info.end() ? nlohmann::json{{"path", path}}
+                                                      : it->second);
+                if (covered_set.count(path) == 0) {
+                    uncovered.push_back(path);
+                }
+            }
+            groups.push_back({{"group_id", group.group_id},
+                              {"files", files},
+                              {"focus", group.focus},
+                              {"covered", group.files.size() - uncovered.size()},
+                              {"uncovered", uncovered}});
+        }
+        nlohmann::json plan = stale_json();
+        plan["mode"] = "plan";
+        plan["review_id"] = pack.review_id;
+        plan["feature"] = pack.feature;
+        plan["coverage"] = coverage_json();
+        plan["budget"] = budget_json();
+        plan["groups"] = groups;
+        return Ok(plan);
     }
 
     if (mode == "diff") {
@@ -1045,13 +1401,6 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                     }
                 }
                 return Fail("no diff for path: " + path);
-            }
-            if (std::find(state.reviewed_files.begin(), state.reviewed_files.end(), path) ==
-                state.reviewed_files.end()) {
-                state.reviewed_files.push_back(path);
-                state.updated_at = LocalTimestampIso();
-                std::string state_error;
-                SaveReviewState(options_.config, pack.repo_root, state, &state_error);
             }
         } else {
             if (pack.diff.size() > 65536) {
@@ -1081,9 +1430,23 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
         payload["path"] = path;
         payload["offset"] = offset;
         payload["content"] = slice;
-        payload["truncated"] = offset + slice.size() < content.size();
+        const bool full = !content.empty() && offset + slice.size() >= content.size();
+        payload["truncated"] = !full;
         payload["next_offset"] = offset + slice.size();
         payload["total_bytes"] = content.size();
+        payload["covered"] = full;
+        if (full) {
+            if (path.empty()) {
+                for (const auto& file : pack.changed_files) {
+                    if (MarkReviewCovered(&state, file.path)) {
+                        coverage_dirty = true;
+                    }
+                }
+            } else if (MarkReviewCovered(&state, path)) {
+                coverage_dirty = true;
+            }
+            persist_coverage();
+        }
         return Ok(payload);
     }
 
@@ -1101,6 +1464,13 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                 payload["truncated"] = file.truncated;
                 payload["redacted"] = file.redacted;
                 payload["reason"] = file.reason;
+                const bool full =
+                        !file.redacted && file.reason.empty() && !file.truncated;
+                payload["covered"] = full;
+                if (full && MarkReviewCovered(&state, file.path)) {
+                    coverage_dirty = true;
+                    persist_coverage();
+                }
                 return Ok(payload);
             }
         }
@@ -1230,6 +1600,28 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
     const auto started = std::chrono::steady_clock::now();
     const std::string repo = RepoRootFor(context);
     const fs::path repo_path = aiagent::platform::FromUtf8(repo);
+    ReviewPack coverage_pack;
+    ReviewState coverage_state;
+    bool coverage_ready = false;
+    {
+        std::string last_pack;
+        {
+            std::lock_guard<std::mutex> lock(last_pack_mutex_);
+            last_pack = last_pack_path_;
+        }
+        if (!last_pack.empty()) {
+            std::string abs_path;
+            std::string rel_path;
+            std::string load_error;
+            if (LoadPack(last_pack, context, &coverage_pack, &abs_path, &rel_path,
+                         &load_error)) {
+                LoadState(coverage_pack, rel_path, options_.config, &coverage_state);
+                EnsureClock(coverage_pack, rel_path, &coverage_state);
+                coverage_ready = true;
+            }
+        }
+    }
+    bool coverage_dirty = false;
     std::size_t max_bytes = arguments.value("max_bytes", 262144);
     max_bytes = std::min<std::size_t>(std::max<std::size_t>(max_bytes, 1), 1048576);
     const auto files = arguments.value("files", nlohmann::json::array());
@@ -1294,13 +1686,34 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
         }
         const std::string body = content.str();
         used += body.size();
+        const bool full_range =
+                start == 1 &&
+                (lines.empty() ||
+                 (end >= static_cast<int>(lines.size()) && !truncated_by_limit &&
+                  !truncated_by_bytes));
         payload.push_back({{"path", raw_path},
                            {"start", start},
                            {"end", end},
                            {"lines_read", end >= start ? end - start + 1 : 0},
                            {"truncated", truncated_by_limit || truncated_by_bytes},
                            {"cache_hit", cache_hit},
+                           {"covered", full_range},
                            {"content", body}});
+        if (full_range && coverage_ready &&
+            MarkReviewCovered(&coverage_state, raw_path)) {
+            coverage_dirty = true;
+        }
+    }
+    if (coverage_dirty) {
+        coverage_state.updated_at = LocalTimestampIso();
+        std::string save_error;
+        if (!SaveReviewState(options_.config, coverage_pack.repo_root, coverage_state,
+                             &save_error)) {
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "review",
+                    "event=coverage_save_failed review_id=" + coverage_pack.review_id +
+                            " error=" + save_error);
+        }
     }
     nlohmann::json result = {{"files", payload},
                              {"max_bytes", max_bytes},
@@ -1315,6 +1728,88 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
                     " output_bytes=" + std::to_string(used) +
                     " duration_ms=" + std::to_string(duration_ms));
     return Ok(result);
+}
+
+tools::ToolExecutionResult ReviewTools::Git(const nlohmann::json& arguments,
+                                            const tools::ToolContext& context) {
+    if (!context.policy.allow_read) {
+        return Fail("permission denied: read is disabled");
+    }
+    if (DeadlineExceeded()) {
+        return Fail("review_timeout_s exceeded; stop reading and write a partial blocked "
+                    "report now");
+    }
+    static const std::set<std::string> kAllowed = {
+            "diff", "log", "show", "blame", "rev-parse", "ls-files", "status"};
+    const std::string subcommand = arguments.value("subcommand", std::string());
+    if (kAllowed.count(subcommand) == 0) {
+        return Fail("review_git subcommand is not allowed: " + subcommand);
+    }
+    std::vector<std::string> extra;
+    if (arguments.contains("args")) {
+        if (!arguments["args"].is_array()) {
+            return Fail("review_git args must be an array");
+        }
+        if (arguments["args"].size() > 32) {
+            return Fail("review_git accepts at most 32 args");
+        }
+        for (const auto& item : arguments["args"]) {
+            if (!item.is_string()) {
+                return Fail("review_git args must contain strings");
+            }
+            const std::string arg = item.get<std::string>();
+            if (arg.empty() || arg.find('\0') != std::string::npos ||
+                arg.find('\n') != std::string::npos ||
+                arg.find('\r') != std::string::npos) {
+                return Fail("review_git rejected an invalid argument");
+            }
+            extra.push_back(arg);
+        }
+    }
+    static const std::set<std::string> kForbiddenExact = {
+            "--output", "--ext-diff", "--textconv", "--no-index", "--git-dir",
+            "--work-tree", "--exec-path", "--config", "--config-env",
+            "--pathspec-from-file", "--file", "--all", "--branches", "--remotes",
+            "--tags", "--reflog", "-g", "-C", "-c"};
+    static const std::set<std::string> kForbiddenPrefix = {
+            "--output=", "--git-dir=", "--work-tree=", "--exec-path=",
+            "--config=", "--config-env=", "--pathspec-from-file="};
+    for (const auto& arg : extra) {
+        if (kForbiddenExact.count(arg) > 0) {
+            return Fail("review_git argument is not allowed: " + arg);
+        }
+        for (const auto& prefix : kForbiddenPrefix) {
+            if (arg.rfind(prefix, 0) == 0) {
+                return Fail("review_git argument is not allowed: " + arg);
+            }
+        }
+    }
+
+    std::vector<std::string> argv = {"git", "-c", "core.quotePath=false", subcommand};
+    argv.insert(argv.end(), extra.begin(), extra.end());
+    std::size_t max_bytes = arguments.value("max_bytes", 262144);
+    max_bytes = std::min<std::size_t>(std::max<std::size_t>(max_bytes, 1), 1048576);
+    const ArgvRunResult run =
+            RunArgvCapture(argv, RepoRootFor(context), 30, max_bytes, false);
+    if (!run.started) {
+        return Fail("cannot start git: " + run.error);
+    }
+    if (run.timed_out) {
+        return Fail("review_git timed out after 30s");
+    }
+    if (run.cancelled) {
+        return Fail("review_git cancelled");
+    }
+    if (run.exit_code != 0) {
+        return Fail("review_git failed (exit " + std::to_string(run.exit_code) +
+                    "): " + run.output);
+    }
+    return Ok({{"subcommand", subcommand},
+               {"args", extra},
+               {"exit_code", run.exit_code},
+               {"duration_ms", run.duration_ms},
+               {"truncated", run.truncated},
+               {"output", run.output}});
 }
 
 tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
@@ -1878,6 +2373,23 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
         }
     }
 
+    const ReviewCoverageSummary coverage = BuildReviewCoverage(pack, state);
+    if (input.status == "final" && input.verdict != "blocked" &&
+        !coverage.uncovered.empty()) {
+        std::ostringstream message;
+        message << "review coverage incomplete: " << coverage.uncovered.size()
+                << " file(s) not covered; read them with review_read or "
+                   "review_context(diff/untracked), or write verdict=blocked. First: ";
+        const std::size_t shown = std::min<std::size_t>(coverage.uncovered.size(), 10);
+        for (std::size_t i = 0; i < shown; ++i) {
+            if (i > 0) {
+                message << ", ";
+            }
+            message << coverage.uncovered[i];
+        }
+        return Fail(message.str());
+    }
+
     const std::string pack_sha = aiagent::util::Sha256HexFile(abs_path, &error);
     if (pack_sha.empty()) {
         return Fail("cannot hash review pack: " + error);
@@ -1895,13 +2407,24 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     if (input.status == "final") {
         CleanupCopyWorktree();
     }
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "review",
+            "event=review_end review_id=" + pack.review_id +
+                    " status=" + input.status + " verdict=" + input.verdict +
+                    " findings=" + std::to_string(written.findings) +
+                    " covered=" + std::to_string(coverage.covered.size()) +
+                    " uncovered=" + std::to_string(coverage.uncovered.size()) +
+                    " omitted=" + std::to_string(coverage.omitted.size()));
 
     return Ok({{"path", written.path},
                {"bytes", written.bytes},
                {"verdict", written.verdict},
                {"findings", written.findings},
                {"status", input.status},
-               {"stale", stale.stale}});
+               {"stale", stale.stale},
+               {"coverage", {{"covered_files", coverage.covered.size()},
+                             {"uncovered_files", coverage.uncovered.size()},
+                             {"omitted_files", coverage.omitted.size()}}}});
 }
 
 }  // namespace aiagent::review

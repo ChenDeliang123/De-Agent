@@ -52,6 +52,8 @@ private:
                                        const tools::ToolContext& context);
     tools::ToolExecutionResult Read(const nlohmann::json& arguments,
                                     const tools::ToolContext& context);
+    tools::ToolExecutionResult Git(const nlohmann::json& arguments,
+                                   const tools::ToolContext& context);
     tools::ToolExecutionResult Verify(const nlohmann::json& arguments,
                                       const tools::ToolContext& context);
     tools::ToolExecutionResult TestWrite(const nlohmann::json& arguments,

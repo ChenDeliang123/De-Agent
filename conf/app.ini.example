@@ -148,7 +148,7 @@ verify_output_bytes = 32768
 ; 原工作区；含 submodule 的仓库暂不支持 copy，会明确报错。
 verify_mode = in_place
 ; 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
-max_tool_rounds = 64
+max_tool_rounds = 128
 review_timeout_s = 3600
 checkpoint = true
 draft_report = true

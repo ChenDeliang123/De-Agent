@@ -1096,7 +1096,7 @@ int main(int argc, char** argv) {
                         aiagent::review::ReviewToolOptions{review_config, review_data_dir},
                         aiagent::review::ReviewTools::Mode::kReviewer));
                 for (const char* name :
-                     {"review_context", "review_read", "review_verify",
+                     {"review_context", "review_read", "review_git", "review_verify",
                       "review_test_write", "review_setup", "review_report"}) {
                     review_allow.push_back(name);
                 }

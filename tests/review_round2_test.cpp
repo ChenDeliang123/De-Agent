@@ -79,6 +79,12 @@ int main() {
         auto manifest1 = Parse(tools.Execute(
                 "review_context", {{"pack", round1_pack}, {"mode", "manifest"}}, context));
         Expect(!manifest1.value("stale", true), "round1 manifest fresh");
+        auto round1_diff = Parse(tools.Execute(
+                "review_context",
+                {{"pack", round1_pack}, {"mode", "diff"}, {"path", "src/foo.cpp"}},
+                context));
+        Expect(round1_diff.value("covered", false), "round1 diff covered: " +
+                                                         round1_diff.dump());
         auto report1 = tools.Execute(
                 "review_report",
                 {{"pack", round1_pack},
@@ -128,6 +134,12 @@ int main() {
             }
         }
         Expect(modified, "delta marks src/foo.cpp modified: " + delta.dump());
+        auto round2_diff = Parse(tools.Execute(
+                "review_context",
+                {{"pack", round2_pack}, {"mode", "diff"}, {"path", "src/foo.cpp"}},
+                context));
+        Expect(round2_diff.value("covered", false), "round2 diff covered: " +
+                                                         round2_diff.dump());
 
         // 第二轮必须沿用 R1 并标记 resolved/still_open/regressed。
         auto invalid_status = tools.Execute(

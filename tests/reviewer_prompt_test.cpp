@@ -32,7 +32,7 @@ aiagent::llm::ToolSpec Tool(const std::string& name,
 int main() {
     {
         const std::vector<aiagent::llm::ToolSpec> tools = {
-                Tool("read"), Tool("review_context"), Tool("review_read"),
+                Tool("read"), Tool("review_context"), Tool("review_read"), Tool("review_git"),
                 Tool("review_verify"), Tool("review_test_write"),
                 Tool("review_setup"), Tool("review_report"),
         };
@@ -56,6 +56,15 @@ int main() {
         Expect(prompt.find("<report_contract>") != std::string::npos &&
                        prompt.find("approved_with_notes") != std::string::npos,
                "report contract should be present");
+        Expect(prompt.find("<review_method>") != std::string::npos &&
+                       prompt.find("consumer") != std::string::npos,
+               "review method must require consumer-side tracing");
+        Expect(prompt.find("review_context(mode=plan)") != std::string::npos &&
+                       prompt.find("uncovered_files") != std::string::npos,
+               "review method must require plan coverage");
+        Expect(prompt.find("find bugs the author wants fixed before merge") !=
+                       std::string::npos,
+               "review goal should be merge-gate focused");
         for (const auto& tool : tools) {
             Expect(prompt.find("- " + tool.name + ":") != std::string::npos,
                    "active tool should be listed: " + tool.name);

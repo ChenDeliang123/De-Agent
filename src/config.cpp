@@ -918,7 +918,7 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
             config.verify_mode = value;
         } else if (key == "max_tool_rounds") {
             long long parsed = 0;
-            if (!parse_number(key, value, 8, 256, &parsed)) {
+            if (!parse_number(key, value, 8, 512, &parsed)) {
                 return std::nullopt;
             }
             config.max_tool_rounds = static_cast<int>(parsed);

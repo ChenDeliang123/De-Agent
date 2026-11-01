@@ -167,7 +167,7 @@ struct ReviewConfig {
     // in_place = 当前工作区；copy = git worktree 临时副本（P1）。
     std::string verify_mode = "in_place";
     // 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
-    int max_tool_rounds = 64;
+    int max_tool_rounds = 128;
     long review_timeout_s = 3600;
     bool checkpoint = true;
     bool draft_report = true;

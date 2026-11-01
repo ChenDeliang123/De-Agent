@@ -73,7 +73,7 @@ int main() {
                 "\"int foo() { return 77; }\\n\")\n");
         review_test_support::WriteFile(repo + "/tests/quote\"name_test.cpp",
                                        "TEST(Quote, Base) {}\n");
-        review_test_support::WriteFile(repo + "/.gitignore", "build/\n");
+        review_test_support::WriteFile(repo + "/.gitignore", "build/\n.data/\n");
         Expect(review_test_support::CommitAll(repo, "base"), "commit base");
 
         review::ReviewToolOptions options;
@@ -83,8 +83,9 @@ int main() {
         review::ReviewTools coding(options, review::ReviewTools::Mode::kCodingHandoff);
 
         const auto reviewer_names = ToolNames(reviewer.ListTools());
-        for (const char* expected : {"review_context", "review_read", "review_verify",
-                                     "review_test_write", "review_setup", "review_report"}) {
+        for (const char* expected : {"review_context", "review_read", "review_git",
+                                     "review_verify", "review_test_write", "review_setup",
+                                     "review_report"}) {
             Expect(reviewer_names.count(expected) == 1,
                    std::string("reviewer tool missing: ") + expected);
         }
@@ -169,6 +170,31 @@ int main() {
                "manifest lists pack and consented project commands");
         Expect(manifest["project_verify_consent"] == "valid",
                "manifest project consent valid");
+        Expect(manifest["coverage"]["total_changed_files"].get<int>() >= 3 &&
+                       manifest["coverage"]["uncovered_files"].get<int>() >= 3,
+               "manifest should expose initial coverage: " + manifest.dump());
+        auto plan = Parse(reviewer.Execute(
+                "review_context", {{"pack", pack_path}, {"mode", "plan"}}, context));
+        Expect(!plan.contains("__error") && plan["groups"].is_array() &&
+                       !plan["groups"].empty(),
+               "plan should return groups: " + plan.dump());
+        bool plan_has_focus = false;
+        for (const auto& group : plan["groups"]) {
+            if (!group["focus"].empty()) {
+                plan_has_focus = true;
+            }
+        }
+        Expect(plan_has_focus, "plan groups should include focus items");
+        auto incomplete = reviewer.Execute(
+                "review_report",
+                {{"pack", pack_path},
+                 {"status", "final"},
+                 {"verdict", "changes_requested"},
+                 {"summary", "premature"}},
+                context);
+        Expect(!incomplete.ok &&
+                       incomplete.error.find("coverage incomplete") != std::string::npos,
+               "final report must reject uncovered files: " + incomplete.error);
 
         auto diff = Parse(reviewer.Execute(
                 "review_context",
@@ -232,6 +258,27 @@ int main() {
                                  context)
                         .ok,
                "review_read must reject path escape");
+        auto covered_manifest = Parse(reviewer.Execute(
+                "review_context", {{"pack", pack_path}, {"mode", "manifest"}}, context));
+        Expect(covered_manifest["coverage"]["uncovered_files"].get<int>() == 0,
+               "all changed and untracked files should be covered: " +
+                       covered_manifest.dump());
+
+        // review_git：只读查询 + 写操作/未来分支遍历拒绝。
+        auto git_diff = Parse(reviewer.Execute(
+                "review_git",
+                {{"subcommand", "diff"}, {"args", {"--stat", "--", "src/foo.cpp"}}},
+                context));
+        Expect(!git_diff.contains("__error") &&
+                       git_diff["output"].get<std::string>().find("src/foo.cpp") !=
+                               std::string::npos,
+               "review_git diff: " + git_diff.dump());
+        Expect(!reviewer.Execute("review_git", {{"subcommand", "reset"}}, context).ok,
+               "review_git must reject reset");
+        Expect(!reviewer.Execute("review_git",
+                                 {{"subcommand", "log"}, {"args", {"--all"}}}, context)
+                        .ok,
+               "review_git must reject future branch traversal");
 
         // review_verify：list + 执行 + 状态记录。
         auto list = Parse(reviewer.Execute(

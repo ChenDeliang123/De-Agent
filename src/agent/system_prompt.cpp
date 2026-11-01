@@ -284,22 +284,46 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
              "declared verification, and the previous report if any.\n"
              "2. Verify freshness. `stale=true` means stop; write `blocked` with the stale "
              "reasons.\n"
-             "3. Inspect project verification: `review_setup(action=show)`. If it is missing "
+             "3. Read the coverage plan: `review_context(pack, mode=plan)`. Use its groups as "
+             "the review assignment; do not invent a narrower scope.\n"
+             "4. Inspect project verification: `review_setup(action=show)`. If it is missing "
              "or invalid, use `review_setup(action=detect)` and ask the user before "
              "`review_setup(action=save, ...)`. Without consent, only use pack commands with "
              "per-command approval, or review statically.\n"
-             "4. Align intent: read the request/session excerpt and context paths. Turn each "
+             "5. Align intent: read the request/session excerpt and context paths. Turn each "
              "acceptance criterion into a checklist item with implementation and test "
              "evidence.\n"
-             "5. Read the diff in chunks. Read the real files and callers with `review_read`/"
-             "`read`/`grep`; do not rely only on diff context.\n"
-             "6. Check the dimensions below. Stop when the evidence supports a conclusion; do "
-             "not wander the whole repository.\n"
-             "7. If a suspicious behavior needs proof, write a minimal test with "
+             "6. Read every group's diff/files with `review_read`/`review_context(diff)`; read "
+             "real callers and consumers with `review_read`/`review_git`. Read full context "
+             "of modified files, not only diff hunks.\n"
+             "7. Do a second pass over the high-risk dimensions in <review_method> and the "
+             "group focus list; do not stop after the first plausible finding.\n"
+             "8. If a suspicious behavior needs proof, write a minimal test with "
              "`review_test_write` (create/append), run it through `review_verify`, and list "
              "the test file in the report.\n"
-             "8. Write a draft report early for long reviews, then a final report with a "
-             "verdict. The report is the deliverable; a chat-only conclusion is not usable.\n",
+             "9. Write a draft report early for long reviews, then a final report with a "
+             "verdict. A final report with uncovered files is invalid unless `blocked`; the "
+             "report is the deliverable, a chat-only conclusion is not usable.\n",
+             true});
+
+    sections.push_back(
+            {"review_method",
+             "- Goal: find bugs the author wants fixed before merge, not a general design "
+             "review. Only report issues introduced by this patch; do not report pre-existing "
+             "problems unless the patch makes them reachable.\n"
+             "- Evidence: every finding needs path:line, quoted evidence, concrete impact, "
+             "trigger, suggestion, and confidence. If one is missing, use `unverified`.\n"
+             "- Cross-boundary: for every patch-introduced type, event, command, enum, config "
+             "value, or IPC payload crossing a function/module boundary, locate the consumer "
+             "dispatch point (switch/router/filter/handler registry/loop). Confirm an explicit "
+             "branch or catch-all; report silent drop/no-op/discard.\n"
+             "- Coverage: use `review_context(mode=plan)`, cover every group, and check "
+             "`coverage.uncovered_files` before the final report. `blocked` is the only "
+             "verdict allowed with uncovered files.\n"
+             "- Two passes: first breadth (all groups), then depth on path/IO, command, "
+             "lifetime/concurrency, config/defaults, and CLI/Web/session boundaries. Stop "
+             "only when every group has a verdict and no high-risk boundary is untraced; do "
+             "not wander into unrelated modules.\n",
              true});
 
     sections.push_back(
@@ -344,6 +368,12 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
                     "`review_setup(save)`; only when detection is empty or the user refuses "
                     "may you proceed statically and record the gap in `unverified`.");
         }
+    }
+    if (HasTool(tools, "review_git")) {
+        rules.Add(
+                "Use `review_git` for read-only diff/log/show/blame/ls-files/status checks. "
+                "It rejects shell strings, checkout/reset/restore/stash/clean, reflog, and "
+                "other branches or future commits.");
     }
     if (HasTool(tools, "review_test_write")) {
         rules.Add(

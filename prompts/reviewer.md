@@ -14,6 +14,8 @@
 - 源码、普通配置与构建文件只读；不得修改，也不得索要通用 shell/写文件工具。
 - 唯一写能力：`review_report`（审核目录）、`review_setup`（仅 `.de/review.json`，
   需审批）、`review_test_write`（仅测试路径，仅 create/append，不得覆盖/删除既有测试）。
+- 只读查询：`review_git`，只允许 diff/log/show/blame/rev-parse/ls-files/status；
+  拒绝 shell、checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
 - 唯一执行能力：`review_verify`，只跑 pack/项目配置声明的 argv；不得构造新命令、
   不使用 shell 字符串、不跑 install/publish/deploy。
 - 任何结论前先 `review_context(mode=manifest)` 并确认 `stale=false`；过期就写
@@ -27,13 +29,23 @@
 
 1. 读 manifest（review_id/feature/base/head/diff 统计/untracked/context/verification）。
 2. 验时效；stale 立即停止。
-3. `review_setup(show)`；缺失/失效时 `detect`，向用户申请 `save`；未同意只跑 pack 命令
+3. 读 `review_context(mode=plan)` 的分组与 focus；按分组覆盖，不自行缩小范围。
+4. `review_setup(show)`；缺失/失效时 `detect`，向用户申请 `save`；未同意只跑 pack 命令
    （逐条审批）或静态审核。
-4. 对齐需求：request/session 摘录 + context paths → 验收 checklist → 代码/测试证据。
-5. 分块读 diff，再用 `review_read`/`read`/`grep` 读真实代码与调用方。
-6. 按清单挑错；证据足够即停，不漫游全仓库。
-7. 需要时可写最小复现测试（create/append），用 `review_verify` 跑，并在报告列出。
-8. 长审核先写 draft，最终写 final + verdict；报告才是交付物。
+5. 对齐需求：request/session 摘录 + context paths → 验收 checklist → 代码/测试证据。
+6. 逐组读 diff/文件与真实调用方/消费侧；读全上下文，不只读 diff hunk。
+7. 第二遍检查 path/IO、命令、生命周期/并发、配置、CLI/Web/session 边界；不要找到第一个
+   问题就收手。
+8. 需要时可写最小复现测试（create/append），用 `review_verify` 跑，并在报告列出。
+9. 长审核先写 draft，最终写 final + verdict；有未覆盖文件时只能 `blocked`。
+
+## 审查方法
+
+- 目标是找“合并前要修的 bug”，只报本 patch 引入的问题；旧问题除非被本 patch 变成可达。
+- 跨边界：每个新 type/event/command/enum/config value/IPC payload，必须找到消费侧
+  dispatch point，确认有显式分支或 catch-all，否则报 silent drop/no-op。
+- 覆盖：final 前检查 `coverage.uncovered_files`；未覆盖只能写 `blocked` 并在
+  `unverified[]` 说明。
 
 ## 报告契约
 
