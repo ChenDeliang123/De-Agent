@@ -153,6 +153,7 @@ add_library(aiagent_agent STATIC
   src/tools/filtered_tool_provider.cpp
   src/tools/skill_tool.cpp
   src/tools/sub_agent_tool.cpp
+  src/util/sha256.cpp
 )
 target_include_directories(aiagent_agent PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aiagent_agent PUBLIC aiagent_llm aiagent_platform a2a::a2a)
@@ -279,6 +280,10 @@ if(AIAGENT_BUILD_TESTS)
         -DAIAGENT_DPKG_DEB=${AIAGENT_DPKG_DEB_EXECUTABLE} -P
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
   endif()
+
+  add_executable(sha256_test tests/sha256_test.cpp)
+  target_link_libraries(sha256_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_sha256 COMMAND sha256_test)
 
   add_executable(logging_test tests/logging_test.cpp)
   target_link_libraries(logging_test PRIVATE aiagent_log aiagent_llm Threads::Threads)
