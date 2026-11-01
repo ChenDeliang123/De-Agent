@@ -263,7 +263,7 @@ ReviewReportResult ReviewReportWriter::Write(
             return fail("test_files entry changed after reviewer wrote it: " + path);
         }
     }
-    if (input.status == "final" && !state.timed_out) {
+    if (input.status == "final" && input.verdict != "blocked" && !state.timed_out) {
         for (const auto& record : state.reviewer_tests) {
             if (reported_tests.count(record.path) == 0) {
                 return fail("report is missing reviewer-owned test file: " + record.path);

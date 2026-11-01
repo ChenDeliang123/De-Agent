@@ -1016,9 +1016,14 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
             return fail("request_file must be inside the repository root");
         }
         std::string read_error;
-        std::string content = ReadFileLimited(request_path, 65536, nullptr, &read_error);
+        bool request_truncated = false;
+        std::string content = ReadFileLimited(request_path, 65536, &request_truncated,
+                                              &read_error);
         if (!read_error.empty()) {
             return fail("cannot read request_file: " + read_error);
+        }
+        if (request_truncated) {
+            return fail("request_file is larger than 64 KiB");
         }
         if (aiagent::platform::LooksBinary(content)) {
             return fail("request_file must be a text file");
@@ -1116,9 +1121,9 @@ ReviewPackResult ReviewPackService::CreatePack(const ReviewPackRequest& request)
                 return fail("verification cwd must stay inside the repository: " +
                             command.id);
             }
-            if (!IsPackCommandAllowed(command.argv)) {
-                return fail("verification command is not in the pack allowlist: " +
-                            command.id);
+            if (!IsPackCommandAllowed(command.argv) ||
+                IsForbiddenProjectCommand(command.argv)) {
+                return fail("verification command is not allowed in a pack: " + command.id);
             }
             pack.verification.push_back(std::move(command));
         }

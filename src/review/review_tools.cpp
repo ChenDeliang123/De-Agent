@@ -784,6 +784,8 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
         std::ostringstream content;
         int end = start - 1;
         std::size_t body_bytes = 0;
+        const std::size_t file_limit =
+                std::min<std::size_t>(65536, max_bytes - std::min(used, max_bytes));
         bool truncated_by_limit = false;
         bool truncated_by_bytes = false;
         while (std::getline(input, line)) {
@@ -797,7 +799,7 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
             }
             std::string rendered = line;
             rendered.push_back('\n');
-            if (used + body_bytes + rendered.size() > max_bytes) {
+            if (body_bytes + rendered.size() > file_limit) {
                 truncated_by_bytes = true;
                 break;
             }
@@ -810,7 +812,7 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
         payload.push_back({{"path", raw_path},
                            {"start", start},
                            {"end", end},
-                           {"total_lines", line_number},
+                           {"lines_read", end >= start ? end - start + 1 : 0},
                            {"truncated", truncated_by_limit || truncated_by_bytes},
                            {"content", body}});
     }
@@ -938,7 +940,9 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
     if (selected->argv.empty()) {
         return Fail("verification command has no argv");
     }
-    if (source == "pack" && !IsPackCommandAllowed(selected->argv)) {
+    if (source == "pack" &&
+        (!IsPackCommandAllowed(selected->argv) ||
+         IsForbiddenProjectCommand(selected->argv))) {
         return Fail("pack command is not in the allowlist");
     }
     if (source == "project" && IsForbiddenProjectCommand(selected->argv)) {
@@ -990,7 +994,7 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
     record.duration_ms = run.duration_ms;
     record.timed_out = run.timed_out;
     record.source_modified = source_modified;
-    record.invalid = source_modified;
+    record.invalid = source_modified || run.cancelled;
     record.output_excerpt = OutputExcerpt(run.output, 8192);
     bool replaced = false;
     for (auto& existing : state.verification) {
@@ -1019,7 +1023,7 @@ tools::ToolExecutionResult ReviewTools::Verify(const nlohmann::json& arguments,
             {"cancelled", run.cancelled},
             {"truncated", run.truncated},
             {"source_modified", source_modified},
-            {"invalid", source_modified},
+            {"invalid", source_modified || run.cancelled},
             {"output", run.output},
             {"stale", false},
             {"stale_reasons", nlohmann::json::array()}};
