@@ -576,7 +576,7 @@ switch ($Action) {
             exit 1
         }
         try {
-            $reviewConfig = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/reviews/config" -UseBasicParsing
+            $reviewConfig = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/reviews/config"
         } catch {
             Write-Host "review config unavailable: $($_.Exception.Message)"
             exit 1
