@@ -56,6 +56,7 @@
 #include "aiagent/permissions/project_config.hpp"
 #include "aiagent/permissions/trust_store.hpp"
 #include "aiagent/review/project_verify_config.hpp"
+#include "aiagent/review/review_job.hpp"
 #include "aiagent/review/review_pack.hpp"
 #include "aiagent/review/review_report.hpp"
 #include "aiagent/review/review_tools.hpp"
@@ -1083,9 +1084,7 @@ int main(int argc, char** argv) {
         // reviewer runtime：独立系统提示词、独立历史、路径受限工具集。
         // 与 coding runtime 共享权限存储/审批/压缩/项目配置，但工具白名单在
         // Execute 层再次过滤，不暴露 write/edit/bash/task/MCP。
-        aiagent::agent::AgentRuntime review_runtime(model);
-        std::shared_ptr<aiagent::tools::IToolProvider> reviewer_tool_provider;
-        {
+        auto make_reviewer_provider = [&]() -> std::shared_ptr<aiagent::tools::IToolProvider> {
             auto reviewer_composite =
                     std::make_shared<aiagent::tools::CompositeToolProvider>();
             reviewer_composite->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
@@ -1107,42 +1106,143 @@ int main(int argc, char** argv) {
                         skill_loader, fallback_working_directory));
                 review_allow.push_back(aiagent::tools::kSkillToolName);
             }
-            reviewer_tool_provider = std::make_shared<aiagent::tools::FilteredToolProvider>(
+            return std::make_shared<aiagent::tools::FilteredToolProvider>(
                     reviewer_composite, review_allow, std::vector<std::string>{});
-        }
-        review_runtime.SetFallbackWorkingDirectory(fallback_working_directory);
-        review_runtime.SetProjectInstructionsLoader(instructions_loader);
-        if (skills_config.enabled) {
-            review_runtime.SetSkillLoader(skill_loader);
-        }
-        review_runtime.SetCompactionSettings(compaction_settings);
-        review_runtime.SetCompactionCallback(
-                [&](const std::string& context_id,
-                    const aiagent::agent::CompactionRecord& record) {
-                    std::lock_guard<std::mutex> lock(compaction_records_mutex);
-                    compaction_records[context_id] = record;
-                });
-        review_runtime.SetPermissionStore(permission_store);
-        review_runtime.SetPermissionSettings(permission_settings);
-        review_runtime.SetBashPolicy(bash_policy);
-        review_runtime.SetProjectConfigProvider(
-                [project_config_cache](const std::string& cwd) {
-                    return project_config_cache->Get(cwd);
-                });
-        review_runtime.SetTrustStore(trust_store);
-        review_runtime.SetApprovalHandler(
+        };
+        std::shared_ptr<aiagent::tools::IToolProvider> reviewer_tool_provider =
+                make_reviewer_provider();
+
+        auto configure_review_runtime =
+                [&](aiagent::agent::AgentRuntime& runtime,
+                    std::shared_ptr<aiagent::tools::IToolProvider> provider,
+                    const aiagent::agent::PermissionSettings& settings,
+                    aiagent::agent::AgentRuntime::ApprovalHandler approval) {
+                    runtime.SetFallbackWorkingDirectory(fallback_working_directory);
+                    runtime.SetProjectInstructionsLoader(instructions_loader);
+                    if (skills_config.enabled) {
+                        runtime.SetSkillLoader(skill_loader);
+                    }
+                    runtime.SetCompactionSettings(compaction_settings);
+                    runtime.SetCompactionCallback(
+                            [&](const std::string& context_id,
+                                const aiagent::agent::CompactionRecord& record) {
+                                std::lock_guard<std::mutex> lock(compaction_records_mutex);
+                                compaction_records[context_id] = record;
+                            });
+                    runtime.SetPermissionStore(permission_store);
+                    runtime.SetPermissionSettings(settings);
+                    runtime.SetBashPolicy(bash_policy);
+                    runtime.SetProjectConfigProvider(
+                            [project_config_cache](const std::string& cwd) {
+                                return project_config_cache->Get(cwd);
+                            });
+                    runtime.SetTrustStore(trust_store);
+                    runtime.SetApprovalHandler(std::move(approval));
+                    runtime.SetWorkspaceSandboxOnly(true);
+                    runtime.SetMaxToolRounds(review_config.max_tool_rounds);
+                    runtime.SetToolProvider(std::move(provider));
+                    runtime.SetSystemPromptBuilder(
+                            [](const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
+                                return aiagent::agent::BuildReviewerSystemPrompt(tool_specs);
+                            });
+                };
+
+        aiagent::agent::AgentRuntime review_runtime(model);
+        configure_review_runtime(
+                review_runtime, reviewer_tool_provider, permission_settings,
                 [approval_broker, timeout = permissions_config.approval_timeout_seconds](
                         const aiagent::agent::ApprovalRequest& request) {
                     return approval_broker->Wait(request.context_id, request.tool_call_id,
                                                  std::chrono::seconds(timeout));
                 });
-        review_runtime.SetWorkspaceSandboxOnly(true);
-        review_runtime.SetMaxToolRounds(review_config.max_tool_rounds);
-        review_runtime.SetToolProvider(reviewer_tool_provider);
-        review_runtime.SetSystemPromptBuilder(
-                [](const std::vector<aiagent::llm::ToolSpec>& tool_specs) {
-                    return aiagent::agent::BuildReviewerSystemPrompt(tool_specs);
-                });
+
+        // 后台审核：强制 confirm 档位，只自动允许“用户已同意的项目验证命令”；
+        // 其他写/验证/命令请求一律拒绝，reviewer 应写入 unverified。
+        aiagent::agent::PermissionSettings background_permissions = permission_settings;
+        background_permissions.default_mode = aiagent::permissions::PermissionMode::kConfirm;
+        background_permissions.max_mode = aiagent::permissions::PermissionMode::kConfirm;
+        background_permissions.non_interactive_max_mode =
+                aiagent::permissions::PermissionMode::kConfirm;
+        background_permissions.allow_full_access = false;
+        aiagent::agent::AgentRuntime::ApprovalHandler background_approval =
+                [review_data_dir, review_config](
+                        const aiagent::agent::ApprovalRequest& request) {
+                    if (request.tool_name != "review_verify") {
+                        aiagent::DefaultLogger().Log(
+                                aiagent::LogLevel::kWarning, "review_job",
+                                "event=background_approval_denied session=" +
+                                        request.context_id + " tool=" + request.tool_name);
+                        return aiagent::agent::ApprovalDecision::kDeny;
+                    }
+                    nlohmann::json arguments = nlohmann::json::object();
+                    try {
+                        if (!request.arguments.empty()) {
+                            arguments = nlohmann::json::parse(request.arguments);
+                        }
+                    } catch (const nlohmann::json::exception&) {
+                        return aiagent::agent::ApprovalDecision::kDeny;
+                    }
+                    std::string source = arguments.value("source", std::string());
+                    const std::string command_id =
+                            arguments.value("command_id", std::string());
+                    if (source.empty()) {
+                        const std::size_t colon = command_id.find(':');
+                        if (colon != std::string::npos) {
+                            source = command_id.substr(0, colon);
+                        } else {
+                            source = "pack";
+                        }
+                    }
+                    if (source != "project") {
+                        aiagent::DefaultLogger().Log(
+                                aiagent::LogLevel::kWarning, "review_job",
+                                "event=background_approval_denied session=" +
+                                        request.context_id + " reason=pack_command");
+                        return aiagent::agent::ApprovalDecision::kDeny;
+                    }
+                    const std::string pack_path = arguments.value("pack", std::string());
+                    aiagent::review::ReviewPack pack;
+                    std::string pack_error;
+                    if (!aiagent::review::LoadReviewPack(pack_path, &pack, &pack_error)) {
+                        return aiagent::agent::ApprovalDecision::kDeny;
+                    }
+                    aiagent::review::ProjectVerifyConfig project_config;
+                    std::string project_error;
+                    if (!aiagent::review::LoadProjectVerifyConfig(
+                                pack.repo_root, &project_config, &project_error)) {
+                        return aiagent::agent::ApprovalDecision::kDeny;
+                    }
+                    aiagent::review::ReviewConsentStore consent(
+                            review_data_dir.empty()
+                                    ? std::string()
+                                    : aiagent::platform::ToUtf8(
+                                              aiagent::platform::FromUtf8(review_data_dir) /
+                                              "review_consent.json"));
+                    if (consent.Check(pack.repo_root, project_config.sha256).status !=
+                        "valid") {
+                        return aiagent::agent::ApprovalDecision::kDeny;
+                    }
+                    std::string requested_id = command_id;
+                    const std::size_t colon = requested_id.find(':');
+                    if (colon != std::string::npos) {
+                        requested_id = requested_id.substr(colon + 1);
+                    }
+                    for (const auto& command : project_config.commands) {
+                        if (command.id != requested_id) {
+                            continue;
+                        }
+                        if (aiagent::review::IsForbiddenProjectCommand(command.argv)) {
+                            return aiagent::agent::ApprovalDecision::kDeny;
+                        }
+                        aiagent::DefaultLogger().Log(
+                                aiagent::LogLevel::kInfo, "review_job",
+                                "event=background_approval session=" +
+                                        request.context_id + " command=" +
+                                        requested_id);
+                        return aiagent::agent::ApprovalDecision::kAllowOnce;
+                    }
+                    return aiagent::agent::ApprovalDecision::kDeny;
+                };
 
         // review_handoff 只挂在 coding 顶层工具集；reviewer 不提供。
         std::shared_ptr<aiagent::review::ReviewTools> review_handoff_tools;
@@ -1184,6 +1284,134 @@ int main(int argc, char** argv) {
             tools->Add(review_handoff_tools);
         }
 
+        // 后台审核任务：每个任务使用独立 reviewer runtime/provider，避免共享
+        // ReviewTools 的 last_pack/copy worktree/cache 状态；权限强制 confirm，
+        // 只自动允许用户已同意的 project 验证命令。
+        std::unique_ptr<aiagent::review::ReviewJobManager> review_job_manager;
+        if (review_config.enabled) {
+            const std::string jobs_file =
+                    review_data_dir.empty()
+                            ? std::string()
+                            : aiagent::platform::ToUtf8(
+                                      aiagent::platform::FromUtf8(review_data_dir) /
+                                      "review_jobs.json");
+            review_job_manager = std::make_unique<aiagent::review::ReviewJobManager>(
+                    review_config, jobs_file,
+                    [make_reviewer_provider, configure_review_runtime,
+                     background_permissions, background_approval, model, task_store,
+                     &history_cache, &session_meta,
+                     review_config](const aiagent::review::ReviewJob& job,
+                                    const std::function<bool()>& should_cancel,
+                                    const std::function<void(
+                                            const aiagent::review::ReviewJobProgress&)>&
+                                            on_progress)
+                            -> aiagent::review::ReviewJobRunResult {
+                        aiagent::review::ReviewJobRunResult result;
+                        aiagent::review::ReviewPack pack;
+                        std::string pack_error;
+                        if (!aiagent::review::LoadReviewPack(job.pack_path, &pack,
+                                                             &pack_error)) {
+                            result.error = "cannot load pack: " + pack_error;
+                            return result;
+                        }
+                        const int total_files =
+                                static_cast<int>(pack.changed_files.size());
+                        on_progress({0, total_files, 0, "starting"});
+                        session_meta.SetRole(job.session_id, "reviewer");
+                        session_meta.SetCwd(job.session_id, job.repo_root);
+
+                        const std::string prompt =
+                                "Review the change described in " + job.pack_path +
+                                ". Start with review_context(mode=manifest). "
+                                "This is a background review: do not ask questions. "
+                                "Do not call review_setup or review_test_write. "
+                                "Use review_verify only for project commands with valid "
+                                "consent; if a command is denied or unavailable, record it "
+                                "in unverified. Write a final report with verdict.";
+                        a2a::models::Message user = a2a::models::MakeTextMessage(
+                                a2a::models::Role::kUser, prompt, "text/plain");
+                        std::vector<a2a::models::Message> history = {user};
+                        auto on_event = [&on_progress, total_files](
+                                                const aiagent::agent::AgentEvent& event) {
+                            if (event.kind == aiagent::agent::AgentEventKind::kToolStart) {
+                                on_progress({0, total_files, 0, event.tool_name});
+                            }
+                        };
+                        const auto started = std::chrono::steady_clock::now();
+                        std::string reply;
+                        try {
+                            aiagent::agent::AgentRuntime runtime(model);
+                            configure_review_runtime(
+                                    runtime, make_reviewer_provider(),
+                                    background_permissions, background_approval);
+                            reply = runtime.HandleMessageStreamingEvents(
+                                    user, history, job.session_id, on_event,
+                                    job.repo_root, should_cancel, nullptr);
+                        } catch (const std::exception& e) {
+                            if (should_cancel()) {
+                                result.cancelled = true;
+                            }
+                            result.error = e.what();
+                            if (result.error.empty()) {
+                                result.error = "reviewer runtime failed";
+                            }
+                            return result;
+                        }
+
+                        if (!reply.empty()) {
+                            a2a::models::Task task;
+                            task.id = std::string(a2a::core::NewUuid());
+                            task.context_id = job.session_id;
+                            task.status = a2a::models::MakeTaskStatus(
+                                    a2a::models::TaskState::kCompleted);
+                            task.history = history;
+                            task.history.push_back(a2a::models::MakeTextMessage(
+                                    a2a::models::Role::kAgent, reply, "text/plain"));
+                            history_cache.Put(job.session_id, task.history);
+                            task_store->Put(std::move(task));
+                        }
+
+                        const std::filesystem::path pack_path =
+                                aiagent::platform::FromUtf8(job.pack_path);
+                        const std::string stem =
+                                aiagent::platform::ToUtf8(pack_path.stem());
+                        const std::string report_relative =
+                                review_config.dir + "/" + stem + ".md";
+                        aiagent::review::PreviousReviewSummary summary;
+                        std::string report_error;
+                        if (!aiagent::review::LoadPreviousReviewSummary(
+                                    job.repo_root, report_relative, &summary,
+                                    &report_error)) {
+                            if (should_cancel()) {
+                                result.cancelled = true;
+                            }
+                            result.error = "reviewer did not write a report: " +
+                                           report_error;
+                            return result;
+                        }
+                        result.report_path = report_relative;
+                        result.verdict = summary.verdict;
+                        result.findings = static_cast<int>(summary.finding_ids.size());
+                        result.ok = !summary.verdict.empty();
+                        if (!result.ok) {
+                            result.error = "reviewer wrote a draft without final verdict";
+                        }
+                        const auto elapsed =
+                                std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now() - started)
+                                        .count();
+                        if (elapsed > review_config.review_timeout_s) {
+                            result.timed_out = true;
+                        }
+                        if (should_cancel()) {
+                            result.cancelled = true;
+                        }
+                        on_progress({total_files, total_files, result.findings,
+                                     result.verdict});
+                        return result;
+                    });
+        }
+
         a2a::server::AgentServer agent_server(BuildAgentCard(options.port), task_store);
 
         agent_server.task_manager().SetMessageHandler(
@@ -1209,6 +1437,75 @@ int main(int argc, char** argv) {
                 });
 
         aiagent::web::WebGateway web_gateway(agent_server, *task_store);
+
+        if (review_job_manager) {
+            auto* manager = review_job_manager.get();
+            web_gateway.SetReviewJobSubmitHandler(
+                    [manager](const std::string& pack, const std::string& session_id,
+                              aiagent::review::ReviewJob* job, std::string* error) {
+                        const std::string resolved = aiagent::platform::ToUtf8(
+                                aiagent::platform::ResolveCanonicalPath({}, pack));
+                        return manager->Submit(resolved, session_id, job, error);
+                    });
+            web_gateway.SetReviewJobsListHandler(
+                    [manager](const std::string& session_id) {
+                        auto jobs = manager->List();
+                        if (session_id.empty()) {
+                            return jobs;
+                        }
+                        std::vector<aiagent::review::ReviewJob> filtered;
+                        for (auto& job : jobs) {
+                            if (job.parent_session_id == session_id ||
+                                job.session_id == session_id) {
+                                filtered.push_back(std::move(job));
+                            }
+                        }
+                        return filtered;
+                    });
+            web_gateway.SetReviewJobGetHandler(
+                    [manager](const std::string& id,
+                              aiagent::review::ReviewJob* job, std::string* error) {
+                        const auto found = manager->Get(id);
+                        if (!found.has_value()) {
+                            if (error != nullptr) {
+                                *error = "unknown review job: " + id;
+                            }
+                            return false;
+                        }
+                        *job = *found;
+                        return true;
+                    });
+            web_gateway.SetReviewJobCancelHandler(
+                    [manager](const std::string& id, std::string* error) {
+                        return manager->Cancel(id, error);
+                    });
+            web_gateway.SetReviewJobAttachHandler(
+                    [manager](const std::string& id, aiagent::review::ReviewJob* job,
+                              std::string* report, std::string* error) {
+                        return manager->Attach(id, job, report, error);
+                    });
+            review_job_manager->SetCompletionCallback(
+                    [&web_gateway](const aiagent::review::ReviewJob& job) {
+                        const std::string target = job.parent_session_id.empty()
+                                                           ? job.session_id
+                                                           : job.parent_session_id;
+                        web_gateway.PublishSessionEvent(
+                                target, "review_ready",
+                                {{"job_id", job.job_id},
+                                 {"review_id", job.review_id},
+                                 {"state", job.state},
+                                 {"report_path", job.report_path},
+                                 {"verdict", job.verdict},
+                                 {"findings", job.progress.findings}});
+                        aiagent::DefaultLogger().Log(
+                                aiagent::LogLevel::kInfo, "review_job",
+                                "event=review_job session=" + job.session_id +
+                                        " job=" + job.job_id + " state=" + job.state +
+                                        " verdict=" + job.verdict +
+                                        " findings=" +
+                                        std::to_string(job.progress.findings));
+                    });
+        }
         web_gateway.SetHistoryCache(&history_cache);
         // 子 Agent 快照（GET /api/v1/agents）：定义 + 累计统计；未启用时 enabled=false。
         web_gateway.SetAgentsInfoHandler([agent_manager, agents_config, &session_meta](
@@ -1942,6 +2239,9 @@ int main(int argc, char** argv) {
         // 退出前确定性收敛：取消后台任务并等待结果写入（有界 5s，超时只告警）。
         if (agent_manager != nullptr) {
             agent_manager->ShutdownBackground();
+        }
+        if (review_job_manager) {
+            review_job_manager->Shutdown();
         }
         http_server.Stop();
         web_gateway.Stop();

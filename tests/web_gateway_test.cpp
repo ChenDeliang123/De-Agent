@@ -771,6 +771,100 @@ int main() {
                     base + "/api/v1/reviews", R"({"feature":"x"})", "application/json");
             Expect(review_missing.status_code == 400,
                    "reviews requires cwd and feature");
+
+            // 后台任务 API：只验证协议转发，不启动真实 reviewer。
+            gateway.SetReviewJobSubmitHandler(
+                    [](const std::string& pack, const std::string& session_id,
+                       aiagent::review::ReviewJob* job, std::string* error) {
+                        if (pack.empty()) {
+                            if (error != nullptr) {
+                                *error = "pack is required";
+                            }
+                            return false;
+                        }
+                        job->job_id = "rvjob-test";
+                        job->review_id = "rv-test";
+                        job->pack_path = pack;
+                        job->feature = "feature-x";
+                        job->state = "queued";
+                        job->parent_session_id = session_id;
+                        return true;
+                    });
+            gateway.SetReviewJobsListHandler(
+                    [](const std::string& session_id) {
+                        aiagent::review::ReviewJob job;
+                        job.job_id = "rvjob-test";
+                        job.state = "queued";
+                        job.parent_session_id = session_id;
+                        return std::vector<aiagent::review::ReviewJob>{job};
+                    });
+            gateway.SetReviewJobGetHandler(
+                    [](const std::string& id, aiagent::review::ReviewJob* job,
+                       std::string* error) {
+                        if (id != "rvjob-test") {
+                            if (error != nullptr) {
+                                *error = "unknown review job";
+                            }
+                            return false;
+                        }
+                        job->job_id = id;
+                        job->state = "done";
+                        job->verdict = "approved";
+                        return true;
+                    });
+            gateway.SetReviewJobCancelHandler(
+                    [](const std::string& id, std::string* error) {
+                        if (id != "rvjob-test") {
+                            if (error != nullptr) {
+                                *error = "unknown review job";
+                            }
+                            return false;
+                        }
+                        return true;
+                    });
+            gateway.SetReviewJobAttachHandler(
+                    [](const std::string& id, aiagent::review::ReviewJob* job,
+                       std::string* report, std::string* error) {
+                        if (id != "rvjob-test") {
+                            if (error != nullptr) {
+                                *error = "unknown review job";
+                            }
+                            return false;
+                        }
+                        job->job_id = id;
+                        job->state = "done";
+                        job->verdict = "approved";
+                        *report = "# report";
+                        return true;
+                    });
+            const auto job_submit = http.Post(
+                    base + "/api/v1/reviews/jobs",
+                    R"({"pack":"/repo/docs/review/inbox/x.json","session_id":"coding"})",
+                    "application/json");
+            Expect(job_submit.IsSuccess() &&
+                           nlohmann::json::parse(job_submit.body)
+                                       .value("job_id", std::string()) == "rvjob-test",
+                   "job submit: " + job_submit.body);
+            const auto job_list = http.Get(base + "/api/v1/reviews/jobs?session_id=coding");
+            Expect(job_list.IsSuccess() &&
+                           nlohmann::json::parse(job_list.body).size() == 1,
+                   "job list: " + job_list.body);
+            const auto job_get = http.Get(base + "/api/v1/reviews/jobs/rvjob-test");
+            Expect(job_get.IsSuccess() &&
+                           nlohmann::json::parse(job_get.body).value("state", std::string()) ==
+                                   "done",
+                   "job get: " + job_get.body);
+            const auto job_cancel = http.Post(
+                    base + "/api/v1/reviews/jobs/rvjob-test/cancel", "{}",
+                    "application/json");
+            Expect(job_cancel.IsSuccess(), "job cancel: " + job_cancel.body);
+            const auto job_attach = http.Post(
+                    base + "/api/v1/reviews/jobs/rvjob-test/attach", "{}",
+                    "application/json");
+            Expect(job_attach.IsSuccess() &&
+                           nlohmann::json::parse(job_attach.body)
+                                       .value("report", std::string()) == "# report",
+                   "job attach: " + job_attach.body);
         }
 
         // ---- 权限模式 REST ----

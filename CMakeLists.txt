@@ -147,6 +147,7 @@ add_library(aiagent_agent STATIC
   src/permissions/project_config.cpp
   src/permissions/trust_store.cpp
   src/review/project_verify_config.cpp
+  src/review/review_job.cpp
   src/review/review_pack.cpp
   src/review/review_process.cpp
   src/review/review_report.cpp
@@ -286,6 +287,10 @@ if(AIAGENT_BUILD_TESTS)
         -DAIAGENT_DPKG_DEB=${AIAGENT_DPKG_DEB_EXECUTABLE} -P
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
   endif()
+
+  add_executable(review_job_test tests/review_job_test.cpp)
+  target_link_libraries(review_job_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_job COMMAND review_job_test)
 
   add_executable(review_verify_copy_test tests/review_verify_copy_test.cpp)
   target_link_libraries(review_verify_copy_test PRIVATE aiagent_agent)

@@ -137,6 +137,28 @@ nlohmann::json BackgroundTasksJson(const std::vector<BackgroundTaskInfo>& tasks)
     return array;
 }
 
+nlohmann::json ReviewJobJson(const aiagent::review::ReviewJob& job) {
+    return {{"job_id", job.job_id},
+            {"review_id", job.review_id},
+            {"pack_path", job.pack_path},
+            {"repo_root", job.repo_root},
+            {"feature", job.feature},
+            {"branch", job.branch},
+            {"session_id", job.session_id},
+            {"parent_session_id", job.parent_session_id},
+            {"state", job.state},
+            {"progress",
+             {{"files_done", job.progress.files_done},
+              {"files_total", job.progress.files_total},
+              {"findings", job.progress.findings},
+              {"current_command", job.progress.current_command}}},
+            {"report_path", job.report_path},
+            {"verdict", job.verdict},
+            {"error", job.error},
+            {"created_at", job.created_at},
+            {"updated_at", job.updated_at}};
+}
+
 // 将 AgentEvent 序列化为 SSE 帧（event + data）。arguments 原始 JSON 若能
 // 解析则作为对象嵌入，否则按字符串透传。
 // 归属：agent_id / parent_tool_call_id 非空时附加到任意帧（缺省 = 根 Agent），
@@ -309,6 +331,26 @@ public:
 
     void SetReviewEnabledHandler(WebGateway::ReviewEnabledHandler handler) {
         review_enabled_handler_ = std::move(handler);
+    }
+
+    void SetReviewJobSubmitHandler(WebGateway::ReviewJobSubmitHandler handler) {
+        review_job_submit_handler_ = std::move(handler);
+    }
+
+    void SetReviewJobsListHandler(WebGateway::ReviewJobsListHandler handler) {
+        review_jobs_list_handler_ = std::move(handler);
+    }
+
+    void SetReviewJobGetHandler(WebGateway::ReviewJobGetHandler handler) {
+        review_job_get_handler_ = std::move(handler);
+    }
+
+    void SetReviewJobCancelHandler(WebGateway::ReviewJobCancelHandler handler) {
+        review_job_cancel_handler_ = std::move(handler);
+    }
+
+    void SetReviewJobAttachHandler(WebGateway::ReviewJobAttachHandler handler) {
+        review_job_attach_handler_ = std::move(handler);
     }
 
     void SetSkillsHandler(WebGateway::SkillsHandler handler) {
@@ -1523,6 +1565,159 @@ private:
                          }
                      });
 
+        // 后台审核任务：提交/列表/查询/取消/attach。
+        server_.Post("/api/v1/reviews/jobs",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!review_job_submit_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"review jobs not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         try {
+                             const auto body = nlohmann::json::parse(request.body);
+                             const std::string pack = StringValue(body, "pack");
+                             if (pack.empty()) {
+                                 response.status = 400;
+                                 response.set_content(R"({"error":"pack is required"})",
+                                                      "application/json");
+                                 return;
+                             }
+                             aiagent::review::ReviewJob job;
+                             std::string error;
+                             if (!review_job_submit_handler_(
+                                         pack, StringValue(body, "session_id"), &job,
+                                         &error)) {
+                                 response.status = 400;
+                                 response.set_content(
+                                         nlohmann::json{{"error", error}}.dump(),
+                                         "application/json");
+                                 return;
+                             }
+                             response.set_content(ReviewJobJson(job).dump(),
+                                                  "application/json");
+                         } catch (const nlohmann::json::exception& e) {
+                             response.status = 400;
+                             response.set_content(
+                                     nlohmann::json{{"error", std::string("invalid JSON: ") +
+                                                                     e.what()}}
+                                             .dump(),
+                                     "application/json");
+                         }
+                     });
+
+        server_.Get("/api/v1/reviews/jobs",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        if (!review_jobs_list_handler_) {
+                            response.status = 501;
+                            response.set_content(
+                                    R"({"error":"review jobs not available"})",
+                                    "application/json");
+                            return;
+                        }
+                        const std::string session_id =
+                                request.has_param("session_id")
+                                        ? request.get_param_value("session_id")
+                                        : std::string();
+                        nlohmann::json payload = nlohmann::json::array();
+                        for (const auto& job : review_jobs_list_handler_(session_id)) {
+                            payload.push_back(ReviewJobJson(job));
+                        }
+                        response.set_content(payload.dump(), "application/json");
+                    });
+
+        server_.Get("/api/v1/reviews/jobs/:id",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        if (!review_job_get_handler_) {
+                            response.status = 501;
+                            response.set_content(
+                                    R"({"error":"review jobs not available"})",
+                                    "application/json");
+                            return;
+                        }
+                        const auto it = request.path_params.find("id");
+                        if (it == request.path_params.end()) {
+                            response.status = 400;
+                            response.set_content(R"({"error":"missing job id"})",
+                                                 "application/json");
+                            return;
+                        }
+                        aiagent::review::ReviewJob job;
+                        std::string error;
+                        if (!review_job_get_handler_(it->second, &job, &error)) {
+                            response.status = 404;
+                            response.set_content(
+                                    nlohmann::json{{"error", error}}.dump(),
+                                    "application/json");
+                            return;
+                        }
+                        response.set_content(ReviewJobJson(job).dump(),
+                                             "application/json");
+                    });
+
+        server_.Post("/api/v1/reviews/jobs/:id/cancel",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!review_job_cancel_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"review jobs not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         const auto it = request.path_params.find("id");
+                         if (it == request.path_params.end()) {
+                             response.status = 400;
+                             response.set_content(R"({"error":"missing job id"})",
+                                                  "application/json");
+                             return;
+                         }
+                         std::string error;
+                         if (!review_job_cancel_handler_(it->second, &error)) {
+                             response.status = 404;
+                             response.set_content(
+                                     nlohmann::json{{"error", error}}.dump(),
+                                     "application/json");
+                             return;
+                         }
+                         response.set_content(R"({"cancelled":true})",
+                                              "application/json");
+                     });
+
+        server_.Post("/api/v1/reviews/jobs/:id/attach",
+                     [this](const httplib::Request& request, httplib::Response& response) {
+                         if (!review_job_attach_handler_) {
+                             response.status = 501;
+                             response.set_content(
+                                     R"({"error":"review jobs not available"})",
+                                     "application/json");
+                             return;
+                         }
+                         const auto it = request.path_params.find("id");
+                         if (it == request.path_params.end()) {
+                             response.status = 400;
+                             response.set_content(R"({"error":"missing job id"})",
+                                                  "application/json");
+                             return;
+                         }
+                         aiagent::review::ReviewJob job;
+                         std::string report;
+                         std::string error;
+                         if (!review_job_attach_handler_(it->second, &job, &report,
+                                                         &error)) {
+                             response.status = 404;
+                             response.set_content(
+                                     nlohmann::json{{"error", error}}.dump(),
+                                     "application/json");
+                             return;
+                         }
+                         response.set_content(
+                                 nlohmann::json{{"job", ReviewJobJson(job)},
+                                                {"report", report}}
+                                         .dump(),
+                                 "application/json");
+                     });
+
         server_.Post("/api/v1/chat/cancel",
                      [this](const httplib::Request& request, httplib::Response& response) {
                          try {
@@ -1720,6 +1915,11 @@ private:
     WebGateway::ToolsHandler tools_handler_;
     WebGateway::ReviewCreateHandler review_create_handler_;
     WebGateway::ReviewEnabledHandler review_enabled_handler_;
+    WebGateway::ReviewJobSubmitHandler review_job_submit_handler_;
+    WebGateway::ReviewJobsListHandler review_jobs_list_handler_;
+    WebGateway::ReviewJobGetHandler review_job_get_handler_;
+    WebGateway::ReviewJobCancelHandler review_job_cancel_handler_;
+    WebGateway::ReviewJobAttachHandler review_job_attach_handler_;
     WebGateway::SkillsHandler skills_handler_;
     WebGateway::AgentsInfoHandler agents_handler_;
     WebGateway::BackgroundStopHandler background_stop_handler_;
@@ -1788,6 +1988,26 @@ void WebGateway::SetReviewCreateHandler(WebGateway::ReviewCreateHandler handler)
 
 void WebGateway::SetReviewEnabledHandler(WebGateway::ReviewEnabledHandler handler) {
     impl_->SetReviewEnabledHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewJobSubmitHandler(WebGateway::ReviewJobSubmitHandler handler) {
+    impl_->SetReviewJobSubmitHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewJobsListHandler(WebGateway::ReviewJobsListHandler handler) {
+    impl_->SetReviewJobsListHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewJobGetHandler(WebGateway::ReviewJobGetHandler handler) {
+    impl_->SetReviewJobGetHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewJobCancelHandler(WebGateway::ReviewJobCancelHandler handler) {
+    impl_->SetReviewJobCancelHandler(std::move(handler));
+}
+
+void WebGateway::SetReviewJobAttachHandler(WebGateway::ReviewJobAttachHandler handler) {
+    impl_->SetReviewJobAttachHandler(std::move(handler));
 }
 
 void WebGateway::SetSkillsHandler(WebGateway::SkillsHandler handler) {

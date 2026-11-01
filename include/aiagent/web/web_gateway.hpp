@@ -11,6 +11,7 @@
 #include "aiagent/agent/agent_event.hpp"
 #include "aiagent/agent/message_inbox.hpp"
 #include "aiagent/agent/compaction.hpp"
+#include "aiagent/review/review_job.hpp"
 
 namespace a2a::server {
 class AgentServer;
@@ -346,6 +347,26 @@ public:
     // review 总开关（GET /api/v1/reviews/config）：启动器/CLI 在进入 review 前检查。
     using ReviewEnabledHandler = std::function<bool()>;
     void SetReviewEnabledHandler(ReviewEnabledHandler handler);
+
+    // 后台审核任务。未注入 handler 时对应接口返回 501。
+    using ReviewJobSubmitHandler = std::function<bool(
+            const std::string& pack, const std::string& session_id,
+            aiagent::review::ReviewJob* job, std::string* error)>;
+    using ReviewJobsListHandler = std::function<std::vector<aiagent::review::ReviewJob>(
+            const std::string& session_id)>;
+    using ReviewJobGetHandler = std::function<bool(
+            const std::string& id, aiagent::review::ReviewJob* job, std::string* error)>;
+    using ReviewJobCancelHandler = std::function<bool(const std::string& id,
+                                                      std::string* error)>;
+    using ReviewJobAttachHandler = std::function<bool(
+            const std::string& id, aiagent::review::ReviewJob* job,
+            std::string* report_text, std::string* error)>;
+
+    void SetReviewJobSubmitHandler(ReviewJobSubmitHandler handler);
+    void SetReviewJobsListHandler(ReviewJobsListHandler handler);
+    void SetReviewJobGetHandler(ReviewJobGetHandler handler);
+    void SetReviewJobCancelHandler(ReviewJobCancelHandler handler);
+    void SetReviewJobAttachHandler(ReviewJobAttachHandler handler);
 
     // 注入工具审批处理逻辑。未设置时 /chat/approve 返回 501。
     void SetApproveHandler(ApproveHandler handler);
