@@ -144,6 +144,42 @@ struct PromptConfig {
     std::size_t max_system_prompt_bytes = 32768;
 };
 
+// 代码审核配置（[review]）。
+// 语义见 docs/planning/agent/代码审核Agent规划.md §9。
+struct ReviewConfig {
+    bool enabled = true;
+    // 审核产物目录；相对工作目录，必须是仓库内相对路径，拒绝 ..。
+    std::string dir = "docs/review";
+    // pack 上限。
+    std::size_t max_diff_bytes = 2 * 1024 * 1024;
+    std::size_t max_file_bytes = 262144;
+    std::size_t max_untracked_bytes = 524288;
+    std::size_t max_files = 500;
+    // 用户消息摘录与报告上限。
+    std::size_t session_excerpt_bytes = 16384;
+    std::size_t max_report_bytes = 1048576;
+    // 审核模型；空 = 继承父模型（P2 才会真正使用）。
+    std::string model;
+    // 受限验证：只执行 pack/项目配置声明的 argv；默认开启。
+    bool verify_enabled = true;
+    long verify_timeout_s = 900;
+    std::size_t verify_output_bytes = 32768;
+    // v1 只支持 in_place。
+    std::string verify_mode = "in_place";
+    // 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
+    int max_tool_rounds = 64;
+    long review_timeout_s = 3600;
+    bool checkpoint = true;
+    bool draft_report = true;
+    std::size_t chunk_files = 20;
+    std::size_t chunk_diff_bytes = 262144;
+    // 后台队列（P1）。
+    bool background_enabled = false;
+    int max_concurrent_jobs = 1;
+    int max_queued_jobs = 4;
+    std::string supersede_policy = "latest";
+};
+
 // Skill 加载配置（[skills]）。
 // 语义见 docs/planning/agent/Skill加载规划.md §4。
 struct SkillsConfig {
@@ -239,6 +275,13 @@ std::optional<SkillsConfig> ParseSkillsConfig(const std::string& content,
                                               std::string* error = nullptr);
 
 std::optional<SkillsConfig> LoadSkillsConfigFile(const std::string& path,
+                                                 std::string* error = nullptr);
+
+// 解析 INI 文本中的 [review] 段；没有该段时返回默认值（enabled=true）。
+std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
+                                              std::string* error = nullptr);
+
+std::optional<ReviewConfig> LoadReviewConfigFile(const std::string& path,
                                                  std::string* error = nullptr);
 
 // 返回实际请求地址：base_url 已带 /chat/completions 时原样使用，否则补全。

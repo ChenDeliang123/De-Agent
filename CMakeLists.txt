@@ -281,6 +281,10 @@ if(AIAGENT_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
   endif()
 
+  add_executable(review_config_test tests/review_config_test.cpp)
+  target_link_libraries(review_config_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_config COMMAND review_config_test)
+
   add_executable(sha256_test tests/sha256_test.cpp)
   target_link_libraries(sha256_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_sha256 COMMAND sha256_test)

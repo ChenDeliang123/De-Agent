@@ -792,6 +792,192 @@ std::optional<SkillsConfig> LoadSkillsConfigFile(const std::string& path, std::s
     return ParseSkillsConfig(content.str(), error);
 }
 
+std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
+                                              std::string* error) {
+    ReviewConfig config;
+    bool in_review = false;
+
+    auto parse_number = [error](const std::string& key, const std::string& value,
+                                long long min_value, long long max_value,
+                                long long* output) {
+        try {
+            const long long parsed = std::stoll(value);
+            if (parsed < min_value || parsed > max_value) {
+                if (error != nullptr) {
+                    *error = key + " must be between " + std::to_string(min_value) +
+                             " and " + std::to_string(max_value);
+                }
+                return false;
+            }
+            *output = parsed;
+            return true;
+        } catch (const std::exception&) {
+            if (error != nullptr) {
+                *error = "invalid " + key + ": " + value;
+            }
+            return false;
+        }
+    };
+    auto parse_size = [&parse_number](const std::string& key, const std::string& value,
+                                      long long min_value, long long max_value,
+                                      std::size_t* output) {
+        long long parsed = 0;
+        if (!parse_number(key, value, min_value, max_value, &parsed)) {
+            return false;
+        }
+        *output = static_cast<std::size_t>(parsed);
+        return true;
+    };
+    auto bad = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return std::nullopt;
+    };
+
+    std::istringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+            continue;
+        }
+        std::string section;
+        if (SetSection(trimmed, section)) {
+            in_review = (section == "review");
+            continue;
+        }
+        if (!in_review) {
+            continue;
+        }
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(trimmed.substr(0, eq));
+        const std::string value = Trim(trimmed.substr(eq + 1));
+
+        if (key == "enabled") {
+            config.enabled = Lower(value) == "true" || value == "1";
+        } else if (key == "dir") {
+            if (value.empty()) {
+                return bad("review.dir must not be empty");
+            }
+            std::string normalized = value;
+            std::replace(normalized.begin(), normalized.end(), '\\', '/');
+            if (normalized.front() == '/' || normalized.find(':') != std::string::npos ||
+                normalized == "." || normalized.rfind("../", 0) == 0 ||
+                normalized.find("/../") != std::string::npos ||
+                (normalized.size() >= 3 && normalized.compare(normalized.size() - 3, 3,
+                                                              "/..") == 0)) {
+                return bad("review.dir must be a relative path inside the workspace");
+            }
+            config.dir = normalized;
+        } else if (key == "max_diff_bytes") {
+            if (!parse_size(key, value, 65536, 16777216, &config.max_diff_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "max_file_bytes") {
+            if (!parse_size(key, value, 1, 8388608, &config.max_file_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "max_untracked_bytes") {
+            if (!parse_size(key, value, 1, 16777216, &config.max_untracked_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "max_files") {
+            if (!parse_size(key, value, 1, 5000, &config.max_files)) {
+                return std::nullopt;
+            }
+        } else if (key == "session_excerpt_bytes") {
+            if (!parse_size(key, value, 1, 1048576, &config.session_excerpt_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "max_report_bytes") {
+            if (!parse_size(key, value, 1, 8388608, &config.max_report_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "model") {
+            config.model = value;
+        } else if (key == "verify_enabled") {
+            config.verify_enabled = Lower(value) == "true" || value == "1";
+        } else if (key == "verify_timeout_s") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 1, 1800, &parsed)) {
+                return std::nullopt;
+            }
+            config.verify_timeout_s = static_cast<long>(parsed);
+        } else if (key == "verify_output_bytes") {
+            if (!parse_size(key, value, 1, 1048576, &config.verify_output_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "verify_mode") {
+            if (value != "in_place") {
+                return bad("review.verify_mode only supports in_place in v1");
+            }
+            config.verify_mode = value;
+        } else if (key == "max_tool_rounds") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 8, 256, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_tool_rounds = static_cast<int>(parsed);
+        } else if (key == "review_timeout_s") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 60, 14400, &parsed)) {
+                return std::nullopt;
+            }
+            config.review_timeout_s = static_cast<long>(parsed);
+        } else if (key == "checkpoint") {
+            config.checkpoint = Lower(value) == "true" || value == "1";
+        } else if (key == "draft_report") {
+            config.draft_report = Lower(value) == "true" || value == "1";
+        } else if (key == "chunk_files") {
+            if (!parse_size(key, value, 1, 200, &config.chunk_files)) {
+                return std::nullopt;
+            }
+        } else if (key == "chunk_diff_bytes") {
+            if (!parse_size(key, value, 4096, 4194304, &config.chunk_diff_bytes)) {
+                return std::nullopt;
+            }
+        } else if (key == "background_enabled") {
+            config.background_enabled = Lower(value) == "true" || value == "1";
+        } else if (key == "max_concurrent_jobs") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 1, 8, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_concurrent_jobs = static_cast<int>(parsed);
+        } else if (key == "max_queued_jobs") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 0, 64, &parsed)) {
+                return std::nullopt;
+            }
+            config.max_queued_jobs = static_cast<int>(parsed);
+        } else if (key == "supersede_policy") {
+            if (value != "latest") {
+                return bad("review.supersede_policy only supports latest");
+            }
+            config.supersede_policy = value;
+        }
+    }
+    return config;
+}
+
+std::optional<ReviewConfig> LoadReviewConfigFile(const std::string& path,
+                                                std::string* error) {
+    std::ifstream input(aiagent::platform::FromUtf8(path));
+    if (!input) {
+        if (error != nullptr) {
+            *error = "cannot open config file: " + path;
+        }
+        return std::nullopt;
+    }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return ParseReviewConfig(content.str(), error);
+}
+
 std::optional<ToolsConfig> ParseToolsConfig(const std::string& content,
                                             std::string* error) {
     (void)error;
