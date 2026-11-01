@@ -24,6 +24,7 @@ import { agentCommands } from "./agents.mjs";
 import { contextCommands } from "./context.mjs";
 import { infoCommands } from "./info.mjs";
 import { clearCommand, quitCommand, themeCommand } from "./local.mjs";
+import { reviewCommands } from "./review.mjs";
 import { sessionCommands } from "./sessions.mjs";
 
 export { restoreSessionCwd } from "./sessions.mjs";
@@ -56,6 +57,7 @@ const helpCommands = [
 export const commands = [
   ...sessionCommands,
   ...contextCommands,
+  ...reviewCommands, // /review
   ...infoCommands, // /status /tools /cwd /permissions
   ...agentCommands, // /agents
   themeCommand,
@@ -64,10 +66,11 @@ export const commands = [
   quitCommand,
 ];
 
-const CATEGORY_ORDER = ["session", "context", "info", "local"];
+const CATEGORY_ORDER = ["session", "context", "review", "info", "local"];
 
 const CATEGORY_TITLES = {
   session: "Session",
+  review: "Review",
   context: "Context",
   info: "Info",
   local: "Local",

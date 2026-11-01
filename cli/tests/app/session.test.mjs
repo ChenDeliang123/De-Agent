@@ -73,11 +73,20 @@ test("cli session client lists, resumes, and streams", async () => {
     assert.equal(history.length, 2);
 
     const events = [];
-    const done = await streamChat(`http://127.0.0.1:${port}`, "s1", "hi", ({ event, data }) => {
-      events.push({ event, data });
-    });
+    const done = await streamChat(
+      `http://127.0.0.1:${port}`,
+      "s1",
+      "hi",
+      ({ event, data }) => {
+        events.push({ event, data });
+      },
+      process.cwd(),
+      undefined,
+      "reviewer",
+    );
     assert.equal(done.session_id, "s1");
     assert.equal(chatBody.message, "hi");
+    assert.equal(chatBody.role, "reviewer");
     assert.equal(typeof chatBody.cwd, "string");
     assert.ok(chatBody.cwd.length > 0);
     assert.deepEqual(

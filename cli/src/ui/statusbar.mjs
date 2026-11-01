@@ -89,7 +89,7 @@ function paint(part, text, styler) {
 // 底部状态行：`~/proj (main) · confirm · f920924d · 12% ctx · model`。
 // 超宽时从右往左丢字段（宁可少显示，也不截断成半截信息）；只剩一段时才裁剪。
 export function formatStatusLine(
-  { cwd, branch, mode, sessionId, model, ctxPercent } = {},
+  { cwd, branch, mode, role, sessionId, model, ctxPercent } = {},
   width = 80,
   styler,
 ) {
@@ -103,6 +103,9 @@ export function formatStatusLine(
   }
   if (mode) {
     parts.push({ text: String(mode), color: modeColor(mode), bold: true });
+  }
+  if (role === "reviewer") {
+    parts.push({ text: "review", color: "accent", bold: true });
   }
   if (sessionId) {
     parts.push({ text: String(sessionId).slice(0, 8), color: "dim" });

@@ -1,4 +1,5 @@
 import readlinePromises from "node:readline/promises";
+import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { stdin as input, stdout as output } from "node:process";
@@ -115,6 +116,10 @@ function parseArgs(argv) {
     cwd: null,
     editor: null,
     cliConfig: null,
+    role: null,
+    prompt: null,
+    reviewPack: null,
+    reviewResume: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -134,6 +139,14 @@ function parseArgs(argv) {
       options.editor = argv[++i];
     } else if (arg === "--cli-config" && i + 1 < argv.length) {
       options.cliConfig = argv[++i];
+    } else if (arg === "--role" && i + 1 < argv.length) {
+      options.role = argv[++i];
+    } else if (arg === "--prompt" && i + 1 < argv.length) {
+      options.prompt = argv[++i];
+    } else if (arg === "--review-pack" && i + 1 < argv.length) {
+      options.reviewPack = argv[++i];
+    } else if (arg === "--review-resume" && i + 1 < argv.length) {
+      options.reviewResume = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     }
@@ -154,6 +167,10 @@ options:
   --cwd <dir>       tool working directory (default: current directory)
   --editor <cmd>    external editor for Ctrl+G (default: $AIAGENT_EDITOR/$VISUAL/$EDITOR)
   --cli-config <f>  CLI settings file (default: conf/cli.ini)
+  --role <role>     coding | reviewer (default coding; cannot switch existing sessions)
+  --prompt <text>   send one message automatically after startup
+  --review-pack <p> start a reviewer session for a review pack
+  --review-resume <id> resume a review from its checkpoint
   -h, --help        show this help
 `);
   console.log(renderHelp(commands));
@@ -290,6 +307,7 @@ async function sendMessage(ctx, text) {
       },
       cwd,
       controller.signal,
+      ctx.state.role ?? undefined,
     );
     renderer.endReply();
     if (runSummary) {
@@ -446,8 +464,43 @@ async function handleApproval(ctx, sessionId, data) {
   renderer.approvalResolved(decision);
 }
 
+function resolveReviewInputs(options) {
+  if (options.role && options.role !== "coding" && options.role !== "reviewer") {
+    throw new Error("--role must be coding or reviewer");
+  }
+  if (options.reviewResume) {
+    const base = options.cwd ? path.resolve(options.cwd) : process.cwd();
+    const statePath = path.join(base, "docs", "review", ".state", `${options.reviewResume}.json`);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (!state.pack_path) {
+      throw new Error(`review checkpoint has no pack_path: ${options.reviewResume}`);
+    }
+    options.reviewPack = path.resolve(base, state.pack_path);
+    options.reviewResumePrompt = `Resume review ${options.reviewResume} from its checkpoint. Read the manifest again and continue with the remaining changed files; do not repeat already-verified findings unless the source changed.`;
+  }
+  if (options.reviewPack) {
+    const packPath = path.resolve(options.reviewPack);
+    const pack = JSON.parse(fs.readFileSync(packPath, "utf8"));
+    if (!pack.review_id || !pack.repo_root) {
+      throw new Error(`invalid review pack: ${packPath}`);
+    }
+    options.cwd = pack.repo_root;
+    options.role = "reviewer";
+    if (!options.prompt) {
+      const resume = options.reviewResumePrompt
+        ? `${options.reviewResumePrompt}\n\n`
+        : "";
+      options.prompt =
+        `${resume}Review the change described in ${packPath}. ` +
+        `Start with review_context(mode=manifest, pack=${JSON.stringify(packPath)}). ` +
+        `Write the final report with review_report.`;
+    }
+  }
+  return options;
+}
+
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const options = resolveReviewInputs(parseArgs(process.argv.slice(2)));
   if (options.help) {
     printHelp();
     return;
@@ -464,6 +517,7 @@ async function main() {
     pendingName: null,
     mode: null,
     branch: null,
+    role: options.role ?? null,
   };
 
   const cliConfig = loadCliConfig({ explicit: options.cliConfig });
@@ -527,6 +581,7 @@ async function main() {
           cwd: state.cwd,
           branch: state.branch,
           mode: state.mode,
+          role: state.role,
           sessionId: state.sessionId,
         },
         output.columns,
@@ -653,6 +708,12 @@ async function main() {
       emit(`cannot load session ${state.sessionId}: ${error.message}`);
       state.sessionId = null;
     }
+  }
+
+  if (options.prompt) {
+    updateFooter();
+    state.sessionId = await sendMessage(ctx, options.prompt);
+    await pollBackgroundResults(ctx, state.sessionId);
   }
 
   try {

@@ -219,6 +219,7 @@ export async function streamChat(
   onEvent,
   cwd = process.cwd(),
   signal,
+  role,
 ) {
   const response = await fetch(
     `${normalizeBackendUrl(backendUrl)}/api/v1/chat/stream`,
@@ -229,6 +230,7 @@ export async function streamChat(
       body: encoder.encode(
         JSON.stringify({
           ...(sessionId ? { session_id: sessionId } : {}),
+          ...(role ? { role } : {}),
           cwd,
           message,
         }),
@@ -272,6 +274,30 @@ export async function streamChat(
     }
   }
   return donePayload;
+}
+
+// 审核总开关：启动器/CLI 进入 reviewer 会话前检查。
+export async function reviewConfig(backendUrl) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/reviews/config`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `review config failed: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+// 创建 review pack（POST /api/v1/reviews）。
+export async function createReview(backendUrl, payload) {
+  const response = await fetch(`${normalizeBackendUrl(backendUrl)}/api/v1/reviews`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: encoder.encode(JSON.stringify(payload)),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `review prepare failed: HTTP ${response.status}`);
+  }
+  return body;
 }
 
 export async function effectivePermission(backendUrl, path) {

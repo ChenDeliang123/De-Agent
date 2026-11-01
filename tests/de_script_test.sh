@@ -36,6 +36,15 @@ fail() {
 }
 
 "${DE}" help >/dev/null 2>&1 || fail "de help"
+help_out="$("${DE}" help 2>&1)"
+case "${help_out}" in
+  *"review prepare"*) ;;
+  *) fail "de help missing review prepare" ;;
+esac
+case "${help_out}" in
+  *"review --resume"*) ;;
+  *) fail "de help missing review --resume" ;;
+esac
 
 if ! out="$("${DE}" init 2>&1)"; then
   echo "${out}"

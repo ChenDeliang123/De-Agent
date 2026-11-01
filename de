@@ -124,6 +124,10 @@ commands:
   init             create user config from examples (non-destructive)
   doctor           check runtime environment and resolved paths
   purge            delete user data dir (sessions/permissions/logs/conf), asks to confirm
+  review prepare   create a review pack without entering the CLI
+  review <pack>    start an independent reviewer session for a pack
+  review --resume <review_id>  resume a review from its checkpoint
+  review           open a reviewer session (asks for a pack)
   help             show this help
 
 options:
@@ -452,6 +456,10 @@ while [ "$#" -gt 0 ]; do
       ACTION="purge"
       shift
       ;;
+    review)
+      ACTION="review"
+      shift
+      ;;
     help|--help|-h)
       ACTION="help"
       shift
@@ -548,6 +556,55 @@ case "${ACTION}" in
     esac
     touch "${LOG_TARGET}" 2>/dev/null || true
     tail -f "${LOG_TARGET}"
+    ;;
+  review)
+    if [ "${NO_BACKEND}" -eq 0 ]; then
+      start_backend
+    fi
+    NODE_BIN="${NODE_BIN:-$(command -v node)}"
+    if [ -z "${NODE_BIN}" ]; then
+      echo "node not found; install Node.js >= 18" >&2
+      exit 1
+    fi
+    review_enabled="$(curl -sf "http://127.0.0.1:${BACKEND_PORT}/api/v1/reviews/config" 2>/dev/null || true)"
+    if ! printf '%s' "${review_enabled}" | grep -q '"enabled":true'; then
+      echo "review is disabled ([review] enabled=false)" >&2
+      exit 1
+    fi
+    cli_extra=()
+    if [ -f "${CLI_CONFIG_FILE}" ]; then
+      cli_extra+=(--cli-config "${CLI_CONFIG_FILE}")
+    fi
+    if [ "${#CLI_ARGS[@]}" -gt 0 ] && [ "${CLI_ARGS[0]}" = "prepare" ]; then
+      prepared_args=("${CLI_ARGS[@]:1}")
+      AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
+      AIAGENT_SHARE_DIR="${SHARE_DIR}" \
+      "${NODE_BIN}" "${CLI_DIR}/src/app/review-prepare.mjs" \
+        --backend "http://127.0.0.1:${BACKEND_PORT}" \
+        "${prepared_args[@]}"
+      exit $?
+    fi
+    if [ "${#CLI_ARGS[@]}" -eq 0 ]; then
+      review_cli_args=(--role reviewer)
+    elif [ "${CLI_ARGS[0]}" = "--resume" ]; then
+      if [ "${#CLI_ARGS[@]}" -lt 2 ]; then
+        echo "de review --resume requires a review id" >&2
+        exit 2
+      fi
+      review_cli_args=(--review-resume "${CLI_ARGS[1]}")
+    else
+      review_cli_args=(--review-pack "${CLI_ARGS[0]}")
+    fi
+    AIAGENT_RUNTIME_DIR="${RUNTIME_DIR}" \
+    AIAGENT_SHARE_DIR="${SHARE_DIR}" \
+    "${NODE_BIN}" "${CLI_DIR}/cli.mjs" \
+      --backend "http://127.0.0.1:${BACKEND_PORT}" \
+      "${cli_extra[@]}" \
+      "${review_cli_args[@]}"
+    cli_status=$?
+    echo
+    echo "Reviewer CLI exited. Backend is still running; use 'de stop' to stop it."
+    exit "${cli_status}"
     ;;
   cli)
     if [ "${NO_BACKEND}" -eq 0 ]; then

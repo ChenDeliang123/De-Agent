@@ -48,6 +48,15 @@ test("formatStatusLine composes cwd, branch, mode and session", () => {
   assert.equal(line, "~/proj (main) · confirm · f920924d");
 });
 
+test("formatStatusLine marks reviewer sessions", () => {
+  const line = formatStatusLine(
+    { cwd: "/repo", mode: "confirm", role: "reviewer", sessionId: "abcdefgh" },
+    80,
+  );
+  assert.ok(line.includes("review"), line);
+  assert.ok(line.indexOf("review") < line.indexOf("abcdefgh"), line);
+});
+
 test("formatStatusLine drops trailing fields instead of truncating them", () => {
   const line = formatStatusLine(
     {

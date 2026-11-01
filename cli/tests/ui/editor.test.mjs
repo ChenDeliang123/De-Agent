@@ -326,16 +326,18 @@ test("LineEditor scrolls candidates so the selection stays visible", async () =>
   const selectedLine = () =>
     terminal.lines().find((line) => /^\s*❯ \/[a-z]/.test(line));
 
-  // 连按 8 次下键越过可见窗口，选择应滚到 /status 而不是隐形地停在
-  // 未渲染的候选上。
-  for (let i = 0; i < 8; i += 1) {
+  // 连按到下键越过可见窗口，选择应滚到 /status 而不是隐形地停在
+  // 未渲染的候选上。索引从注册表派生，避免新增指令时把测试写死。
+  const statusIndex = complete("").findIndex((command) => command.name === "status");
+  assert.ok(statusIndex > 7, "status should stay beyond the first visible window");
+  for (let i = 0; i < statusIndex; i += 1) {
     input.emit("keypress", "", key("down"));
   }
   assert.match(selectedLine(), /❯ \/status/);
 
   // 继续按到最后一个候选 /quit（候选数量由注册表决定，含 /agents），
   // 再按一次应回到第一个 /new。
-  for (let index = 8; index < complete("").length - 1; index += 1) {
+  for (let index = statusIndex; index < complete("").length - 1; index += 1) {
     input.emit("keypress", "", key("down"));
   }
   assert.match(selectedLine(), /❯ \/quit/);
