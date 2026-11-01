@@ -146,6 +146,12 @@ add_library(aiagent_agent STATIC
   src/permissions/permission_store.cpp
   src/permissions/project_config.cpp
   src/permissions/trust_store.cpp
+  src/review/project_verify_config.cpp
+  src/review/review_pack.cpp
+  src/review/review_process.cpp
+  src/review/review_report.cpp
+  src/review/review_state.cpp
+  src/review/review_tools.cpp
   src/skills/skill_loader.cpp
   src/tools/run_command.cpp
   src/tools/local_tools.cpp
@@ -280,6 +286,18 @@ if(AIAGENT_BUILD_TESTS)
         -DAIAGENT_DPKG_DEB=${AIAGENT_DPKG_DEB_EXECUTABLE} -P
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpack_deb_test.cmake)
   endif()
+
+  add_executable(review_tools_test tests/review_tools_test.cpp)
+  target_link_libraries(review_tools_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_tools COMMAND review_tools_test)
+
+  add_executable(review_pack_test tests/review_pack_test.cpp)
+  target_link_libraries(review_pack_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_review_pack COMMAND review_pack_test)
+
+  add_executable(project_verify_config_test tests/project_verify_config_test.cpp)
+  target_link_libraries(project_verify_config_test PRIVATE aiagent_agent)
+  add_test(NAME aiagent_project_verify_config COMMAND project_verify_config_test)
 
   add_executable(reviewer_prompt_test tests/reviewer_prompt_test.cpp)
   target_link_libraries(reviewer_prompt_test PRIVATE aiagent_agent)
