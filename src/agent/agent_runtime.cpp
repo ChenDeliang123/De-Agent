@@ -4,6 +4,7 @@
 
 #include "a2a/core/id.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <stdexcept>
 #include <utility>
@@ -55,6 +56,21 @@ int UsageContextTokens(const llm::ChatUsage& usage) {
     const int derived = usage.total_tokens - usage.completion_tokens;
     return derived > 0 ? derived : usage.total_tokens;
 }
+
+// 单次运行（回合）的 token 归集：根模型逐轮用量 + 本次运行内完成的子 Agent 用量。
+// 子 Agent 事件可能由 task 工具的并发 worker 线程回传，所以用原子累加。
+struct RunTokenTotals {
+    std::atomic<long long> prompt{0};
+    std::atomic<long long> completion{0};
+    std::atomic<long long> cache_hit{0};
+
+    void Add(long long prompt_tokens, long long completion_tokens,
+             long long cache_hit_tokens) {
+        prompt.fetch_add(prompt_tokens, std::memory_order_relaxed);
+        completion.fetch_add(completion_tokens, std::memory_order_relaxed);
+        cache_hit.fetch_add(cache_hit_tokens, std::memory_order_relaxed);
+    }
+};
 
 std::string FirstText(const a2a::models::Message& message) {
     for (const auto& part : message.parts) {
@@ -911,6 +927,11 @@ std::string AgentRuntime::RunStreaming(
         const std::string& working_directory,
         const CancelCallback& should_cancel, std::shared_ptr<MessageInbox> inbox) {
     const std::string run_id = std::string(a2a::core::NewUuid());
+    const auto run_started = std::chrono::steady_clock::now();
+    // 本次运行的 token 汇总：根模型每轮 usage + 子 Agent 结束事件里的用量。
+    // 用 shared_ptr 是因为 tool_context.emit 会转交给 task 工具（可能并发派发），
+    // 汇总对象必须活到所有子 Agent 事件回传完毕。
+    auto run_tokens = std::make_shared<RunTokenTotals>();
     const InboxCloseGuard inbox_guard(inbox, run_id, context_id);
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "agent_runtime",
@@ -922,7 +943,16 @@ std::string AgentRuntime::RunStreaming(
     // 依赖它们把进度事件写回父会话流，并在取消时尽快返回。
     tools::ToolContext tool_context = BuildToolContext(working_directory);
     tool_context.session_id = context_id;
-    tool_context.emit = on_event;
+    // 子 Agent 的 kSubAgentEnd 也走这条通道：转发前先把它计入本次运行总量。
+    if (on_event) {
+        tool_context.emit = [on_event, run_tokens](const AgentEvent& event) {
+            if (event.kind == AgentEventKind::kSubAgentEnd) {
+                run_tokens->Add(event.prompt_tokens, event.completion_tokens,
+                                event.cache_hit_tokens);
+            }
+            on_event(event);
+        };
+    }
     tool_context.should_cancel = should_cancel;
     std::vector<llm::ChatMessage> chat_messages;
     chat_messages.push_back(BuildSystemMessage(working_directory));
@@ -1038,6 +1068,10 @@ std::string AgentRuntime::RunStreaming(
 
         reply += round_reply;
         const bool has_usage = round_usage.total_tokens > 0;
+        if (has_usage) {
+            run_tokens->Add(round_usage.prompt_tokens, round_usage.completion_tokens,
+                            round_usage.prompt_cache_hit_tokens);
+        }
         if (streamed_tool_calls.empty()) {
             if (has_usage) {
                 // 口径：只把 prompt 当作上下文占用（不含本轮输出）。
@@ -1140,12 +1174,33 @@ std::string AgentRuntime::RunStreaming(
     if (reply.empty()) {
         throw std::runtime_error("model returned an empty reply");
     }
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - run_started)
+                                     .count();
+    const long long prompt_tokens = run_tokens->prompt.load(std::memory_order_relaxed);
+    const long long completion_tokens =
+            run_tokens->completion.load(std::memory_order_relaxed);
+    const long long cache_hit_tokens =
+            run_tokens->cache_hit.load(std::memory_order_relaxed);
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "agent_runtime",
             "run=" + run_id + " session=" + context_id +
                     " event=request_end streaming=true reply_bytes=" +
                     std::to_string(reply.size()) +
-                    " tool_rounds=" + std::to_string(completed_rounds));
+                    " tool_rounds=" + std::to_string(completed_rounds) +
+                    " duration_ms=" + std::to_string(duration_ms) +
+                    " prompt_tokens=" + std::to_string(prompt_tokens) +
+                    " completion_tokens=" + std::to_string(completion_tokens) +
+                    " cache_hit_tokens=" + std::to_string(cache_hit_tokens));
+    if (on_event) {
+        AgentEvent summary;
+        summary.kind = AgentEventKind::kRunSummary;
+        summary.duration_ms = static_cast<int>(duration_ms);
+        summary.prompt_tokens = prompt_tokens;
+        summary.completion_tokens = completion_tokens;
+        summary.cache_hit_tokens = cache_hit_tokens;
+        on_event(summary);
+    }
     return reply;
 }
 

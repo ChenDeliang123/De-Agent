@@ -924,6 +924,7 @@ void TestEventAttribution() {
     bool attributed = false;
     bool start_seen = false;
     bool end_seen = false;
+    bool child_summary_seen = false;
     {
         std::lock_guard<std::mutex> lock(events_mutex);
         for (const auto& event : events) {
@@ -942,11 +943,16 @@ void TestEventAttribution() {
                 event.duration_ms >= 0 && event.text.empty()) {
                 end_seen = true;
             }
+            if (event.kind == aiagent::agent::AgentEventKind::kRunSummary) {
+                child_summary_seen = true;
+            }
         }
     }
     Expect(attributed, "child events should carry agent id, prefixed tool id and parent id");
     Expect(start_seen, "sub-agent start event should be forwarded with attribution");
     Expect(end_seen, "sub-agent end event should carry ok, duration and tool call count");
+    Expect(!child_summary_seen,
+           "child run summaries must not leak into the parent run's event stream");
 
     // stream_events=false：仍统计工具调用，但不向父会话转发事件。
     auto quiet_harness = std::make_shared<Harness>();

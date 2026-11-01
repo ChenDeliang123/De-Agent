@@ -237,6 +237,8 @@ async function sendMessage(ctx, text) {
   if (canSetRaw) {
     input.setRawMode(true);
   }
+  // 回合结束后统一在回复下方补一行汇总，避免 summary 帧与 markdown 收尾交错。
+  let runSummary = null;
   try {
     const done = await streamChat(
       backend,
@@ -278,6 +280,8 @@ async function sendMessage(ctx, text) {
           renderer.subagentSteer(data);
         } else if (event === "compaction") {
           renderer.compaction(data, agentId);
+        } else if (event === "run_summary") {
+          runSummary = data;
         } else if (event === "approval_request") {
           await handleApproval(ctx, requestSessionId, data);
         } else if (event === "error") {
@@ -288,6 +292,9 @@ async function sendMessage(ctx, text) {
       controller.signal,
     );
     renderer.endReply();
+    if (runSummary) {
+      renderer.runSummary(runSummary);
+    }
     log("info", "cli",
         `event=stream_end session=${done?.session_id ?? requestSessionId}`);
     return done?.session_id ?? requestSessionId;

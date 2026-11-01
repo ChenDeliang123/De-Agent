@@ -32,7 +32,7 @@ function truncate(text) {
   return `${text.slice(0, MaxDisplayText)}\n… (truncated ${text.length - MaxDisplayText} chars)`;
 }
 
-// 子 Agent 耗时：1 分钟内用一位小数秒（3.9s），更长用 m/s。
+// 子 Agent / 回合耗时：1 分钟内用一位小数秒（3.9s），更长用 m/s。
 function formatDuration(ms) {
   const value = Number(ms);
   if (!Number.isFinite(value) || value < 0) {
@@ -44,6 +44,15 @@ function formatDuration(ms) {
   const minutes = Math.floor(value / 60_000);
   const seconds = Math.round((value % 60_000) / 1000);
   return `${minutes}m ${seconds}s`;
+}
+
+// token 数值：1000 以下原样，以上用一位小数 k（15200 -> 15.2k）。
+function formatTokenValue(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count <= 0) {
+    return "0";
+  }
+  return count < 1000 ? `${count}` : `${(count / 1000).toFixed(1)}k`;
 }
 
 function normalizeArguments(rawArguments) {
@@ -718,6 +727,29 @@ export class TranscriptRenderer {
     this.#turnLabelPrinted = false;
   }
 
+  // 回合结束汇总：最后一行显示本次任务总耗时与 token 用量。
+  // 数据来自后端的 run_summary 帧（token 已含根模型各轮与本次运行内完成的子 Agent）。
+  runSummary(data = {}) {
+    const duration = formatDuration(data?.duration_ms);
+    const prompt = Number(data?.prompt_tokens);
+    const completion = Number(data?.completion_tokens);
+    const cacheHit = Number(data?.cache_hit_tokens);
+    const total = (Number.isFinite(prompt) ? prompt : 0) +
+      (Number.isFinite(completion) ? completion : 0);
+    if (!duration && total <= 0) {
+      return;
+    }
+    this.#beginOutput();
+    this.#flushMdBuffer();
+    this.#endContentBlock();
+    const head = duration ? `task done in ${duration}` : "task done";
+    const details =
+      total > 0
+        ? ` ${this.#sym.dot} ${formatTokenValue(total)} tokens (prompt ${formatTokenValue(prompt)} ${this.#sym.dot} completion ${formatTokenValue(completion)} ${this.#sym.dot} cache hit ${formatTokenValue(cacheHit)})`
+        : "";
+    this.#writeClipped(this.#t.dim(`  ${this.#sym.bottom} ${head}${details}`));
+  }
+
   error(message) {
     this.#beginOutput();
     this.#flushMdBuffer();
@@ -903,7 +935,7 @@ export class TranscriptRenderer {
     const completion = Number(data?.completion_tokens);
     const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
     if (total > 0) {
-      parts.push(total < 1000 ? `${total} tokens` : `${(total / 1000).toFixed(1)}k tokens`);
+      parts.push(`${formatTokenValue(total)} tokens`);
     }
     return t.dim(
       `  ${this.#sym.subagent} ${head} ${this.#sym.dot} ${parts.join(` ${this.#sym.dot} `)}`,

@@ -15,6 +15,7 @@ enum class AgentEventKind {
     kApprovalRequest,  // 工具需要人工确认（tool_call_id / tool_name / arguments / approval_reason）
     kSubAgentStart,    // 子 Agent 开始运行（agent_id / parent_tool_call_id）
     kSubAgentEnd,      // 子 Agent 结束（agent_id / ok / duration_ms / tool_calls / text）
+    kRunSummary,       // 根运行结束汇总（duration_ms + 根模型各轮与运行内完成子 Agent 的 token 用量）
 };
 
 struct AgentEvent {
@@ -44,10 +45,11 @@ struct AgentEvent {
     int compaction_tokens_after = 0;
     bool compaction_forced = false;  // overflow/length 触发的强制压缩
 
-    // kSubAgentEnd
-    int duration_ms = 0;   // 子 Agent 运行耗时
-    int tool_calls = 0;    // 子 Agent 内部的工具调用次数
-    // kSubAgentEnd：子 Agent 的 token 用量（口径同 deepseek 客户端 request_end 日志）。
+    // kSubAgentEnd / kRunSummary
+    int duration_ms = 0;   // kSubAgentEnd：子 Agent 运行耗时；kRunSummary：本次运行总耗时
+    int tool_calls = 0;    // kSubAgentEnd：子 Agent 内部的工具调用次数
+    // kSubAgentEnd / kRunSummary：token 用量（口径同 deepseek 客户端 request_end 日志）。
+    // kRunSummary 汇总根模型各轮与本次运行内完成的子 Agent；cache_hit 是 prompt 的子集。
     long long prompt_tokens = 0;
     long long completion_tokens = 0;
     long long cache_hit_tokens = 0;

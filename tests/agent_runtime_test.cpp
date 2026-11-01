@@ -499,6 +499,84 @@ private:
     std::string arguments_;
 };
 
+// 两轮流式调用：第一轮请求 ok_tool，第二轮给出最终回复；两轮都带 usage。
+// 用于验证根运行的 token 汇总（逐轮累加）。
+class UsageToolModel final : public aiagent::llm::IModelClient {
+public:
+    int calls = 0;
+
+    aiagent::llm::ChatResult Chat(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::optional<std::string>&) override {
+        aiagent::llm::ChatResult result;
+        aiagent::llm::ChatChoice choice;
+        choice.role = "assistant";
+        choice.content = "unused";
+        result.choices.push_back(std::move(choice));
+        return result;
+    }
+
+    void ChatStream(
+            const std::vector<aiagent::llm::ChatMessage>&,
+            const std::vector<aiagent::llm::ToolSpec>&,
+            const std::function<void(const aiagent::llm::StreamEvent&)>& on_event)
+            override {
+        ++calls;
+        aiagent::llm::StreamEvent event;
+        if (calls == 1) {
+            event.finish_reason = "tool_calls";
+            event.tool_calls.push_back(
+                    aiagent::llm::ToolCall{"call-1", "ok_tool", "{}"});
+            event.usage.prompt_tokens = 100;
+            event.usage.completion_tokens = 10;
+            event.usage.total_tokens = 110;
+            event.usage.prompt_cache_hit_tokens = 40;
+        } else {
+            event.content = "done";
+            event.finish_reason = "stop";
+            event.usage.prompt_tokens = 150;
+            event.usage.completion_tokens = 20;
+            event.usage.total_tokens = 170;
+            event.usage.prompt_cache_hit_tokens = 60;
+        }
+        if (on_event) {
+            on_event(event);
+        }
+    }
+};
+
+// 模拟 task 工具向父运行回传子 Agent 的 kSubAgentEnd（含用量）。
+class ChildUsageToolProvider final : public aiagent::tools::IToolProvider {
+public:
+    std::vector<aiagent::llm::ToolSpec> ListTools() override {
+        aiagent::llm::ToolSpec tool;
+        tool.name = "ok_tool";
+        return {tool};
+    }
+
+    aiagent::tools::ToolExecutionResult Execute(
+            const std::string&, const nlohmann::json&,
+            const aiagent::tools::ToolContext& context) override {
+        if (context.emit) {
+            aiagent::agent::AgentEvent end;
+            end.kind = aiagent::agent::AgentEventKind::kSubAgentEnd;
+            end.agent_id = "explorer#9";
+            end.ok = true;
+            end.duration_ms = 5;
+            end.tool_calls = 1;
+            end.prompt_tokens = 1000;
+            end.completion_tokens = 100;
+            end.cache_hit_tokens = 400;
+            context.emit(end);
+        }
+        aiagent::tools::ToolExecutionResult result;
+        result.ok = true;
+        result.text = "ok";
+        return result;
+    }
+};
+
 // 奇数调用请求工具，偶数调用返回最终回复（用于测试会话内“总是允许”缓存）。
 class AlternatingToolModel final : public aiagent::llm::IModelClient {
 public:
@@ -1120,6 +1198,53 @@ int main() {
                "events emitted from a tool should reach the run's event stream");
     } catch (const std::exception& e) {
         std::cerr << "agent runtime tool channel test failed: " << e.what() << '\n';
+        return 1;
+    }
+
+    try {
+        // 运行汇总：根模型两轮 usage + 工具回传的子 Agent 用量都要进入
+        // kRunSummary，且汇总必须是本回合最后一个事件。
+        auto model = std::make_shared<UsageToolModel>();
+        auto tools = std::make_shared<ChildUsageToolProvider>();
+        aiagent::agent::AgentRuntime runtime(model);
+        runtime.SetToolProvider(tools);
+
+        std::vector<aiagent::agent::AgentEvent> events;
+        a2a::models::Message user = a2a::models::MakeTextMessage(
+                a2a::models::Role::kUser, "summarize usage", "text/plain");
+        const std::string reply = runtime.HandleMessageStreamingEvents(
+                user, {user}, "ctx-run-summary",
+                [&](const aiagent::agent::AgentEvent& event) { events.push_back(event); },
+                WorkDir(), []() { return false; });
+        Expect(reply == "done", "usage model should finish after the tool round");
+        Expect(model->calls == 2, "usage model should be called exactly twice");
+
+        int summary_count = 0;
+        bool child_end_seen = false;
+        aiagent::agent::AgentEvent summary;
+        for (const auto& event : events) {
+            if (event.kind == aiagent::agent::AgentEventKind::kSubAgentEnd) {
+                child_end_seen = true;
+            }
+            if (event.kind == aiagent::agent::AgentEventKind::kRunSummary) {
+                ++summary_count;
+                summary = event;
+            }
+        }
+        Expect(child_end_seen, "tool-emitted sub-agent usage event should be forwarded");
+        Expect(summary_count == 1, "successful run should emit exactly one run summary");
+        Expect(!events.empty() &&
+                       events.back().kind == aiagent::agent::AgentEventKind::kRunSummary,
+               "run summary should be the last event of the turn");
+        Expect(summary.duration_ms >= 0, "run summary should carry a non-negative duration");
+        Expect(summary.prompt_tokens == 1250,
+               "run summary should add root rounds and child prompt tokens");
+        Expect(summary.completion_tokens == 130,
+               "run summary should add root rounds and child completion tokens");
+        Expect(summary.cache_hit_tokens == 500,
+               "run summary should add root rounds and child cache-hit tokens");
+    } catch (const std::exception& e) {
+        std::cerr << "agent runtime run summary test failed: " << e.what() << '\n';
         return 1;
     }
 

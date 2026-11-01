@@ -487,6 +487,50 @@ test("renderer prints sub-agent lifecycle lines", () => {
   assert.ok(text.includes("  ↳ explorer#1 failed: timed out"), text);
 });
 
+test("renderer prints the run summary as the last line after the turn", () => {
+  const out = fakeOut(false);
+  out.columns = 120;
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.user("do it");
+  renderer.startReply();
+  renderer.content("final answer\n");
+  renderer.endReply();
+  renderer.runSummary({
+    duration_ms: 12345,
+    prompt_tokens: 12000,
+    completion_tokens: 3200,
+    cache_hit_tokens: 9000,
+  });
+
+  const text = out.text();
+  assert.ok(
+    text.includes(
+      "  ┗ task done in 12.3s · 15.2k tokens (prompt 12.0k · completion 3.2k · cache hit 9.0k)",
+    ),
+    text,
+  );
+  const lines = text.trimEnd().split("\n");
+  assert.ok(
+    lines.at(-1).includes("task done in 12.3s"),
+    `summary should be the last line: ${JSON.stringify(lines.slice(-3))}`,
+  );
+});
+
+test("renderer keeps a duration-only run summary when usage is unavailable", () => {
+  const out = fakeOut(false);
+  const renderer = new TranscriptRenderer(out, { mode: "none" });
+
+  renderer.runSummary({ duration_ms: 2000 });
+  const text = out.text();
+  assert.ok(text.includes("  ┗ task done in 2.0s"), text);
+  assert.ok(!text.includes("tokens"), "usage section should be omitted when totals are zero");
+
+  const before = out.text();
+  renderer.runSummary({});
+  assert.equal(out.text(), before, "empty summary should not write anything");
+});
+
 test("renderer clips sub-agent lifecycle lines to the terminal width", () => {
   const out = fakeOut(false);
   out.columns = 26;

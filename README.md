@@ -375,6 +375,9 @@ de
 - **逐次确认**：默认 `confirm` 模式下，写文件与执行命令会先问
   `[y]es once / [a]lways this session / [N]o`，用 `/permissions` 调整。
 - **中断**：生成过程中按 `Esc` 可停止当前任务。
+- **回合汇总**：每次任务完成后，回复下方最后一行显示本次运行的墙钟耗时与 token
+  用量（根模型各轮 + 本次运行内完成的子 Agent），形如
+  `┗ task done in 12.3s · 15.2k tokens (prompt 12.0k · completion 3.2k · cache hit 9.0k)`。
 
 ### 常用指令
 

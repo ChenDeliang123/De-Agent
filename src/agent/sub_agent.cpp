@@ -343,6 +343,11 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
                 if (event.kind == AgentEventKind::kToolStart) {
                     tool_calls->fetch_add(1);
                 }
+                // 运行级汇总只属于最外层运行；子 Agent 的用量已由 kSubAgentEnd
+                // 汇总，继续转发会让父会话出现重复/嵌套的 run_summary。
+                if (event.kind == AgentEventKind::kRunSummary) {
+                    return;
+                }
                 if (!forward_events) {
                     return;
                 }

@@ -293,6 +293,14 @@ int main() {
                     end.completion_tokens = 400;
                     end.cache_hit_tokens = 1000;
                     on_event(end);
+
+                    aiagent::agent::AgentEvent summary;
+                    summary.kind = aiagent::agent::AgentEventKind::kRunSummary;
+                    summary.duration_ms = 4321;
+                    summary.prompt_tokens = 5000;
+                    summary.completion_tokens = 500;
+                    summary.cache_hit_tokens = 1200;
+                    on_event(summary);
                 });
         std::string agents_body;
         const auto agents_stream = http.PostStream(
@@ -308,10 +316,12 @@ int main() {
         const SseFrame* end_frame = FindFrame(agent_frames, "subagent_end");
         const SseFrame* child_tool_frame = FindFrame(agent_frames, "tool_start", "sub1:c1");
         const SseFrame* root_tool_frame = FindFrame(agent_frames, "tool_start", "call_parent");
+        const SseFrame* summary_frame = FindFrame(agent_frames, "run_summary");
         Expect(start_frame != nullptr, "stream should emit subagent_start");
         Expect(end_frame != nullptr, "stream should emit subagent_end");
         Expect(child_tool_frame != nullptr, "stream should forward the child tool_start");
         Expect(root_tool_frame != nullptr, "stream should forward the root tool_start");
+        Expect(summary_frame != nullptr, "stream should emit run_summary");
         if (start_frame != nullptr) {
             Expect(start_frame->data.value("agent_id", std::string()) == "explorer#1" &&
                            start_frame->data.value("parent_tool_call_id", std::string()) ==
@@ -341,6 +351,15 @@ int main() {
             Expect(!root_tool_frame->data.contains("agent_id") &&
                            !root_tool_frame->data.contains("parent_tool_call_id"),
                    "root frames should not carry attribution fields");
+        }
+        if (summary_frame != nullptr) {
+            Expect(summary_frame->data.value("duration_ms", 0) == 4321 &&
+                           summary_frame->data.value("prompt_tokens", 0LL) == 5000 &&
+                           summary_frame->data.value("completion_tokens", 0LL) == 500 &&
+                           summary_frame->data.value("cache_hit_tokens", 0LL) == 1200,
+                   "run_summary should carry duration and token totals");
+            Expect(!summary_frame->data.contains("agent_id"),
+                   "root run summary should not carry an agent id");
         }
 
         // /agents：未注入 handler 时 enabled=false；注入后返回定义与统计。
