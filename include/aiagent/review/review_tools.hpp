@@ -45,6 +45,13 @@ public:
                                        const nlohmann::json& arguments,
                                        const tools::ToolContext& context) override;
 
+    // 父级 run summary 落盘到当前 review state，供 manifest/report/日志读取。
+    // 无当前 pack 时静默忽略（例如非审核会话）。
+    void RecordRunUsage(const ReviewUsage& usage);
+
+    // 当前 reviewer 最近一次 review_context/report 使用的 pack（绝对路径）。
+    std::string CurrentPackPath() const;
+
 private:
     tools::ToolExecutionResult Handoff(const nlohmann::json& arguments,
                                        const tools::ToolContext& context);

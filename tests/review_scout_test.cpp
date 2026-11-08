@@ -58,6 +58,10 @@ int main() {
             result.agent_id = "review-scout#1";
             result.duration_ms = 12;
             result.tool_calls = 3;
+            result.requests = 2;
+            result.prompt_tokens = 100;
+            result.completion_tokens = 10;
+            result.cache_hit_tokens = 50;
             result.text =
                     "{\"findings\":[{\"severity\":\"major\",\"file\":\"src/foo.cpp\","
                     "\"line\":7,\"title\":\"bad\",\"evidence\":\"x\",\"impact\":\"y\","
@@ -95,6 +99,69 @@ int main() {
     Expect(captured[0].parent_session_id == "review-session" &&
                    captured[0].parent_tool_call_id == "call-1",
            "scout should carry parent session/tool identity");
+    Expect(captured[0].review_slice_id == "review-tools" &&
+                   captured[0].review_pack_path.empty(),
+           "scout should carry slice id and pack path");
+    Expect(parsed["total_usage"]["prompt_tokens"] == 200 &&
+                   parsed["total_usage"]["requests"] == 4,
+           "scout usage should aggregate per-task usage: " + parsed.dump());
+    Expect(parsed["failed_tasks"] == 2 && parsed["partial"].get<bool>() &&
+                   parsed["tasks"][0]["status"] == "partial" &&
+                   parsed["tasks"][0]["missing_files"].size() == 1,
+           "without receipts every task must be partial with missing files: " +
+                   parsed.dump());
+
+    auto mixed_runner = [](const std::vector<agent::SubAgentRequest>& requests, int) {
+        std::vector<agent::SubAgentResult> results;
+        agent::SubAgentResult failed;
+        failed.ok = false;
+        failed.timed_out = true;
+        failed.error = "timeout";
+        failed.prompt_tokens = 7;
+        failed.requests = 1;
+        results.push_back(failed);
+        agent::SubAgentResult truncated;
+        truncated.ok = true;
+        truncated.truncated = true;
+        truncated.prompt_tokens = 11;
+        truncated.requests = 1;
+        truncated.text = "{\"findings\":[],\"unverified\":[],\"coverage\":{}}";
+        results.push_back(truncated);
+        return results;
+    };
+    tools::ReviewScoutToolProvider mixed(mixed_runner, 4);
+    auto mixed_result = mixed.Execute(
+            "review_scout",
+            {{"tasks", nlohmann::json::array({Task("a", "a.cpp"), Task("b", "b.cpp")})}},
+            Context());
+    Expect(mixed_result.ok, "mixed failures should still return structured tasks");
+    auto mixed_json = Parse(mixed_result);
+    Expect(mixed_json["failed_tasks"] == 2 &&
+                   mixed_json["tasks"][0]["status"] == "timed_out" &&
+                   mixed_json["tasks"][1]["status"] == "truncated" &&
+                   mixed_json["total_usage"]["prompt_tokens"] == 18,
+           "timed out/truncated tasks must stay visible: " + mixed_json.dump());
+
+    auto all_failed_runner = [](const std::vector<agent::SubAgentRequest>& requests, int) {
+        std::vector<agent::SubAgentResult> results;
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+            agent::SubAgentResult failed;
+            failed.ok = false;
+            failed.error = "boom";
+            results.push_back(failed);
+        }
+        return results;
+    };
+    tools::ReviewScoutToolProvider all_failed(all_failed_runner, 4);
+    auto all_failed_result = all_failed.Execute(
+            "review_scout",
+            {{"tasks", nlohmann::json::array({Task("a", "a.cpp")})}}, Context());
+    Expect(all_failed_result.ok, "all failed tasks must still return tasks[]");
+    auto all_failed_json = Parse(all_failed_result);
+    Expect(all_failed_json["tasks"].size() == 1 &&
+                   all_failed_json["tasks"][0]["error"] == "boom" &&
+                   all_failed_json["tasks"][0]["assigned_files"].size() == 1,
+           "all-failed result must preserve reasons and assigned files");
 
     auto too_many = provider.Execute(
             "review_scout",

@@ -43,6 +43,9 @@ struct SubAgentRequest {
     std::string parent_session_id;
     std::string working_directory;
     std::string parent_tool_call_id;
+    // 审核分片归属；非空时子 Agent 的 review_read/review_context 回执写入该 slice。
+    std::string review_slice_id;
+    std::string review_pack_path;  // 绝对路径；空 = 使用共享 ReviewTools 的当前 pack
     AgentEventCallback emit;             // 可空：为空时子 Agent 事件不转发（静默汇总）
     std::function<bool()> should_cancel;  // 可空
 };
@@ -57,6 +60,8 @@ struct SubAgentResult {
     std::string error;
     long duration_ms = 0;
     int tool_calls = 0;
+    int requests = 0;   // 模型请求数（含重试）
+    bool truncated = false;  // 结果正文被 result_max_chars 截断
     // 用量归集（口径与 deepseek 客户端的 request_end 日志一致）：
     // cache_hit_tokens 是 prompt_tokens 的子集。
     long long prompt_tokens = 0;
@@ -146,6 +151,9 @@ public:
         std::string parent_session_id;      // 审批 session 键
         std::string tool_id_prefix;         // 事件与审批共用的 tool_call_id 前缀
         std::string working_directory;
+        std::string agent_id;               // 如 review-scout#3
+        std::string review_slice_id;        // 审核分片归属
+        std::string review_pack_path;       // 分片绑定的 pack（绝对路径）
         int max_tool_rounds = 0;
         // 用量归集 sink：装配方创建子模型客户端时套 UsageTrackingModel 并转发到这里。
         // 与「会话 usage」同一口径（prompt/completion/cache_hit），用于统计与日志。

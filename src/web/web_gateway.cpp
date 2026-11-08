@@ -239,6 +239,7 @@ void WriteAgentEventFrame(
             break;
         case AgentEventKind::kRunSummary:
             emit_frame("run_summary", {{"duration_ms", event.duration_ms},
+                                       {"requests", event.requests},
                                        {"prompt_tokens", event.prompt_tokens},
                                        {"completion_tokens", event.completion_tokens},
                                        {"cache_hit_tokens", event.cache_hit_tokens}});

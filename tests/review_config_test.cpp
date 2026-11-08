@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -30,6 +31,10 @@ int main() {
         Expect(config->scout_max == 4, "default scout max");
         Expect(config->scout_timeout_s == 600, "default scout timeout");
         Expect(config->scout_max_rounds == 64, "default scout rounds");
+        Expect(config->price_input_per_million_usd == 0 &&
+                       config->price_cached_input_per_million_usd == 0 &&
+                       config->price_output_per_million_usd == 0,
+               "default review prices are zero");
         Expect(config->chunk_files == 20, "default chunk size");
     }
 
@@ -50,6 +55,9 @@ int main() {
                 "scout_max = 4\n"
                 "scout_timeout_s = 300\n"
                 "scout_max_rounds = 48\n"
+                "price_input_per_million_usd = 0.27\n"
+                "price_cached_input_per_million_usd = 0.07\n"
+                "price_output_per_million_usd = 1.1\n"
                 "review_timeout_s = 600\n"
                 "checkpoint = false\n"
                 "draft_report = false\n"
@@ -67,6 +75,11 @@ int main() {
         Expect(config->scout_max == 4, "scout max override");
         Expect(config->scout_timeout_s == 300, "scout timeout override");
         Expect(config->scout_max_rounds == 48, "scout rounds override");
+        Expect(std::abs(config->price_input_per_million_usd - 0.27) < 1e-9 &&
+                       std::abs(config->price_cached_input_per_million_usd - 0.07) <
+                               1e-9 &&
+                       std::abs(config->price_output_per_million_usd - 1.1) < 1e-9,
+               "price overrides");
         Expect(!config->checkpoint && !config->draft_report, "bool overrides");
         Expect(config->chunk_files == 5, "chunk override");
         Expect(config->max_queued_jobs == 3, "queue override");
@@ -100,6 +113,9 @@ int main() {
                 "[review]\nscout_timeout_s = 1801\n",
                 "[review]\nscout_max_rounds = 7\n",
                 "[review]\nscout_max_rounds = 257\n",
+                "[review]\nprice_input_per_million_usd = -1\n",
+                "[review]\nprice_cached_input_per_million_usd = abc\n",
+                "[review]\nprice_output_per_million_usd = 1.2.3\n",
                 "[review]\nreview_timeout_s = 59\n",
                 "[review]\nsupersede_policy = queue\n",
                 "[review]\nmax_queued_jobs = -1\n",

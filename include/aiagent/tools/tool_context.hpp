@@ -27,6 +27,12 @@ struct ToolContext {
 
     std::string session_id;
     std::string tool_call_id;
+    // 子 Agent 归属与审核分片归属：review_read/review_context 用它把覆盖回执
+    // 写入 CoverageLedger 的具体 slice。父 reviewer 为空。
+    std::string agent_id;
+    std::string review_slice_id;
+    // 分片显式绑定的 pack（绝对路径），避免依赖共享 ReviewTools 的 last_pack。
+    std::string review_pack_path;
     // 当前回合用户消息的原文（TaskStore 在回合结束才落库，review_handoff 需要
     // 把“实现 X 并准备审核”这类同回合请求带进 pack）。
     std::string incoming_text;

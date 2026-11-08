@@ -284,12 +284,14 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
         long long prompt = 0;
         long long completion = 0;
         long long cache_hit = 0;
+        long long requests = 0;
 
         void Add(const llm::ChatUsage& usage) {
             std::lock_guard<std::mutex> lock(mutex);
             prompt += usage.prompt_tokens;
             completion += usage.completion_tokens;
             cache_hit += usage.prompt_cache_hit_tokens;
+            requests += 1;
         }
     };
     auto usage_totals = std::make_shared<UsageTotals>();
@@ -317,6 +319,9 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
     spec.parent_session_id = request.parent_session_id;
     spec.tool_id_prefix = identity.tool_prefix;
     spec.working_directory = request.working_directory;
+    spec.agent_id = identity.agent_id;
+    spec.review_slice_id = request.review_slice_id;
+    spec.review_pack_path = request.review_pack_path;
     spec.max_tool_rounds = settings_.max_rounds;
     spec.on_usage = [usage_totals](const llm::ChatUsage& usage) {
         usage_totals->Add(usage);
@@ -378,6 +383,7 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
                 incoming, {}, identity.child_context, child_events, request.working_directory,
                 should_cancel, std::move(inbox));
         result.ok = true;
+        result.truncated = reply.size() > settings_.result_max_chars;
         result.text = TruncateMiddle(reply, settings_.result_max_chars);
     } catch (const std::exception& e) {
         result.ok = false;
@@ -405,6 +411,7 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
         result.prompt_tokens = usage_totals->prompt;
         result.completion_tokens = usage_totals->completion;
         result.cache_hit_tokens = usage_totals->cache_hit;
+        result.requests = static_cast<int>(usage_totals->requests);
     }
     if (forward_events) {
         AgentEvent end_event;
@@ -414,6 +421,7 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
         end_event.ok = result.ok;
         end_event.duration_ms = static_cast<int>(result.duration_ms);
         end_event.tool_calls = result.tool_calls;
+        end_event.requests = result.requests;
         end_event.prompt_tokens = result.prompt_tokens;
         end_event.completion_tokens = result.completion_tokens;
         end_event.cache_hit_tokens = result.cache_hit_tokens;
@@ -441,6 +449,7 @@ SubAgentResult SubAgentManager::RunWithIdentity(const SubAgentRequest& request, 
                     " timed_out=" + (result.timed_out ? "true" : "false") +
                     " duration_ms=" + std::to_string(result.duration_ms) +
                     " tool_calls=" + std::to_string(result.tool_calls) +
+                    " requests=" + std::to_string(result.requests) +
                     " prompt_tokens=" + std::to_string(result.prompt_tokens) +
                     " completion_tokens=" + std::to_string(result.completion_tokens) +
                     " cache_hit_tokens=" + std::to_string(result.cache_hit_tokens) +

@@ -174,6 +174,10 @@ struct ReviewConfig {
     // 单个 scout 的独立预算：16 轮/120s 在 20 文件切片上会稳定耗尽。
     long scout_timeout_s = 600;
     int scout_max_rounds = 64;
+    // 可选成本估算（美元/百万 token）；都为 0 时只记录 token，不伪造成本。
+    double price_input_per_million_usd = 0;
+    double price_cached_input_per_million_usd = 0;
+    double price_output_per_million_usd = 0;
     bool checkpoint = true;
     bool draft_report = true;
     std::size_t chunk_files = 20;

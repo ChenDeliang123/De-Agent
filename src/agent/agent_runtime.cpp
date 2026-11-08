@@ -68,12 +68,14 @@ struct RunTokenTotals {
     std::atomic<long long> prompt{0};
     std::atomic<long long> completion{0};
     std::atomic<long long> cache_hit{0};
+    std::atomic<long long> requests{0};
 
     void Add(long long prompt_tokens, long long completion_tokens,
-             long long cache_hit_tokens) {
+             long long cache_hit_tokens, long long requests_count = 0) {
         prompt.fetch_add(prompt_tokens, std::memory_order_relaxed);
         completion.fetch_add(completion_tokens, std::memory_order_relaxed);
         cache_hit.fetch_add(cache_hit_tokens, std::memory_order_relaxed);
+        requests.fetch_add(requests_count, std::memory_order_relaxed);
     }
 };
 
@@ -320,11 +322,21 @@ tools::ToolContext AgentRuntime::BuildToolContext(
         context.policy.allow_temp = false;
     }
     context.bash_policy = BuildEffectiveBashPolicy(context.working_directory);
+    context.agent_id = tool_agent_id_;
+    context.review_slice_id = tool_review_slice_id_;
+    context.review_pack_path = tool_review_pack_path_;
     return context;
 }
 
 void AgentRuntime::SetWorkspaceSandboxOnly(bool enabled) {
     workspace_sandbox_only_ = enabled;
+}
+
+void AgentRuntime::SetToolContextScope(std::string agent_id, std::string review_slice_id,
+                                       std::string review_pack_path) {
+    tool_agent_id_ = std::move(agent_id);
+    tool_review_slice_id_ = std::move(review_slice_id);
+    tool_review_pack_path_ = std::move(review_pack_path);
 }
 
 void AgentRuntime::SetApprovalHandler(ApprovalHandler handler) {
@@ -1076,7 +1088,7 @@ std::string AgentRuntime::RunStreaming(
         tool_context.emit = [on_event, run_tokens](const AgentEvent& event) {
             if (event.kind == AgentEventKind::kSubAgentEnd) {
                 run_tokens->Add(event.prompt_tokens, event.completion_tokens,
-                                event.cache_hit_tokens);
+                                event.cache_hit_tokens, event.requests);
             }
             on_event(event);
         };
@@ -1137,6 +1149,7 @@ std::string AgentRuntime::RunStreaming(
         std::string finish_reason;
         const std::size_t messages_at_call = chat_messages.size();
         llm::ChatUsage round_usage;
+        run_tokens->requests.fetch_add(1, std::memory_order_relaxed);
 
         try {
             model_->ChatStream(
@@ -1310,6 +1323,7 @@ std::string AgentRuntime::RunStreaming(
             run_tokens->completion.load(std::memory_order_relaxed);
     const long long cache_hit_tokens =
             run_tokens->cache_hit.load(std::memory_order_relaxed);
+    const long long requests = run_tokens->requests.load(std::memory_order_relaxed);
     aiagent::DefaultLogger().Log(
             aiagent::LogLevel::kInfo, "agent_runtime",
             "run=" + run_id + " session=" + context_id +
@@ -1319,7 +1333,8 @@ std::string AgentRuntime::RunStreaming(
                     " duration_ms=" + std::to_string(duration_ms) +
                     " prompt_tokens=" + std::to_string(prompt_tokens) +
                     " completion_tokens=" + std::to_string(completion_tokens) +
-                    " cache_hit_tokens=" + std::to_string(cache_hit_tokens));
+                    " cache_hit_tokens=" + std::to_string(cache_hit_tokens) +
+                    " requests=" + std::to_string(requests));
     if (on_event) {
         AgentEvent summary;
         summary.kind = AgentEventKind::kRunSummary;
@@ -1327,6 +1342,7 @@ std::string AgentRuntime::RunStreaming(
         summary.prompt_tokens = prompt_tokens;
         summary.completion_tokens = completion_tokens;
         summary.cache_hit_tokens = cache_hit_tokens;
+        summary.requests = static_cast<int>(requests);
         on_event(summary);
     }
     return reply;

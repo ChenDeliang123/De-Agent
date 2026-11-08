@@ -996,6 +996,9 @@ int main(int argc, char** argv) {
                         child_runtime->SetFallbackWorkingDirectory(fallback_working_directory);
                         child_runtime->SetSkillLoader(skill_loader);
                         child_runtime->SetCompactionSettings(compaction_settings);
+                        child_runtime->SetToolContextScope(
+                                spec.agent_id, spec.review_slice_id,
+                                spec.review_pack_path);
                         // 权限与父会话同源：同一存储、同一设置、同一工作目录 ⇒ 同一档位
                         // （子 Agent 只能靠工具白名单进一步收窄，不能提权）。
                         child_runtime->SetPermissionStore(permission_store);
@@ -1097,16 +1100,21 @@ int main(int argc, char** argv) {
             return manager->RunBatch(requests, depth);
         };
         std::shared_ptr<aiagent::tools::CompositeToolProvider> reviewer_composite;
-        auto make_reviewer_provider = [&]() -> std::shared_ptr<aiagent::tools::IToolProvider> {
+        std::shared_ptr<aiagent::review::ReviewTools> main_review_tools;
+        auto make_reviewer_provider_ex =
+                [&](std::shared_ptr<aiagent::review::ReviewTools>* out_tools)
+                -> std::shared_ptr<aiagent::tools::IToolProvider> {
             reviewer_composite = std::make_shared<aiagent::tools::CompositeToolProvider>();
             reviewer_composite->Add(std::make_shared<aiagent::tools::LocalCodingTools>(
                     aiagent::platform::ToUtf8(std::filesystem::current_path()),
                     tools_config.sandbox_roots));
             std::vector<std::string> review_allow = {"read", "grep", "glob", "ls"};
             if (review_config.enabled) {
-                reviewer_composite->Add(std::make_shared<aiagent::review::ReviewTools>(
+                auto review_tools = std::make_shared<aiagent::review::ReviewTools>(
                         aiagent::review::ReviewToolOptions{review_config, review_data_dir},
-                        aiagent::review::ReviewTools::Mode::kReviewer));
+                        aiagent::review::ReviewTools::Mode::kReviewer);
+                reviewer_composite->Add(review_tools);
+                std::weak_ptr<aiagent::review::ReviewTools> weak_tools = review_tools;
                 for (const char* name :
                      {"review_context", "review_read", "review_git", "review_verify",
                       "review_test_write", "review_setup", "review_report"}) {
@@ -1114,8 +1122,15 @@ int main(int argc, char** argv) {
                 }
                 if (review_config.scout_max > 0 && agents_config.enabled) {
                     reviewer_composite->Add(aiagent::tools::MakeReviewScoutToolProvider(
-                            scout_runner, review_config.scout_max));
+                            scout_runner, review_config.scout_max, review_config,
+                            [weak_tools]() {
+                                const auto tools = weak_tools.lock();
+                                return tools ? tools->CurrentPackPath() : std::string();
+                            }));
                     review_allow.push_back(aiagent::tools::kReviewScoutToolName);
+                }
+                if (out_tools != nullptr) {
+                    *out_tools = review_tools;
                 }
             }
             if (skills_config.enabled) {
@@ -1126,8 +1141,11 @@ int main(int argc, char** argv) {
             return std::make_shared<aiagent::tools::FilteredToolProvider>(
                     reviewer_composite, review_allow, std::vector<std::string>{});
         };
+        auto make_reviewer_provider = [&]() -> std::shared_ptr<aiagent::tools::IToolProvider> {
+            return make_reviewer_provider_ex(nullptr);
+        };
         std::shared_ptr<aiagent::tools::IToolProvider> reviewer_tool_provider =
-                make_reviewer_provider();
+                make_reviewer_provider_ex(&main_review_tools);
 
         std::shared_ptr<aiagent::agent::SubAgentManager> review_scout_manager;
         if (review_config.enabled && review_config.scout_max > 0 && agents_config.enabled) {
@@ -1145,7 +1163,8 @@ int main(int argc, char** argv) {
             scout_definition.description =
                     "Read-only review scout for bounded files/focus; never writes or executes.";
             scout_definition.system_prompt_file = "review-scout.md";
-            scout_definition.tools = {"read", "grep", "glob", "ls", "review_git"};
+            scout_definition.tools = {"read", "review_read", "review_context", "grep",
+                                      "glob", "ls", "review_git"};
             scout_config.agents.push_back(std::move(scout_definition));
 
             std::string scout_error;
@@ -1369,7 +1388,7 @@ int main(int argc, char** argv) {
                                       "review_jobs.json");
             review_job_manager = std::make_unique<aiagent::review::ReviewJobManager>(
                     review_config, jobs_file,
-                    [make_reviewer_provider, configure_review_runtime,
+                    [make_reviewer_provider_ex, configure_review_runtime,
                      background_permissions, background_approval, model, task_store,
                      &history_cache, &session_meta,
                      review_config](const aiagent::review::ReviewJob& job,
@@ -1403,10 +1422,22 @@ int main(int argc, char** argv) {
                         a2a::models::Message user = a2a::models::MakeTextMessage(
                                 a2a::models::Role::kUser, prompt, "text/plain");
                         std::vector<a2a::models::Message> history = {user};
-                        auto on_event = [&on_progress, total_files](
+                        std::shared_ptr<aiagent::review::ReviewTools> job_review_tools;
+                        auto on_event = [&on_progress, total_files, &job_review_tools](
                                                 const aiagent::agent::AgentEvent& event) {
                             if (event.kind == aiagent::agent::AgentEventKind::kToolStart) {
                                 on_progress({0, total_files, 0, event.tool_name});
+                            } else if (event.kind ==
+                                               aiagent::agent::AgentEventKind::kRunSummary &&
+                                       job_review_tools) {
+                                aiagent::review::ReviewUsage usage;
+                                usage.prompt_tokens = event.prompt_tokens;
+                                usage.completion_tokens = event.completion_tokens;
+                                usage.cache_hit_tokens = event.cache_hit_tokens;
+                                usage.tool_calls = event.tool_calls;
+                                usage.requests = event.requests;
+                                usage.duration_ms = event.duration_ms;
+                                job_review_tools->RecordRunUsage(usage);
                             }
                         };
                         const auto started = std::chrono::steady_clock::now();
@@ -1414,7 +1445,7 @@ int main(int argc, char** argv) {
                         try {
                             aiagent::agent::AgentRuntime runtime(model);
                             configure_review_runtime(
-                                    runtime, make_reviewer_provider(),
+                                    runtime, make_reviewer_provider_ex(&job_review_tools),
                                     background_permissions, background_approval);
                             reply = runtime.HandleMessageStreamingEvents(
                                     user, history, job.session_id, on_event,
@@ -2261,8 +2292,30 @@ int main(int argc, char** argv) {
                     }
                     aiagent::agent::AgentRuntime& selected_runtime =
                             role == "reviewer" ? review_runtime : runtime;
+                    aiagent::agent::AgentEventCallback effective_event = on_event;
+                    if (role == "reviewer" && main_review_tools) {
+                        effective_event =
+                                [on_event, tools = main_review_tools](
+                                        const aiagent::agent::AgentEvent& event) {
+                                    if (event.kind ==
+                                            aiagent::agent::AgentEventKind::kRunSummary) {
+                                        aiagent::review::ReviewUsage usage;
+                                        usage.prompt_tokens = event.prompt_tokens;
+                                        usage.completion_tokens =
+                                                event.completion_tokens;
+                                        usage.cache_hit_tokens =
+                                                event.cache_hit_tokens;
+                                        usage.tool_calls = event.tool_calls;
+                                        usage.requests = event.requests;
+                                        usage.duration_ms = event.duration_ms;
+                                        tools->RecordRunUsage(usage);
+                                    }
+                                    on_event(event);
+                                };
+                    }
                     const std::string reply = selected_runtime.HandleMessageStreamingEvents(
-                            user, history, session_id, on_event, cwd, should_cancel, inbox);
+                            user, history, session_id, effective_event, cwd,
+                            should_cancel, inbox);
 
                     a2a::models::Task task;
                     task.id = std::string(a2a::core::NewUuid());

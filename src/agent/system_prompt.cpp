@@ -373,8 +373,11 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
         rules.Add(
                 "Use `review_scout` only for bounded, independent slices after "
                 "`review_context(mode=plan)`; max 4 tasks. Scouts are read-only candidates: "
-                "re-read every cited path:line yourself before a finding enters the report, "
-                "and do not let scout coverage replace parent coverage.");
+                "re-read every cited path:line yourself before a finding enters the report. "
+                "Scout coverage counts only when backed by review_read/review_context "
+                "receipts; generic read does not. If a task is partial/failed, its missing "
+                "assigned files remain uncovered and must be read by you or reported as "
+                "blocked.");
     }
     if (HasTool(tools, "review_git")) {
         rules.Add(

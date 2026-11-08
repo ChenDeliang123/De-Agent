@@ -110,6 +110,10 @@ public:
     // 审核不应把仓库外的用户目录/临时目录带进上下文。
     void SetWorkspaceSandboxOnly(bool enabled);
 
+    // 子 Agent / 审核分片归属：写入每次工具调用的 ToolContext，供覆盖回执记账。
+    void SetToolContextScope(std::string agent_id, std::string review_slice_id,
+                             std::string review_pack_path);
+
     // 设置上下文压缩参数；默认 enabled，阈值见 CompactionSettings。
     void SetCompactionSettings(const CompactionSettings& settings);
 
@@ -264,6 +268,9 @@ private:
     std::string fallback_working_directory_;
     std::string system_prompt_;
     bool workspace_sandbox_only_ = false;
+    std::string tool_agent_id_;
+    std::string tool_review_slice_id_;
+    std::string tool_review_pack_path_;
     // 0 表示不限制轮次（默认，对齐 Pi 的“有工具调用就继续”）。
     // 显式设置正数时作为可选安全上限。
     int max_tool_rounds_ = 0;

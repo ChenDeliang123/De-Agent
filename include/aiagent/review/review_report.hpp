@@ -29,6 +29,22 @@ struct ReviewReportVerificationRef {
     std::string source;  // pack / project
 };
 
+// 报告 frontmatter 的覆盖/成本摘要。默认 0 时渲染旧格式（兼容旧调用方）。
+struct ReviewReportCoverage {
+    int required_files = 0;
+    int covered_files = 0;
+    int scout_covered_files = 0;
+    int parent_verified_files = 0;
+    int omitted_files = 0;
+    int failed_slices = 0;
+    bool has_usage = false;
+    long long prompt_tokens = 0;
+    long long completion_tokens = 0;
+    long long cache_hit_tokens = 0;
+    bool has_cost = false;
+    double estimated_cost_usd = 0;
+};
+
 struct ReviewReportInput {
     std::string status = "final";  // draft / final
     std::string verdict;           // draft 可为空
@@ -40,6 +56,7 @@ struct ReviewReportInput {
     std::vector<std::string> unverified;
     std::vector<std::string> open_questions;
     std::string notes;
+    ReviewReportCoverage coverage;
 };
 
 // 上一轮报告的最小摘要：frontmatter 的 pack/review_id/verdict + finding id。

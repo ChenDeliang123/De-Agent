@@ -623,14 +623,18 @@ diff/untracked sha256、producer、request 文件/文本、上下文路径 hash�
 reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 
 - `review_context`：manifest/plan/diff/untracked/session（P1 增加 delta）；
-  manifest 返回 `coverage`（covered/uncovered/omitted）与预算，`plan` 返回按目录
-  分组的覆盖计划与 focus。
-- `review_read`：批量按行读真实文件与调用方；读完整文件会记入覆盖账本。
+  manifest/plan 返回双账本 `coverage`：`required_files`、`scout_covered_files`、
+  `parent_verified_files`、union `covered_files`、`uncovered_files`、
+  `failed_slices` 与 `failed_slice_details`，并附预算与用量。
+- `review_read`：批量按行读真实文件与调用方；完整读取会把工具级 receipt 记入
+  覆盖账本（父级或对应 scout slice）。
 - `review_git`：只读 `diff/log/show/blame/rev-parse/ls-files/status`；拒绝 shell、
   checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
-- `review_scout`（P1，默认开启，`[review] scout_max=1–4`）：最多 4 个只读分片；
-  scout 只能读文件/查 git，不能写、不能执行命令、不能写报告；父 reviewer 必须
-  重读证据，scout 覆盖不替代父 coverage。
+- `review_scout`（默认开启，`[review] scout_max=1–4`）：最多 4 个只读分片；
+  scout 必须用 `review_read`/`review_context` 读 assigned files 才会产生覆盖回执，
+  普通 `read` 只用于调用方辅助判断。分片失败/超时/截断/缺文件会进入
+  `failed_slices`，其未覆盖文件仍由父 reviewer 补读或写 blocked。父 reviewer
+  仍须重读 finding 的 `path:line` 证据。
 - `review_verify`：只执行 pack 或 `.de/review.json` 声明的 argv（无 shell），
   执行前后比较源码 digest；源码被测试改动会返回 `source_modified=true`。
 - `review_test_write`：只允许新建测试或向既有测试 append，不能覆盖/删除测试，
@@ -649,6 +653,12 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 默认 `4`。单个 scout 默认 `scout_timeout_s=600`、`scout_max_rounds=64`，避免沿用通用
 子 Agent 的 16 轮/120s 在 20 文件切片上提前耗尽。想降成本可设 `scout_max=0` 关闭或
 `1–3` 减并发。scout 是只读候选来源，父 reviewer 必须重读证据后再写报告。
+
+审核用量（父级/scout 的 prompt、completion、cache_hit、请求数、墙钟）会写入
+state、manifest 与 `review_end` 日志；报告 frontmatter 同时记录覆盖统计与失败分片。
+需要估算美元成本时配置 `[review] price_input_per_million_usd`、
+`price_cached_input_per_million_usd`、`price_output_per_million_usd`；三者全为 0
+时只记录 token，不伪造 0 成本。
 
 后台审核（P1，需 `[review] background_enabled=true`）：
 

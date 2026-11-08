@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "aiagent/agent/sub_agent.hpp"
+#include "aiagent/config.hpp"
 #include "aiagent/tools/tool_provider.hpp"
 
 namespace aiagent::tools {
@@ -20,7 +21,11 @@ public:
     using ScoutRunner = std::function<std::vector<agent::SubAgentResult>(
             const std::vector<agent::SubAgentRequest>&, int depth)>;
 
-    ReviewScoutToolProvider(ScoutRunner runner, int max_tasks);
+    // current_pack_path 返回当前审核的 pack 绝对路径；为空时仍可跑分片，
+    // 但不会写 CoverageLedger（单测/独立使用）。
+    ReviewScoutToolProvider(ScoutRunner runner, int max_tasks,
+                            ReviewConfig config = ReviewConfig{},
+                            std::function<std::string()> current_pack_path = {});
 
     std::vector<llm::ToolSpec> ListTools() override;
     ToolExecutionResult Execute(const std::string& name,
@@ -30,9 +35,13 @@ public:
 private:
     ScoutRunner runner_;
     int max_tasks_ = 0;
+    ReviewConfig config_;
+    std::function<std::string()> current_pack_path_;
 };
 
 std::shared_ptr<IToolProvider> MakeReviewScoutToolProvider(
-        ReviewScoutToolProvider::ScoutRunner runner, int max_tasks);
+        ReviewScoutToolProvider::ScoutRunner runner, int max_tasks,
+        ReviewConfig config = ReviewConfig{},
+        std::function<std::string()> current_pack_path = {});
 
 }  // namespace aiagent::tools

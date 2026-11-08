@@ -48,6 +48,7 @@ struct AgentEvent {
     // kSubAgentEnd / kRunSummary
     int duration_ms = 0;   // kSubAgentEnd：子 Agent 运行耗时；kRunSummary：本次运行总耗时
     int tool_calls = 0;    // kSubAgentEnd：子 Agent 内部的工具调用次数
+    int requests = 0;      // 模型请求数（含重试）
     // kSubAgentEnd / kRunSummary：token 用量（口径同 deepseek 客户端 request_end 日志）。
     // kRunSummary 汇总根模型各轮与本次运行内完成的子 Agent；cache_hit 是 prompt 的子集。
     long long prompt_tokens = 0;

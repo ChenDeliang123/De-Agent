@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -828,6 +829,28 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
         *output = static_cast<std::size_t>(parsed);
         return true;
     };
+    auto parse_double = [error](const std::string& key, const std::string& value,
+                                double min_value, double max_value, double* output) {
+        try {
+            std::size_t used = 0;
+            const double parsed = std::stod(value, &used);
+            if (used != value.size() || !std::isfinite(parsed) || parsed < min_value ||
+                parsed > max_value) {
+                if (error != nullptr) {
+                    *error = key + " must be between " + std::to_string(min_value) +
+                             " and " + std::to_string(max_value);
+                }
+                return false;
+            }
+            *output = parsed;
+            return true;
+        } catch (const std::exception&) {
+            if (error != nullptr) {
+                *error = "invalid " + key + ": " + value;
+            }
+            return false;
+        }
+    };
     auto bad = [error](const std::string& message) {
         if (error != nullptr) {
             *error = message;
@@ -940,6 +963,21 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
                 return std::nullopt;
             }
             config.scout_max_rounds = static_cast<int>(parsed);
+        } else if (key == "price_input_per_million_usd") {
+            if (!parse_double(key, value, 0, 1000000,
+                              &config.price_input_per_million_usd)) {
+                return std::nullopt;
+            }
+        } else if (key == "price_cached_input_per_million_usd") {
+            if (!parse_double(key, value, 0, 1000000,
+                              &config.price_cached_input_per_million_usd)) {
+                return std::nullopt;
+            }
+        } else if (key == "price_output_per_million_usd") {
+            if (!parse_double(key, value, 0, 1000000,
+                              &config.price_output_per_million_usd)) {
+                return std::nullopt;
+            }
         } else if (key == "review_timeout_s") {
             long long parsed = 0;
             if (!parse_number(key, value, 60, 14400, &parsed)) {

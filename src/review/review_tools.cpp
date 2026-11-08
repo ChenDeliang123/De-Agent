@@ -65,11 +65,22 @@ std::string RepoRootFor(const tools::ToolContext& context) {
             fs::weakly_canonical(aiagent::platform::FromUtf8(context.working_directory), ec));
 }
 
+struct FailedSliceSummary {
+    std::string slice_id;
+    std::string name;
+    std::string status;
+    std::string error;
+    std::vector<std::string> files;  // 仍未被任何 receipt 覆盖的 assigned files
+};
+
 struct ReviewCoverageSummary {
     std::vector<std::string> required;
     std::vector<std::string> omitted;
     std::vector<std::string> covered;
     std::vector<std::string> uncovered;
+    std::vector<std::string> scout_covered;
+    std::vector<std::string> parent_verified;
+    std::vector<FailedSliceSummary> failed_slices;
 };
 
 std::string NormalizeReviewPath(const std::string& path) {
@@ -113,23 +124,61 @@ ReviewCoverageSummary BuildReviewCoverage(const ReviewPack& pack,
         }
     }
 
-    std::set<std::string> reviewed;
-    for (const auto& path : state.reviewed_files) {
+    std::set<std::string> parent;
+    for (const auto& path : ParentVerifiedFiles(state)) {
         const std::string normalized = NormalizeReviewPath(path);
         if (!normalized.empty()) {
-            reviewed.insert(normalized);
+            parent.insert(normalized);
         }
     }
+    std::set<std::string> scout;
+    for (const auto& slice : state.coverage_ledger.slices) {
+        for (const auto& path : slice.covered_files) {
+            const std::string normalized = NormalizeReviewPath(path);
+            if (!normalized.empty()) {
+                scout.insert(normalized);
+            }
+        }
+    }
+    std::set<std::string> covered = parent;
+    covered.insert(scout.begin(), scout.end());
 
     ReviewCoverageSummary coverage;
     coverage.required.assign(required.begin(), required.end());
     coverage.omitted.assign(omitted.begin(), omitted.end());
     for (const auto& path : coverage.required) {
-        if (reviewed.count(path) > 0) {
+        if (parent.count(path) > 0) {
+            coverage.parent_verified.push_back(path);
+        }
+        if (scout.count(path) > 0) {
+            coverage.scout_covered.push_back(path);
+        }
+        if (covered.count(path) > 0) {
             coverage.covered.push_back(path);
         } else {
             coverage.uncovered.push_back(path);
         }
+    }
+    std::set<std::string> seen_failed;
+    for (const auto& slice : state.coverage_ledger.slices) {
+        if (slice.status == "done" || slice.status == "running") {
+            continue;
+        }
+        if (!seen_failed.insert(slice.slice_id).second) {
+            continue;
+        }
+        FailedSliceSummary summary;
+        summary.slice_id = slice.slice_id;
+        summary.name = slice.name;
+        summary.status = slice.status;
+        summary.error = slice.error;
+        for (const auto& path : slice.assigned_files) {
+            const std::string normalized = NormalizeReviewPath(path);
+            if (!normalized.empty() && covered.count(normalized) == 0) {
+                summary.files.push_back(normalized);
+            }
+        }
+        coverage.failed_slices.push_back(std::move(summary));
     }
     return coverage;
 }
@@ -284,18 +333,15 @@ std::vector<ReviewPlanGroup> BuildReviewPlanGroups(
     return groups;
 }
 
-bool MarkReviewCovered(ReviewState* state, const std::string& path) {
-    const std::string normalized = NormalizeReviewPath(path);
-    if (normalized.empty()) {
-        return false;
-    }
-    if (std::find(state->reviewed_files.begin(), state->reviewed_files.end(), normalized) !=
-        state->reviewed_files.end()) {
-        return false;
-    }
-    state->reviewed_files.push_back(normalized);
-    state->updated_at = LocalTimestampIso();
-    return true;
+bool MarkReviewCovered(ReviewState* state, const std::string& slice_id,
+                       const std::string& method, const std::string& path) {
+    return AddCoverageReceipt(state, slice_id, method, path);
+}
+
+std::string PackPathRelative(const ReviewPack& pack, const std::string& abs_path) {
+    return aiagent::platform::ToGenericUtf8(
+            aiagent::platform::FromUtf8(abs_path).lexically_relative(
+                    aiagent::platform::FromUtf8(pack.repo_root)));
 }
 
 std::size_t Utf8CharLength(const std::string& text, std::size_t offset) {
@@ -1168,7 +1214,7 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
     if (!LoadPack(pack_arg, context, &pack, &abs_path, &rel_path, &error)) {
         return Fail(error);
     }
-    {
+    if (context.review_slice_id.empty()) {
         std::lock_guard<std::mutex> lock(last_pack_mutex_);
         last_pack_path_ = abs_path;
     }
@@ -1188,15 +1234,77 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
     const ReviewCoverageSummary coverage = BuildReviewCoverage(pack, state);
     const std::vector<ReviewPlanGroup> plan_groups =
             BuildReviewPlanGroups(coverage.required);
+    if (state.coverage_ledger.required_files !=
+                static_cast<int>(coverage.required.size()) ||
+        state.coverage_ledger.omitted_files !=
+                static_cast<int>(coverage.omitted.size())) {
+        state.coverage_ledger.required_files =
+                static_cast<int>(coverage.required.size());
+        state.coverage_ledger.omitted_files =
+                static_cast<int>(coverage.omitted.size());
+        std::string scope_error;
+        UpdateReviewState(
+                options_.config, pack.repo_root, pack.review_id, rel_path,
+                [&coverage](ReviewState* latest) {
+                    latest->coverage_ledger.required_files =
+                            static_cast<int>(coverage.required.size());
+                    latest->coverage_ledger.omitted_files =
+                            static_cast<int>(coverage.omitted.size());
+                },
+                &scope_error);
+        if (!scope_error.empty()) {
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "review",
+                    "event=coverage_save_failed review_id=" + pack.review_id +
+                            " error=" + scope_error);
+        }
+    }
     auto coverage_json = [&coverage, &plan_groups]() {
+        nlohmann::json details = nlohmann::json::array();
+        for (const auto& failed : coverage.failed_slices) {
+            details.push_back({{"slice_id", failed.slice_id},
+                               {"name", failed.name},
+                               {"status", failed.status},
+                               {"error", failed.error},
+                               {"files", failed.files}});
+        }
         return nlohmann::json{
                 {"total_changed_files",
                  coverage.required.size() + coverage.omitted.size()},
+                {"required_files", coverage.required.size()},
+                {"scout_covered_files", coverage.scout_covered.size()},
+                {"parent_verified_files", coverage.parent_verified.size()},
                 {"covered_files", coverage.covered.size()},
                 {"uncovered_files", coverage.uncovered.size()},
                 {"omitted_files", coverage.omitted.size()},
+                {"failed_slices", coverage.failed_slices.size()},
+                {"failed_slice_details", details},
                 {"groups", plan_groups.size()},
                 {"uncovered", coverage.uncovered}};
+    };
+    auto usage_json = [this, &state, &coverage]() {
+        const ReviewUsage scout = ScoutUsage(state.coverage_ledger);
+        nlohmann::json usage;
+        usage["scout"] = ReviewUsageToJson(scout);
+        usage["scout"]["available"] = !scout.Empty();
+        if (state.has_run_usage) {
+            usage["run"] = ReviewUsageToJson(state.run_usage);
+            usage["run"]["available"] = true;
+            usage["parent"] = ReviewUsageToJson(ParentUsage(state));
+        }
+        if (const auto cost = EstimateReviewCostUsd(state, options_.config);
+            cost.has_value()) {
+            usage["estimated_cost_usd"] = *cost;
+            if (!coverage.required.empty()) {
+                usage["cost_per_required_file"] =
+                        *cost / static_cast<double>(coverage.required.size());
+            }
+            if (!coverage.covered.empty()) {
+                usage["cost_per_covered_file"] =
+                        *cost / static_cast<double>(coverage.covered.size());
+            }
+        }
+        return usage;
     };
     auto budget_json = [this, &state]() {
         return nlohmann::json{
@@ -1206,29 +1314,27 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                  state.started_at_epoch_s + options_.config.review_timeout_s},
                 {"timed_out", DeadlineExceeded() || state.timed_out}};
     };
-    bool coverage_dirty = false;
-    auto persist_coverage = [&]() {
-        if (!coverage_dirty) {
+    auto record_receipts = [this, &pack, &rel_path, &context](
+                                   const std::string& method,
+                                   const std::vector<std::string>& paths) {
+        if (paths.empty()) {
             return;
         }
-        state.updated_at = LocalTimestampIso();
         std::string save_error;
-        if (!SaveReviewState(options_.config, pack.repo_root, state, &save_error)) {
+        if (!UpdateReviewState(
+                    options_.config, pack.repo_root, pack.review_id, rel_path,
+                    [&context, &method, &paths](ReviewState* latest) {
+                        for (const auto& path : paths) {
+                            MarkReviewCovered(latest, context.review_slice_id, method,
+                                              path);
+                        }
+                    },
+                    &save_error)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "review",
                     "event=coverage_save_failed review_id=" + pack.review_id +
                             " error=" + save_error);
-        } else {
-            const ReviewCoverageSummary current = BuildReviewCoverage(pack, state);
-            aiagent::DefaultLogger().Log(
-                    aiagent::LogLevel::kInfo, "review",
-                    "event=review_coverage review_id=" + pack.review_id +
-                            " covered=" + std::to_string(current.covered.size()) +
-                            " uncovered=" + std::to_string(current.uncovered.size()) +
-                            " omitted=" + std::to_string(current.omitted.size()) +
-                            " groups=" + std::to_string(plan_groups.size()));
         }
-        coverage_dirty = false;
     };
 
     if (mode == "manifest") {
@@ -1323,13 +1429,19 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                  state.started_at_epoch_s + options_.config.review_timeout_s},
                 {"timed_out", DeadlineExceeded() || state.timed_out}};
         manifest["coverage"] = coverage_json();
+        manifest["usage"] = usage_json();
         manifest["budget"] = budget_json();
         aiagent::DefaultLogger().Log(
                 aiagent::LogLevel::kInfo, "review",
                 "event=review_manifest review_id=" + pack.review_id +
-                        " files=" + std::to_string(coverage.required.size() + coverage.omitted.size()) +
+                        " required=" + std::to_string(coverage.required.size()) +
                         " covered=" + std::to_string(coverage.covered.size()) +
+                        " scout_covered=" + std::to_string(coverage.scout_covered.size()) +
+                        " parent_verified=" +
+                        std::to_string(coverage.parent_verified.size()) +
                         " uncovered=" + std::to_string(coverage.uncovered.size()) +
+                        " failed_slices=" +
+                        std::to_string(coverage.failed_slices.size()) +
                         " groups=" + std::to_string(plan_groups.size()));
         return Ok(manifest);
     }
@@ -1378,6 +1490,7 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
         plan["review_id"] = pack.review_id;
         plan["feature"] = pack.feature;
         plan["coverage"] = coverage_json();
+        plan["usage"] = usage_json();
         plan["budget"] = budget_json();
         plan["groups"] = groups;
         return Ok(plan);
@@ -1436,16 +1549,15 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
         payload["total_bytes"] = content.size();
         payload["covered"] = full;
         if (full) {
+            std::vector<std::string> paths;
             if (path.empty()) {
                 for (const auto& file : pack.changed_files) {
-                    if (MarkReviewCovered(&state, file.path)) {
-                        coverage_dirty = true;
-                    }
+                    paths.push_back(file.path);
                 }
-            } else if (MarkReviewCovered(&state, path)) {
-                coverage_dirty = true;
+            } else {
+                paths.push_back(path);
             }
-            persist_coverage();
+            record_receipts("review_context:diff", paths);
         }
         return Ok(payload);
     }
@@ -1467,9 +1579,8 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                 const bool full =
                         !file.redacted && file.reason.empty() && !file.truncated;
                 payload["covered"] = full;
-                if (full && MarkReviewCovered(&state, file.path)) {
-                    coverage_dirty = true;
-                    persist_coverage();
+                if (full) {
+                    record_receipts("review_context:untracked", {file.path});
                 }
                 return Ok(payload);
             }
@@ -1601,11 +1712,11 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
     const std::string repo = RepoRootFor(context);
     const fs::path repo_path = aiagent::platform::FromUtf8(repo);
     ReviewPack coverage_pack;
-    ReviewState coverage_state;
+    std::string coverage_pack_relative;
     bool coverage_ready = false;
     {
-        std::string last_pack;
-        {
+        std::string last_pack = context.review_pack_path;
+        if (last_pack.empty()) {
             std::lock_guard<std::mutex> lock(last_pack_mutex_);
             last_pack = last_pack_path_;
         }
@@ -1615,13 +1726,12 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
             std::string load_error;
             if (LoadPack(last_pack, context, &coverage_pack, &abs_path, &rel_path,
                          &load_error)) {
-                LoadState(coverage_pack, rel_path, options_.config, &coverage_state);
-                EnsureClock(coverage_pack, rel_path, &coverage_state);
+                coverage_pack_relative = rel_path;
                 coverage_ready = true;
             }
         }
     }
-    bool coverage_dirty = false;
+    std::vector<std::string> covered_paths;
     std::size_t max_bytes = arguments.value("max_bytes", 262144);
     max_bytes = std::min<std::size_t>(std::max<std::size_t>(max_bytes, 1), 1048576);
     const auto files = arguments.value("files", nlohmann::json::array());
@@ -1699,20 +1809,26 @@ tools::ToolExecutionResult ReviewTools::Read(const nlohmann::json& arguments,
                            {"cache_hit", cache_hit},
                            {"covered", full_range},
                            {"content", body}});
-        if (full_range && coverage_ready &&
-            MarkReviewCovered(&coverage_state, raw_path)) {
-            coverage_dirty = true;
+        if (full_range && coverage_ready) {
+            covered_paths.push_back(raw_path);
         }
     }
-    if (coverage_dirty) {
-        coverage_state.updated_at = LocalTimestampIso();
+    if (coverage_ready && !covered_paths.empty()) {
         std::string save_error;
-        if (!SaveReviewState(options_.config, coverage_pack.repo_root, coverage_state,
-                             &save_error)) {
+        if (!UpdateReviewState(
+                    options_.config, coverage_pack.repo_root, coverage_pack.review_id,
+                    coverage_pack_relative,
+                    [&context, &covered_paths](ReviewState* latest) {
+                        for (const auto& path : covered_paths) {
+                            AddCoverageReceipt(latest, context.review_slice_id,
+                                               "review_read:full", path);
+                        }
+                    },
+                    &save_error)) {
             aiagent::DefaultLogger().Log(
                     aiagent::LogLevel::kWarning, "review",
-                    "event=coverage_save_failed review_id=" + coverage_pack.review_id +
-                            " error=" + save_error);
+                    "event=coverage_save_failed review_id=" +
+                            coverage_pack.review_id + " error=" + save_error);
         }
     }
     nlohmann::json result = {{"files", payload},
@@ -2294,6 +2410,48 @@ tools::ToolExecutionResult ReviewTools::Setup(const nlohmann::json& arguments,
                {"consent", "valid"}});
 }
 
+std::string ReviewTools::CurrentPackPath() const {
+    std::lock_guard<std::mutex> lock(last_pack_mutex_);
+    return last_pack_path_;
+}
+
+void ReviewTools::RecordRunUsage(const ReviewUsage& usage) {
+    const std::string pack_path = CurrentPackPath();
+    if (pack_path.empty()) {
+        return;
+    }
+    ReviewPack pack;
+    std::string error;
+    if (!LoadReviewPack(pack_path, &pack, &error)) {
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "review",
+                "event=review_usage_save_failed review_id=- error=" + error);
+        return;
+    }
+    const std::string rel_path = PackPathRelative(pack, pack_path);
+    if (!UpdateReviewState(
+                options_.config, pack.repo_root, pack.review_id, rel_path,
+                [&usage](ReviewState* latest) {
+                    latest->has_run_usage = true;
+                    latest->run_usage = usage;
+                },
+                &error)) {
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "review",
+                "event=review_usage_save_failed review_id=" + pack.review_id +
+                        " error=" + error);
+        return;
+    }
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "review",
+            "event=review_run_usage review_id=" + pack.review_id +
+                    " prompt_tokens=" + std::to_string(usage.prompt_tokens) +
+                    " completion_tokens=" + std::to_string(usage.completion_tokens) +
+                    " cache_hit_tokens=" + std::to_string(usage.cache_hit_tokens) +
+                    " requests=" + std::to_string(usage.requests) +
+                    " duration_ms=" + std::to_string(usage.duration_ms));
+}
+
 tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
                                                const tools::ToolContext& context) {
     ReviewPack pack;
@@ -2374,6 +2532,26 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     }
 
     const ReviewCoverageSummary coverage = BuildReviewCoverage(pack, state);
+    if (input.status == "final" && !coverage.failed_slices.empty()) {
+        for (const auto& failed : coverage.failed_slices) {
+            std::ostringstream note;
+            note << "review_scout slice " << failed.slice_id << " status="
+                 << failed.status;
+            if (!failed.error.empty()) {
+                note << " error=" << failed.error;
+            }
+            if (!failed.files.empty()) {
+                note << " missing_assigned=";
+                for (std::size_t i = 0; i < failed.files.size(); ++i) {
+                    if (i > 0) {
+                        note << ",";
+                    }
+                    note << failed.files[i];
+                }
+            }
+            input.unverified.push_back(note.str());
+        }
+    }
     if (input.status == "final" && input.verdict != "blocked" &&
         !coverage.uncovered.empty()) {
         std::ostringstream message;
@@ -2387,7 +2565,34 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
             }
             message << coverage.uncovered[i];
         }
+        for (const auto& failed : coverage.failed_slices) {
+            if (!failed.files.empty()) {
+                message << " [failed slice " << failed.slice_id
+                        << " missing assigned files]";
+                break;
+            }
+        }
         return Fail(message.str());
+    }
+    input.coverage.required_files = static_cast<int>(coverage.required.size());
+    input.coverage.covered_files = static_cast<int>(coverage.covered.size());
+    input.coverage.scout_covered_files =
+            static_cast<int>(coverage.scout_covered.size());
+    input.coverage.parent_verified_files =
+            static_cast<int>(coverage.parent_verified.size());
+    input.coverage.omitted_files = static_cast<int>(coverage.omitted.size());
+    input.coverage.failed_slices =
+            static_cast<int>(coverage.failed_slices.size());
+    const ReviewUsage total_usage = TotalUsage(state);
+    input.coverage.has_usage =
+            state.has_run_usage || !ScoutUsage(state.coverage_ledger).Empty();
+    input.coverage.prompt_tokens = total_usage.prompt_tokens;
+    input.coverage.completion_tokens = total_usage.completion_tokens;
+    input.coverage.cache_hit_tokens = total_usage.cache_hit_tokens;
+    if (const auto cost = EstimateReviewCostUsd(state, options_.config);
+        cost.has_value()) {
+        input.coverage.has_cost = true;
+        input.coverage.estimated_cost_usd = *cost;
     }
 
     const std::string pack_sha = aiagent::util::Sha256HexFile(abs_path, &error);
@@ -2403,18 +2608,49 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     state.status = input.status;
     state.updated_at = LocalTimestampIso();
     std::string state_error;
-    SaveReviewState(options_.config, pack.repo_root, state, &state_error);
+    UpdateReviewState(
+            options_.config, pack.repo_root, pack.review_id, rel_path,
+            [&](ReviewState* latest) {
+                latest->status = input.status;
+                latest->timed_out = latest->timed_out || state.timed_out;
+            },
+            &state_error);
     if (input.status == "final") {
         CleanupCopyWorktree();
     }
-    aiagent::DefaultLogger().Log(
-            aiagent::LogLevel::kInfo, "review",
-            "event=review_end review_id=" + pack.review_id +
-                    " status=" + input.status + " verdict=" + input.verdict +
-                    " findings=" + std::to_string(written.findings) +
-                    " covered=" + std::to_string(coverage.covered.size()) +
-                    " uncovered=" + std::to_string(coverage.uncovered.size()) +
-                    " omitted=" + std::to_string(coverage.omitted.size()));
+    const ReviewUsage scout_usage = ScoutUsage(state.coverage_ledger);
+    const ReviewUsage parent_usage = ParentUsage(state);
+    std::ostringstream end_log;
+    end_log << "event=review_end review_id=" << pack.review_id
+            << " status=" << input.status << " verdict=" << input.verdict
+            << " findings=" << written.findings
+            << " required=" << coverage.required.size()
+            << " covered=" << coverage.covered.size()
+            << " scout_covered=" << coverage.scout_covered.size()
+            << " parent_verified=" << coverage.parent_verified.size()
+            << " uncovered=" << coverage.uncovered.size()
+            << " omitted=" << coverage.omitted.size()
+            << " failed_slices=" << coverage.failed_slices.size()
+            << " prompt_tokens=" << total_usage.prompt_tokens
+            << " completion_tokens=" << total_usage.completion_tokens
+            << " cache_hit_tokens=" << total_usage.cache_hit_tokens
+            << " parent_prompt_tokens=" << parent_usage.prompt_tokens
+            << " scout_prompt_tokens=" << scout_usage.prompt_tokens;
+    if (input.coverage.has_cost) {
+        end_log << " estimated_cost_usd=" << input.coverage.estimated_cost_usd;
+        if (!coverage.required.empty()) {
+            end_log << " cost_per_required_file="
+                    << (input.coverage.estimated_cost_usd /
+                        static_cast<double>(coverage.required.size()));
+        }
+        if (!coverage.covered.empty()) {
+            end_log << " cost_per_covered_file="
+                    << (input.coverage.estimated_cost_usd /
+                        static_cast<double>(coverage.covered.size()));
+        }
+    }
+    aiagent::DefaultLogger().Log(aiagent::LogLevel::kInfo, "review",
+                                 end_log.str());
 
     return Ok({{"path", written.path},
                {"bytes", written.bytes},
@@ -2422,9 +2658,22 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
                {"findings", written.findings},
                {"status", input.status},
                {"stale", stale.stale},
-               {"coverage", {{"covered_files", coverage.covered.size()},
-                             {"uncovered_files", coverage.uncovered.size()},
-                             {"omitted_files", coverage.omitted.size()}}}});
+               {"coverage",
+                {{"required_files", coverage.required.size()},
+                 {"scout_covered_files", coverage.scout_covered.size()},
+                 {"parent_verified_files", coverage.parent_verified.size()},
+                 {"covered_files", coverage.covered.size()},
+                 {"uncovered_files", coverage.uncovered.size()},
+                 {"omitted_files", coverage.omitted.size()},
+                 {"failed_slices", coverage.failed_slices.size()}}},
+               {"usage",
+                {{"prompt_tokens", total_usage.prompt_tokens},
+                 {"completion_tokens", total_usage.completion_tokens},
+                 {"cache_hit_tokens", total_usage.cache_hit_tokens},
+                 {"estimated_cost_usd",
+                  input.coverage.has_cost
+                          ? nlohmann::json(input.coverage.estimated_cost_usd)
+                          : nlohmann::json(nullptr)}}}});
 }
 
 }  // namespace aiagent::review

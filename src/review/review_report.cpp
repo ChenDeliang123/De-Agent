@@ -513,6 +513,27 @@ ReviewReportResult ReviewReportWriter::Write(
     report << "verdict: " << (input.verdict.empty() ? "null" : YamlPlain(input.verdict))
            << '\n';
     report << "reviewed_at: " << YamlPlain(LocalTimestampIso()) << '\n';
+    if (input.coverage.required_files > 0 || input.coverage.failed_slices > 0 ||
+        input.coverage.has_usage) {
+        report << "coverage:\n";
+        report << "  required_files: " << input.coverage.required_files << '\n';
+        report << "  covered_files: " << input.coverage.covered_files << '\n';
+        report << "  scout_covered_files: " << input.coverage.scout_covered_files << '\n';
+        report << "  parent_verified_files: " << input.coverage.parent_verified_files
+               << '\n';
+        report << "  omitted_files: " << input.coverage.omitted_files << '\n';
+        report << "failed_slices: " << input.coverage.failed_slices << '\n';
+    }
+    if (input.coverage.has_usage) {
+        report << "usage:\n";
+        report << "  prompt_tokens: " << input.coverage.prompt_tokens << '\n';
+        report << "  completion_tokens: " << input.coverage.completion_tokens << '\n';
+        report << "  cache_hit_tokens: " << input.coverage.cache_hit_tokens << '\n';
+        if (input.coverage.has_cost) {
+            report << "  estimated_cost_usd: " << input.coverage.estimated_cost_usd
+                   << '\n';
+        }
+    }
     report << "---\n\n";
 
     report << "# 代码审核：" << pack.feature << "\n\n";

@@ -156,6 +156,10 @@ scout_max = 4
 ; 单个 scout 的独立预算，不能沿用通用子 Agent 的 16 轮/120s。
 scout_timeout_s = 600
 scout_max_rounds = 64
+; 可选成本估算（美元/百万 token）。全为 0 时只记录 token/时延，不估算成本。
+price_input_per_million_usd = 0
+price_cached_input_per_million_usd = 0
+price_output_per_million_usd = 0
 checkpoint = true
 draft_report = true
 chunk_files = 20

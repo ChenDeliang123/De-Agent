@@ -313,6 +313,10 @@ if(AIAGENT_BUILD_TESTS)
   target_link_libraries(review_tools_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_review_tools COMMAND review_tools_test)
 
+  add_executable(review_coverage_ledger_test tests/review_coverage_ledger_test.cpp)
+  target_link_libraries(review_coverage_ledger_test PRIVATE aiagent_agent Threads::Threads)
+  add_test(NAME aiagent_review_coverage_ledger COMMAND review_coverage_ledger_test)
+
   add_executable(review_scout_test tests/review_scout_test.cpp)
   target_link_libraries(review_scout_test PRIVATE aiagent_agent)
   add_test(NAME aiagent_review_scout COMMAND review_scout_test)

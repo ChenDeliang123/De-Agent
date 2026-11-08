@@ -173,6 +173,73 @@ int main() {
         Expect(manifest["coverage"]["total_changed_files"].get<int>() >= 3 &&
                        manifest["coverage"]["uncovered_files"].get<int>() >= 3,
                "manifest should expose initial coverage: " + manifest.dump());
+        Expect(manifest["coverage"].contains("required_files") &&
+                       manifest["coverage"].contains("scout_covered_files") &&
+                       manifest["coverage"].contains("parent_verified_files") &&
+                       manifest["coverage"].contains("failed_slice_details") &&
+                       manifest["coverage"]["failed_slices"] == 0,
+               "manifest should expose dual ledger fields: " + manifest.dump());
+        Expect(manifest["usage"].contains("scout") &&
+                       !manifest["usage"].contains("estimated_cost_usd"),
+               "zero prices must not fabricate cost: " + manifest.dump());
+
+        // 分片 review_read 产生 scout receipt，父级账本不被伪同步。
+        auto scout_context = context;
+        scout_context.review_slice_id = "slice-manual";
+        scout_context.review_pack_path = pack_path;
+        auto scout_read = Parse(reviewer.Execute(
+                "review_read",
+                {{"files", nlohmann::json::array({{{"path", "src/foo.cpp"}}})}},
+                scout_context));
+        Expect(scout_read["files"].size() == 1 &&
+                       scout_read["files"][0].value("covered", false),
+               "scout review_read should cover the file");
+        auto scout_manifest = Parse(reviewer.Execute(
+                "review_context", {{"pack", pack_path}, {"mode", "manifest"}}, context));
+        Expect(scout_manifest["coverage"]["scout_covered_files"].get<int>() == 1 &&
+                       scout_manifest["coverage"]["parent_verified_files"].get<int>() == 0,
+               "scout receipt must enter scout ledger, not parent ledger: " +
+                       scout_manifest.dump());
+
+        // 失败分片必须出现在 manifest，且列出仍缺失的 assigned files。
+        {
+            review::ReviewState seeded;
+            std::string state_error;
+            Expect(review::LoadReviewState(options.config, repo, created.review_id, &seeded,
+                                           &state_error),
+                   "load state for failed slice: " + state_error);
+            review::ReviewCoverageSlice slice;
+            slice.slice_id = "slice-failed";
+            slice.name = "slice-failed";
+            slice.status = "failed";
+            slice.assigned_files = {"CMakeLists.txt"};
+            slice.error = "timeout";
+            seeded.coverage_ledger.slices.push_back(slice);
+            review::RefreshFailedSlices(&seeded.coverage_ledger);
+            seeded.has_run_usage = true;
+            seeded.run_usage.prompt_tokens = 123;
+            seeded.run_usage.completion_tokens = 5;
+            seeded.run_usage.cache_hit_tokens = 100;
+            seeded.run_usage.requests = 1;
+            Expect(review::SaveReviewState(options.config, repo, seeded, &state_error),
+                   "save failed slice: " + state_error);
+        }
+        auto failed_manifest = Parse(reviewer.Execute(
+                "review_context", {{"pack", pack_path}, {"mode", "manifest"}}, context));
+        Expect(failed_manifest["coverage"]["failed_slices"].get<int>() == 1 &&
+                       failed_manifest["coverage"]["failed_slice_details"][0]
+                                       ["slice_id"] == "slice-failed",
+               "failed slice must be visible in manifest: " + failed_manifest.dump());
+        bool failed_slice_file_listed = false;
+        for (const auto& file :
+             failed_manifest["coverage"]["failed_slice_details"][0]["files"]) {
+            if (file == "CMakeLists.txt") {
+                failed_slice_file_listed = true;
+            }
+        }
+        Expect(failed_slice_file_listed,
+               "failed slice details must list missing assigned files");
+
         auto plan = Parse(reviewer.Execute(
                 "review_context", {{"pack", pack_path}, {"mode", "plan"}}, context));
         Expect(!plan.contains("__error") && plan["groups"].is_array() &&
@@ -413,6 +480,15 @@ int main() {
         Expect(report.find("pack:v1") != std::string::npos, "report verification");
         Expect(report.find("tests/review_owned_test.cpp") != std::string::npos,
                "report test files");
+        Expect(report.find("coverage:\n") != std::string::npos &&
+                       report.find("required_files:") != std::string::npos &&
+                       report.find("scout_covered_files:") != std::string::npos &&
+                       report.find("failed_slices: 1") != std::string::npos,
+               "report should include coverage/failed slice frontmatter");
+        Expect(report.find("usage:\n") != std::string::npos &&
+                       report.find("prompt_tokens: 123") != std::string::npos &&
+                       report.find("estimated_cost_usd") == std::string::npos,
+               "report should include usage without fabricating cost");
 
         // reviewer-owned 测试不触发 stale；源码变更触发 stale；stale 只能 blocked。
         auto fresh = Parse(reviewer.Execute(
