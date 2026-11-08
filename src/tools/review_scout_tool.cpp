@@ -15,7 +15,7 @@
 namespace aiagent::tools {
 namespace {
 
-constexpr int kMaxScoutTasks = 4;
+constexpr int kMaxScoutTasks = 8;
 constexpr int kMaxScoutFiles = 20;
 constexpr int kMaxScoutFocus = 8;
 constexpr int kMaxScoutFindings = 8;
@@ -184,7 +184,9 @@ std::vector<llm::ToolSpec> ReviewScoutToolProvider::ListTools() {
             "Delegate 1–4 bounded primary-review slices to review scouts";
     tool.prompt_guidelines = {
             "Use review_scout(mode=main_review, pack=..., group_ids=[...]) after "
-            "review_context(mode=plan); do not invent files outside the pack scope.",
+            "review_context(mode=plan); do not invent files outside the pack scope. "
+            "Omit group_ids/tasks to let the backend adaptively select up to " +
+                    std::to_string(max_tasks_) + " groups.",
             "Scouts are delegated primary reviewers: do not re-read every file assigned "
             "to a successful slice; only re-read each finding's cited path:line/evidence.",
             "Scouts must use review_read/review_context so their coverage is recorded by "
@@ -197,7 +199,9 @@ std::vector<llm::ToolSpec> ReviewScoutToolProvider::ListTools() {
              {{"name", {{"type", "string"}, {"description", "Short slice name"}}},
               {"files", {{"type", "array"},
                          {"items", {{"type", "string"}}},
-                         {"description", "Repo-relative files (max 20)"}}},
+                         {"description",
+                          "Repo-relative files (max " +
+                                  std::to_string(config_.slice_max_files) + ")"}}},
               {"focus", {{"type", "array"},
                          {"items", {{"type", "string"}}},
                          {"description", "Specific checks/hypotheses (max 8)"}}}}},
@@ -225,7 +229,11 @@ std::vector<llm::ToolSpec> ReviewScoutToolProvider::ListTools() {
                                   "); main_review requires pack scope."}}},
               {"max_findings_per_task",
                {{"type", "integer"},
-                {"description", "1–8; default " + std::to_string(kMaxScoutFindings) + "."}}}}}};
+                {"description", "1–" +
+                                        std::to_string(config_.slice_max_findings) +
+                                        "; default " +
+                                        std::to_string(config_.slice_max_findings) +
+                                        "."}}}}}};
     return {tool};
 }
 
@@ -245,15 +253,20 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
         result.error = "permission denied: read is disabled";
         return result;
     }
-    int max_findings = kMaxScoutFindings;
+    const int findings_limit = std::min(
+            std::max(config_.slice_max_findings, 1), kMaxScoutFindings);
+    const int file_limit = std::min(
+            std::max(config_.slice_max_files, 1), kMaxScoutFiles);
+    int max_findings = findings_limit;
     if (arguments.contains("max_findings_per_task")) {
         if (!arguments["max_findings_per_task"].is_number_integer()) {
             result.error = "max_findings_per_task must be an integer";
             return result;
         }
         max_findings = arguments["max_findings_per_task"].get<int>();
-        if (max_findings < 1 || max_findings > kMaxScoutFindings) {
-            result.error = "max_findings_per_task must be 1–8";
+        if (max_findings < 1 || max_findings > findings_limit) {
+            result.error = "max_findings_per_task must be 1–" +
+                           std::to_string(findings_limit);
             return result;
         }
     }
@@ -315,6 +328,7 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
     }
 
     std::vector<ScoutTaskSpec> specs;
+    bool auto_selected = false;
     if (arguments.contains("group_ids")) {
         if (!main_review) {
             result.error = "review_scout group_ids requires mode=main_review";
@@ -354,9 +368,9 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
             }
             specs.push_back({selected->group_id, selected->files, selected->focus});
         }
-    } else {
-        if (!arguments.contains("tasks") || !arguments["tasks"].is_array()) {
-            result.error = "review_scout requires group_ids[] or tasks[]";
+    } else if (arguments.contains("tasks")) {
+        if (!arguments["tasks"].is_array()) {
+            result.error = "review_scout tasks[] must be an array";
             return result;
         }
         const auto& items = arguments["tasks"];
@@ -385,9 +399,9 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
                 return result;
             }
             if (item["files"].empty() ||
-                static_cast<int>(item["files"].size()) > kMaxScoutFiles) {
+                static_cast<int>(item["files"].size()) > file_limit) {
                 result.error = "tasks[" + std::to_string(i) + "].files must have 1–" +
-                               std::to_string(kMaxScoutFiles) + " items";
+                               std::to_string(file_limit) + " items";
                 return result;
             }
             std::vector<std::string> files;
@@ -438,6 +452,42 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
             }
             specs.push_back({task_name, files, focus});
         }
+    } else if (main_review) {
+        auto_selected = true;
+        const std::vector<review::ReviewPlanGroup> groups =
+                review::BuildReviewPlanGroups(scope.required);
+        const std::size_t target = std::min(
+                review::RecommendedSliceCount(scope.required.size(), groups.size(),
+                                              config_.slice_profile,
+                                              config_.slice_total_max),
+                static_cast<std::size_t>(max_tasks_));
+        if (target == 0) {
+            nlohmann::json payload;
+            payload["tasks"] = nlohmann::json::array();
+            payload["total_findings"] = 0;
+            payload["failed_tasks"] = 0;
+            payload["partial"] = false;
+            payload["max_findings_per_task"] = max_findings;
+            payload["total_usage"] =
+                    review::ReviewUsageToJson(review::ReviewUsage{});
+            payload["auto_selected"] = 0;
+            payload["mode"] = mode;
+            payload["skipped"] = true;
+            payload["message"] =
+                    "pack has fewer than 20 required files or the profile disables "
+                    "slices; parent should read directly";
+            result.ok = true;
+            result.text = payload.dump(
+                    2, ' ', false, nlohmann::json::error_handler_t::replace);
+            return result;
+        }
+        for (std::size_t i = 0; i < target; ++i) {
+            specs.push_back(
+                    {groups[i].group_id, groups[i].files, groups[i].focus});
+        }
+    } else {
+        result.error = "review_scout requires group_ids[] or tasks[]";
+        return result;
     }
 
     if (static_cast<int>(specs.size()) > max_tasks_) {
@@ -536,7 +586,10 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
     std::size_t failed = 0;
     std::size_t findings = 0;
     for (std::size_t i = 0; i < results.size(); ++i) {
-        nlohmann::json task = ParseScoutText(results[i], 8000);
+        nlohmann::json task = ParseScoutText(
+                results[i],
+                static_cast<std::size_t>(
+                        std::max(config_.slice_result_max_chars, 1024)));
         task["name"] = names[i];
         task["slice_id"] = seeds[i].slice_id;
         task["assigned_files"] = seeds[i].assigned_files;
@@ -642,6 +695,7 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
     payload["failed_tasks"] = failed;
     payload["partial"] = failed > 0;
     payload["max_findings_per_task"] = max_findings;
+    payload["auto_selected"] = auto_selected ? static_cast<int>(seeds.size()) : 0;
     payload["total_usage"] = review::ReviewUsageToJson(total_usage);
     result.text = payload.dump(2, ' ', false,
                                nlohmann::json::error_handler_t::replace);

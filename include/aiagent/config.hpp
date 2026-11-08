@@ -169,11 +169,23 @@ struct ReviewConfig {
     // 长任务：单次 review 总预算、工具轮次、分块与 checkpoint。
     int max_tool_rounds = 192;
     long review_timeout_s = 3600;
-    // 默认 deep：4 个只读 scout；设为 0 关闭，1–3 降为更轻的分片。
+    // 旧名兼容：scout_max / scout_timeout_s / scout_max_rounds 仍可解析，
+    // 解析后映射到下面的 slice_* 字段；main 会记录迁移提示。
     int scout_max = 4;
-    // 单个 scout 的独立预算：16 轮/120s 在 20 文件切片上会稳定耗尽。
     long scout_timeout_s = 600;
     int scout_max_rounds = 64;
+    // P2：分片容量与并发分离。slice_total_max 是上限，不是每次跑满。
+    int slice_total_max = 4;
+    int slice_concurrency = 4;
+    int slice_max_files = 20;
+    int slice_max_rounds = 96;
+    long slice_timeout_s = 600;
+    int slice_result_max_chars = 16384;
+    int slice_max_findings = 8;
+    // fast / balanced / deep；仅配置层，不新增 CLI 参数。
+    std::string slice_profile = "deep";
+    // 本次配置是否使用了旧 scout_* 键，供启动日志提示迁移。
+    bool used_legacy_scout_keys = false;
     // 可选成本估算（美元/百万 token）；都为 0 时只记录 token，不伪造成本。
     double price_input_per_million_usd = 0;
     double price_cached_input_per_million_usd = 0;

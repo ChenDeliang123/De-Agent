@@ -273,6 +273,14 @@ int main() {
             }
         }
         Expect(plan_has_focus, "plan groups should include focus items");
+        Expect(review::RecommendedSliceCount(10, 5, "deep", 4) == 0 &&
+                       review::RecommendedSliceCount(30, 5, "deep", 4) == 2 &&
+                       review::RecommendedSliceCount(60, 6, "deep", 4) == 4 &&
+                       review::RecommendedSliceCount(106, 6, "deep", 4) == 4 &&
+                       review::RecommendedSliceCount(106, 6, "deep", 8) == 6 &&
+                       review::RecommendedSliceCount(106, 6, "balanced", 8) == 4 &&
+                       review::RecommendedSliceCount(106, 6, "fast", 8) == 0,
+               "adaptive slice count should follow profile/size/cap");
 
         // P1 main_review：group_ids 来自 plan、必须在 pack scope 内且互不重叠。
         {
@@ -312,6 +320,16 @@ int main() {
                         },
                         &cleanup_error);
             };
+            scout_requests.clear();
+            auto auto_skip = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"}, {"pack", pack_path}}, context));
+            Expect(!auto_skip.contains("__error") &&
+                           auto_skip.value("skipped", false) &&
+                           auto_skip["tasks"].empty() && scout_requests.empty(),
+                   "small pack auto selection should skip delegation: " +
+                           auto_skip.dump());
+
             const std::string group_id = plan["groups"][0]["group_id"].get<std::string>();
             auto main_review = Parse(scout_provider.Execute(
                     "review_scout",

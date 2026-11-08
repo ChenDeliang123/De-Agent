@@ -150,6 +150,20 @@ ReviewScope BuildReviewScope(const ReviewPack& pack) {
     return scope;
 }
 
+std::size_t RecommendedSliceCount(std::size_t required_files,
+                                  std::size_t group_count,
+                                  const std::string& profile, int slice_total_max) {
+    if (slice_total_max <= 0 || profile == "fast" || required_files < 20) {
+        return 0;
+    }
+    std::size_t target = required_files <= 40 ? 2 : 4;
+    if (required_files > 80 && profile == "deep") {
+        target = static_cast<std::size_t>(slice_total_max);
+    }
+    target = std::min(target, static_cast<std::size_t>(slice_total_max));
+    return std::min(target, group_count);
+}
+
 std::vector<ReviewPlanGroup> BuildReviewPlanGroups(
         const std::vector<std::string>& required) {
     std::map<std::string, std::vector<std::string>> buckets;

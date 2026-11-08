@@ -857,6 +857,10 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
         }
         return std::nullopt;
     };
+    bool explicit_slice_total_max = false;
+    bool explicit_slice_timeout = false;
+    bool explicit_slice_rounds = false;
+    bool explicit_max_tool_rounds = false;
 
     std::istringstream input(content);
     std::string line;
@@ -945,24 +949,84 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
                 return std::nullopt;
             }
             config.max_tool_rounds = static_cast<int>(parsed);
-        } else if (key == "scout_max") {
+            explicit_max_tool_rounds = true;
+        } else if (key == "scout_max" || key == "slice_total_max") {
             long long parsed = 0;
-            if (!parse_number(key, value, 0, 4, &parsed)) {
+            if (!parse_number(key, value, 0, 8, &parsed)) {
                 return std::nullopt;
             }
-            config.scout_max = static_cast<int>(parsed);
-        } else if (key == "scout_timeout_s") {
+            if (key == "scout_max") {
+                config.scout_max = static_cast<int>(parsed);
+                config.used_legacy_scout_keys = true;
+                if (!explicit_slice_total_max) {
+                    config.slice_total_max = static_cast<int>(parsed);
+                    explicit_slice_total_max = true;
+                }
+            } else {
+                config.slice_total_max = static_cast<int>(parsed);
+                explicit_slice_total_max = true;
+            }
+        } else if (key == "scout_timeout_s" || key == "slice_timeout_s") {
             long long parsed = 0;
             if (!parse_number(key, value, 60, 1800, &parsed)) {
                 return std::nullopt;
             }
-            config.scout_timeout_s = static_cast<long>(parsed);
-        } else if (key == "scout_max_rounds") {
+            if (key == "scout_timeout_s") {
+                config.scout_timeout_s = static_cast<long>(parsed);
+                config.used_legacy_scout_keys = true;
+                if (!explicit_slice_timeout) {
+                    config.slice_timeout_s = static_cast<long>(parsed);
+                    explicit_slice_timeout = true;
+                }
+            } else {
+                config.slice_timeout_s = static_cast<long>(parsed);
+                explicit_slice_timeout = true;
+            }
+        } else if (key == "scout_max_rounds" || key == "slice_max_rounds") {
             long long parsed = 0;
             if (!parse_number(key, value, 8, 256, &parsed)) {
                 return std::nullopt;
             }
-            config.scout_max_rounds = static_cast<int>(parsed);
+            if (key == "scout_max_rounds") {
+                config.scout_max_rounds = static_cast<int>(parsed);
+                config.used_legacy_scout_keys = true;
+                if (!explicit_slice_rounds) {
+                    config.slice_max_rounds = static_cast<int>(parsed);
+                    explicit_slice_rounds = true;
+                }
+            } else {
+                config.slice_max_rounds = static_cast<int>(parsed);
+                explicit_slice_rounds = true;
+            }
+        } else if (key == "slice_concurrency") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 1, 8, &parsed)) {
+                return std::nullopt;
+            }
+            config.slice_concurrency = static_cast<int>(parsed);
+        } else if (key == "slice_max_files") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 1, 20, &parsed)) {
+                return std::nullopt;
+            }
+            config.slice_max_files = static_cast<int>(parsed);
+        } else if (key == "slice_result_max_chars") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 1024, 65536, &parsed)) {
+                return std::nullopt;
+            }
+            config.slice_result_max_chars = static_cast<int>(parsed);
+        } else if (key == "slice_max_findings") {
+            long long parsed = 0;
+            if (!parse_number(key, value, 1, 8, &parsed)) {
+                return std::nullopt;
+            }
+            config.slice_max_findings = static_cast<int>(parsed);
+        } else if (key == "slice_profile") {
+            if (value != "fast" && value != "balanced" && value != "deep") {
+                return bad("review.slice_profile must be fast, balanced, or deep");
+            }
+            config.slice_profile = value;
         } else if (key == "price_input_per_million_usd") {
             if (!parse_double(key, value, 0, 1000000,
                               &config.price_input_per_million_usd)) {
@@ -1016,6 +1080,13 @@ std::optional<ReviewConfig> ParseReviewConfig(const std::string& content,
             }
             config.supersede_policy = value;
         }
+    }
+    // profile 只提供默认值；显式 slice_total_max / max_tool_rounds 优先。
+    if (!explicit_slice_total_max) {
+        config.slice_total_max = config.slice_profile == "fast" ? 0 : 4;
+    }
+    if (!explicit_max_tool_rounds) {
+        config.max_tool_rounds = config.slice_profile == "fast" ? 128 : 192;
     }
     return config;
 }

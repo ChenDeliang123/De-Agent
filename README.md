@@ -630,7 +630,7 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
   覆盖账本（父级或对应 scout slice）。
 - `review_git`：只读 `diff/log/show/blame/rev-parse/ls-files/status`；拒绝 shell、
   checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
-- `review_scout`（默认开启，`[review] scout_max=1–4`）：
+- `review_scout`（默认开启，`[review] slice_total_max=1–8`）：
   `mode=main_review` + `pack` + `group_ids`（来自 `review_context(mode=plan)`）
   把分片作为**委派主审**派发；也兼容 `pack` + `tasks` 的手工分片，但文件必须在
   pack scope 内且互不重叠。scout 必须用 `review_read`/`review_context` 读
@@ -655,11 +655,16 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 `review_context(mode=delta)` 看两轮之间的文件变化，并沿用旧 finding id 标记
 `resolved` / `still_open` / `regressed`；新问题从旧 id 之后编号。
 
-受控分片（P1，默认 deep）：`[review] scout_max=4` 时 reviewer 看到 `review_scout`；
-默认 `4`。单个 scout 默认 `scout_timeout_s=600`、`scout_max_rounds=64`，避免沿用通用
-子 Agent 的 16 轮/120s 在 20 文件切片上提前耗尽。想降成本可设 `scout_max=0` 关闭或
-`1–3` 减并发。分片是委派主审：父 reviewer 只重读 finding 的引用证据，不再全量回读
-成功分片的文件；正式报告仍由父 reviewer 唯一撰写。
+受控分片（P2，默认 deep）：`[review] slice_total_max=4`、`slice_concurrency=4`、
+`slice_max_files=20`、`slice_max_rounds=96`、`slice_timeout_s=600`、
+`slice_result_max_chars=16384`、`slice_max_findings=8`。`slice_total_max` 是上限；
+后端按 pack 规模自适应选择：`<20` 文件不派发、`20–40` 最多 2 片、`40–80` 最多 4 片、
+`>80` 时 deep 最多 `slice_total_max`、balanced 仍最多 4 片、fast 关闭分片。
+`slice_profile=fast` 同时把父级 `max_tool_rounds` 默认降到 128。旧名
+`scout_max`/`scout_timeout_s`/`scout_max_rounds` 仍兼容并映射到 `slice_*`，
+启动日志会提示迁移；`slice_total_max=0`（或旧 `scout_max=0`）关闭工具。
+分片是委派主审：父 reviewer 只重读 finding 的引用证据，不再全量回读成功分片的文件；
+正式报告仍由父 reviewer 唯一撰写。
 
 审核用量（父级/scout 的 prompt、completion、cache_hit、请求数、墙钟）会写入
 state、manifest 与 `review_end` 日志；报告 frontmatter 同时记录覆盖统计与失败分片。

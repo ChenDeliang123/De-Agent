@@ -151,11 +151,21 @@ verify_mode = in_place
 ; 默认 deep：192 轮 + 4 个只读 scout；想降成本可改回 128/0。
 max_tool_rounds = 192
 review_timeout_s = 3600
-; 0 关闭 review_scout；1–4 为只读 scout 并发上限。
-scout_max = 4
-; 单个 scout 的独立预算，不能沿用通用子 Agent 的 16 轮/120s。
-scout_timeout_s = 600
-scout_max_rounds = 64
+; 分片容量与并发（P2）：slice_total_max 是上限，不是每次跑满；
+; 后端按 pack 规模/profile 自适应选择，默认 deep 最多 4 个。
+slice_profile = deep
+slice_total_max = 4
+slice_concurrency = 4
+slice_max_files = 20
+slice_max_rounds = 96
+slice_timeout_s = 600
+slice_result_max_chars = 16384
+slice_max_findings = 8
+; 旧名 scout_max / scout_timeout_s / scout_max_rounds 仍兼容并映射到上面；
+; 新配置建议直接使用 slice_*：
+; scout_max = 4
+; scout_timeout_s = 600
+; scout_max_rounds = 64
 ; 可选成本估算（美元/百万 token）。全为 0 时只记录 token/时延，不估算成本。
 price_input_per_million_usd = 0
 price_cached_input_per_million_usd = 0

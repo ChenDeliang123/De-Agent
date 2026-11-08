@@ -1120,9 +1120,9 @@ int main(int argc, char** argv) {
                       "review_test_write", "review_setup", "review_report"}) {
                     review_allow.push_back(name);
                 }
-                if (review_config.scout_max > 0 && agents_config.enabled) {
+                if (review_config.slice_total_max > 0 && agents_config.enabled) {
                     reviewer_composite->Add(aiagent::tools::MakeReviewScoutToolProvider(
-                            scout_runner, review_config.scout_max, review_config,
+                            scout_runner, review_config.slice_total_max, review_config,
                             [weak_tools]() {
                                 const auto tools = weak_tools.lock();
                                 return tools ? tools->CurrentPackPath() : std::string();
@@ -1148,15 +1148,16 @@ int main(int argc, char** argv) {
                 make_reviewer_provider_ex(&main_review_tools);
 
         std::shared_ptr<aiagent::agent::SubAgentManager> review_scout_manager;
-        if (review_config.enabled && review_config.scout_max > 0 && agents_config.enabled) {
+        if (review_config.enabled && review_config.slice_total_max > 0 &&
+            agents_config.enabled) {
             aiagent::AgentsConfig scout_config = agents_config;
             scout_config.enabled = true;
             scout_config.max_depth = 1;
-            scout_config.max_concurrent = review_config.scout_max;
+            scout_config.max_concurrent = review_config.slice_concurrency;
             scout_config.max_background = 0;
-            scout_config.default_timeout_s = review_config.scout_timeout_s;
-            scout_config.max_rounds = review_config.scout_max_rounds;
-            scout_config.result_max_chars = 8192;
+            scout_config.default_timeout_s = review_config.slice_timeout_s;
+            scout_config.max_rounds = review_config.slice_max_rounds;
+            scout_config.result_max_chars = review_config.slice_result_max_chars;
             scout_config.agents.clear();
             aiagent::AgentDefinitionConfig scout_definition;
             scout_definition.name = "review-scout";
@@ -1184,12 +1185,27 @@ int main(int argc, char** argv) {
                     *scout_manager_holder = review_scout_manager;
                     aiagent::DefaultLogger().Log(
                             aiagent::LogLevel::kInfo, "main",
-                            "review_scout enabled: max=" +
-                                    std::to_string(review_config.scout_max) +
+                            "review_scout enabled: total_max=" +
+                                    std::to_string(review_config.slice_total_max) +
+                                    " concurrency=" +
+                                    std::to_string(review_config.slice_concurrency) +
+                                    " profile=" + review_config.slice_profile +
                                     " rounds=" +
-                                    std::to_string(review_config.scout_max_rounds) +
+                                    std::to_string(review_config.slice_max_rounds) +
                                     " timeout_s=" +
-                                    std::to_string(review_config.scout_timeout_s));
+                                    std::to_string(review_config.slice_timeout_s) +
+                                    " result_max_chars=" +
+                                    std::to_string(
+                                            review_config.slice_result_max_chars) +
+                                    " max_files=" +
+                                    std::to_string(review_config.slice_max_files));
+                    if (review_config.used_legacy_scout_keys) {
+                        aiagent::DefaultLogger().Log(
+                                aiagent::LogLevel::kWarning, "main",
+                                "legacy [review] scout_max/scout_timeout_s/"
+                                "scout_max_rounds detected; migrate to "
+                                "slice_total_max/slice_timeout_s/slice_max_rounds");
+                    }
                 } else {
                     aiagent::DefaultLogger().Log(
                             aiagent::LogLevel::kWarning, "main",
