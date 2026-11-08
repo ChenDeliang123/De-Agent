@@ -22,6 +22,9 @@ struct ReviewFinding {
     std::string suggestion;
     std::string confidence;  // high / medium / low
     std::string status = "open";  // open / resolved / still_open / regressed
+    // parent 或 scout:<slice_id>；scout finding 必须由父级核验证据后才能入报告。
+    std::string origin = "parent";
+    bool parent_verified = true;
 };
 
 struct ReviewReportVerificationRef {
@@ -37,6 +40,7 @@ struct ReviewReportCoverage {
     int parent_verified_files = 0;
     int omitted_files = 0;
     int failed_slices = 0;
+    int parent_verified_findings = 0;
     bool has_usage = false;
     long long prompt_tokens = 0;
     long long completion_tokens = 0;

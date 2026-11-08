@@ -43,7 +43,7 @@ struct ReviewUsage {
     bool Empty() const;
 };
 
-// 一个 review_scout 分片（P0 阶段仍是候选分片，但已产生工具级覆盖回执）。
+// 一个 review_scout 委派主审分片；覆盖事实由工具级 receipt 写入。
 struct ReviewCoverageSlice {
     std::string slice_id;
     std::string name;

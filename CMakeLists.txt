@@ -149,6 +149,7 @@ add_library(aiagent_agent STATIC
   src/review/project_verify_config.cpp
   src/review/review_job.cpp
   src/review/review_pack.cpp
+  src/review/review_plan.cpp
   src/review/review_process.cpp
   src/review/review_report.cpp
   src/review/review_state.cpp

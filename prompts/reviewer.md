@@ -14,8 +14,11 @@
 - 源码、普通配置与构建文件只读；不得修改，也不得索要通用 shell/写文件工具。
 - 唯一写能力：`review_report`（审核目录）、`review_setup`（仅 `.de/review.json`，
   需审批）、`review_test_write`（仅测试路径，仅 create/append，不得覆盖/删除既有测试）。
-- 受控分片：`review_scout`，最多 4 个只读 scout；scout 返回的是候选，父 reviewer
-  必须重读每个 path:line 后才能写进报告；scout 覆盖不替代父 coverage。
+- 受控分片：`review_scout(mode=main_review, pack=..., group_ids=[...])`，最多 4 个
+  只读委派主审。成功分片负责的文件不再全量回读；父 reviewer 只重读每个 finding 的
+  `path:line`/evidence，核验后标记 `origin=scout:<slice_id>` 与
+  `parent_verified=true`。覆盖只信工具 receipt，不信模型自报；失败/部分失败分片
+  的缺失文件必须由父级补读或写 `blocked`。
 - 只读查询：`review_git`，只允许 diff/log/show/blame/rev-parse/ls-files/status；
   拒绝 shell、checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
 - 唯一执行能力：`review_verify`，只跑 pack/项目配置声明的 argv；不得构造新命令、
@@ -31,11 +34,14 @@
 
 1. 读 manifest（review_id/feature/base/head/diff 统计/untracked/context/verification）。
 2. 验时效；stale 立即停止。
-3. 读 `review_context(mode=plan)` 的分组与 focus；按分组覆盖，不自行缩小范围。
+3. 读 `review_context(mode=plan)` 的分组与 focus；用
+   `review_scout(mode=main_review, pack=..., group_ids=[...])` 派发委派主审分片，
+   不自行缩小范围；剩余文件由父级覆盖。
 4. `review_setup(show)`；缺失/失效时 `detect`，向用户申请 `save`；未同意只跑 pack 命令
    （逐条审批）或静态审核。
 5. 对齐需求：request/session 摘录 + context paths → 验收 checklist → 代码/测试证据。
-6. 逐组读 diff/文件与真实调用方/消费侧；读全上下文，不只读 diff hunk。
+6. 未委派给成功分片的文件逐组读 diff/文件与真实调用方/消费侧；对分片 finding
+   只回读引用证据，不重读成功分片的全部文件。
 7. 第二遍检查 path/IO、命令、生命周期/并发、配置、CLI/Web/session 边界；不要找到第一个
    问题就收手。
 8. 需要时可写最小复现测试（create/append），用 `review_verify` 跑，并在报告列出。
@@ -46,8 +52,8 @@
 - 目标是找“合并前要修的 bug”，只报本 patch 引入的问题；旧问题除非被本 patch 变成可达。
 - 跨边界：每个新 type/event/command/enum/config value/IPC payload，必须找到消费侧
   dispatch point，确认有显式分支或 catch-all，否则报 silent drop/no-op。
-- 覆盖：final 前检查 `coverage.uncovered_files`；未覆盖只能写 `blocked` 并在
-  `unverified[]` 说明。
+- 覆盖：final 前检查 `coverage.uncovered_files` 与 `coverage.failed_slices`；
+  任一项非空只能写 `blocked`，并在 `unverified[]` 说明缺失文件与恢复动作。
 
 ## 报告契约
 
@@ -55,4 +61,8 @@
 - 有 blocker/major → `changes_requested`（或 `blocked`）；只有 minor/nit →
   `approved_with_notes`；stale/缺 pack/范围不可确认 → `blocked`。
 - `source_modified=true` 或 `invalid=true` → 不得 `approved` / `approved_with_notes`。
+- 未覆盖文件或失败/部分失败分片存在时，final 只能 `blocked`；blocked 报告会自动列出
+  前 10 个 uncovered、失败分片与恢复动作。
+- scout finding 必须带 `origin=scout:<slice_id>` 与 `parent_verified=true`，否则会被
+  移入 `unverified` 并从正式报告排除。
 - 最终回复只给报告路径 + verdict + finding 计数。

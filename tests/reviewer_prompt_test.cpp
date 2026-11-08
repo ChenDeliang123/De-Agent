@@ -66,8 +66,10 @@ int main() {
                        std::string::npos,
                "review goal should be merge-gate focused");
         Expect(prompt.find("review_scout") != std::string::npos &&
-                       prompt.find("max 4 tasks") != std::string::npos,
-               "review_scout guidance should be present when the tool is active");
+                       prompt.find("mode=main_review") != std::string::npos &&
+                       prompt.find("max 4 slices") != std::string::npos &&
+                       prompt.find("parent_verified=true") != std::string::npos,
+               "review_scout guidance should describe delegated primary review");
         for (const auto& tool : tools) {
             Expect(prompt.find("- " + tool.name + ":") != std::string::npos,
                    "active tool should be listed: " + tool.name);

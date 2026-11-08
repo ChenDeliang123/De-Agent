@@ -379,6 +379,18 @@ ReviewReportResult ReviewReportWriter::Write(
                 return fail("finding " + finding.id + " has invalid status");
             }
         }
+        if (finding.origin.empty()) {
+            return fail("finding " + finding.id + " has empty origin");
+        }
+        if (finding.origin != "parent" &&
+            finding.origin.rfind("scout:", 0) != 0) {
+            return fail("finding " + finding.id +
+                        " origin must be parent or scout:<slice_id>");
+        }
+        if (finding.origin.rfind("scout:", 0) == 0 && !finding.parent_verified) {
+            return fail("finding " + finding.id +
+                        " is not parent-verified; move it to unverified");
+        }
         if ((finding.severity == "blocker" || finding.severity == "major") &&
             finding.status != "resolved") {
             has_blocker_or_major = true;
@@ -522,6 +534,8 @@ ReviewReportResult ReviewReportWriter::Write(
         report << "  parent_verified_files: " << input.coverage.parent_verified_files
                << '\n';
         report << "  omitted_files: " << input.coverage.omitted_files << '\n';
+        report << "  parent_verified_findings: "
+               << input.coverage.parent_verified_findings << '\n';
         report << "failed_slices: " << input.coverage.failed_slices << '\n';
     }
     if (input.coverage.has_usage) {
@@ -567,6 +581,11 @@ ReviewReportResult ReviewReportWriter::Write(
             if (!finding.confidence.empty()) {
                 report << "- 置信度：" << finding.confidence << '\n';
             }
+            report << "- 来源：" << finding.origin;
+            if (finding.origin.rfind("scout:", 0) == 0) {
+                report << "（父级已核验）";
+            }
+            report << '\n';
             report << "- 状态：" << (finding.status.empty() ? "open" : finding.status)
                    << "\n\n";
         }

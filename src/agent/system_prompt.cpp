@@ -371,13 +371,14 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
     }
     if (HasTool(tools, "review_scout")) {
         rules.Add(
-                "Use `review_scout` only for bounded, independent slices after "
-                "`review_context(mode=plan)`; max 4 tasks. Scouts are read-only candidates: "
-                "re-read every cited path:line yourself before a finding enters the report. "
-                "Scout coverage counts only when backed by review_read/review_context "
-                "receipts; generic read does not. If a task is partial/failed, its missing "
-                "assigned files remain uncovered and must be read by you or reported as "
-                "blocked.");
+                "Use `review_scout(mode=main_review, pack=..., group_ids=[...])` after "
+                "`review_context(mode=plan)`; max 4 slices. Scouts are delegated primary "
+                "reviewers, not candidate searchers: do not re-read every file assigned to "
+                "a successful slice. For every finding you include, re-read the cited "
+                "path:line and verify the quoted evidence; set origin=scout:<slice_id> and "
+                "parent_verified=true only after that check. Trust accepted coverage only "
+                "from tool receipts, not the slice's model-claimed coverage. If a slice is "
+                "partial/failed, cover its missing files yourself or write blocked.");
     }
     if (HasTool(tools, "review_git")) {
         rules.Add(
@@ -414,6 +415,9 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
              "- `review_verify` reported `source_modified=true` or `invalid=true` => not "
              "`approved`/`approved_with_notes`.\n"
              "- `approved` must not contain open `blocker`/`major` findings.\n"
+             "- Findings from a scout must carry `origin=scout:<slice_id>` and "
+             "`parent_verified=true`; unverified/unknown-origin findings are moved to "
+             "`unverified` and excluded from the formal report.\n"
              "Severities: blocker = build/test failure, main-path error, data loss, security "
              "issue, missing requirement; major = reproducible boundary error, API/config "
              "break, missing key test, leak/race; minor = concrete maintainability/diagnostic "

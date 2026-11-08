@@ -630,11 +630,14 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
   覆盖账本（父级或对应 scout slice）。
 - `review_git`：只读 `diff/log/show/blame/rev-parse/ls-files/status`；拒绝 shell、
   checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
-- `review_scout`（默认开启，`[review] scout_max=1–4`）：最多 4 个只读分片；
-  scout 必须用 `review_read`/`review_context` 读 assigned files 才会产生覆盖回执，
-  普通 `read` 只用于调用方辅助判断。分片失败/超时/截断/缺文件会进入
-  `failed_slices`，其未覆盖文件仍由父 reviewer 补读或写 blocked。父 reviewer
-  仍须重读 finding 的 `path:line` 证据。
+- `review_scout`（默认开启，`[review] scout_max=1–4`）：
+  `mode=main_review` + `pack` + `group_ids`（来自 `review_context(mode=plan)`）
+  把分片作为**委派主审**派发；也兼容 `pack` + `tasks` 的手工分片，但文件必须在
+  pack scope 内且互不重叠。scout 必须用 `review_read`/`review_context` 读
+  assigned files 才会产生覆盖回执，普通 `read` 只用于调用方辅助判断。
+  分片失败/超时/截断/缺文件会进入 `failed_slices`，其未覆盖文件仍由父 reviewer
+  补读；父 reviewer 不再重读成功分片的全部文件，只核验 finding 的
+  `path:line`/evidence。
 - `review_verify`：只执行 pack 或 `.de/review.json` 声明的 argv（无 shell），
   执行前后比较源码 digest；源码被测试改动会返回 `source_modified=true`。
 - `review_test_write`：只允许新建测试或向既有测试 append，不能覆盖/删除测试，
@@ -643,7 +646,10 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
   用户同意记录绑定配置 sha256，配置被改动后旧同意失效。
 - `review_report`：固定写到 `docs/review/<feature>-<YYYYMMDD-HHMM>.md`；
   final 报告必须有 verdict，且 finding/验证/测试文件与状态记录一致。
-  有未覆盖文件时 final 只能写 `blocked`，不能静默漏审。
+  有未覆盖文件、失败/部分失败 scout slice 时 final 只能写 `blocked`；
+  blocked 报告会自动列出 uncovered、失败 slice 与恢复动作。scout finding 必须带
+  `origin=scout:<slice_id>` 且 `parent_verified=true` 才能进入正式报告，否则自动
+  移入 `unverified`。
 
 第二轮（P1）：生成 pack 时带 `--previous-report <上一份报告>`，reviewer 用
 `review_context(mode=delta)` 看两轮之间的文件变化，并沿用旧 finding id 标记
@@ -652,7 +658,8 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 受控分片（P1，默认 deep）：`[review] scout_max=4` 时 reviewer 看到 `review_scout`；
 默认 `4`。单个 scout 默认 `scout_timeout_s=600`、`scout_max_rounds=64`，避免沿用通用
 子 Agent 的 16 轮/120s 在 20 文件切片上提前耗尽。想降成本可设 `scout_max=0` 关闭或
-`1–3` 减并发。scout 是只读候选来源，父 reviewer 必须重读证据后再写报告。
+`1–3` 减并发。分片是委派主审：父 reviewer 只重读 finding 的引用证据，不再全量回读
+成功分片的文件；正式报告仍由父 reviewer 唯一撰写。
 
 审核用量（父级/scout 的 prompt、completion、cache_hit、请求数、墙钟）会写入
 state、manifest 与 `review_end` 日志；报告 frontmatter 同时记录覆盖统计与失败分片。

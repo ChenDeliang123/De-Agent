@@ -79,7 +79,8 @@ int main() {
 
     auto result = provider.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array(
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array(
                                 {Task("review-tools", "src/review/review_tools.cpp"),
                                  Task("review-pack", "src/review/review_pack.cpp")})},
              {"max_findings_per_task", 4}},
@@ -132,7 +133,8 @@ int main() {
     tools::ReviewScoutToolProvider mixed(mixed_runner, 4);
     auto mixed_result = mixed.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array({Task("a", "a.cpp"), Task("b", "b.cpp")})}},
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({Task("a", "a.cpp"), Task("b", "b.cpp")})}},
             Context());
     Expect(mixed_result.ok, "mixed failures should still return structured tasks");
     auto mixed_json = Parse(mixed_result);
@@ -155,7 +157,9 @@ int main() {
     tools::ReviewScoutToolProvider all_failed(all_failed_runner, 4);
     auto all_failed_result = all_failed.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array({Task("a", "a.cpp")})}}, Context());
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({Task("a", "a.cpp")})}},
+            Context());
     Expect(all_failed_result.ok, "all failed tasks must still return tasks[]");
     auto all_failed_json = Parse(all_failed_result);
     Expect(all_failed_json["tasks"].size() == 1 &&
@@ -165,7 +169,8 @@ int main() {
 
     auto too_many = provider.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array({Task("a", "a.cpp"), Task("b", "b.cpp"),
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({Task("a", "a.cpp"), Task("b", "b.cpp"),
                                               Task("c", "c.cpp"), Task("d", "d.cpp"),
                                               Task("e", "e.cpp")})}},
             Context());
@@ -173,22 +178,51 @@ int main() {
            "too many scout tasks must be rejected");
     auto escape = provider.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array({Task("a", "../outside.cpp")})}},
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({Task("a", "../outside.cpp")})}},
             Context());
     Expect(!escape.ok && escape.error.find("repo-relative") != std::string::npos,
            "path escape must be rejected");
     auto bad_focus = provider.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array(
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array(
                                 {{{"name", "a"}, {"files", {"a.cpp"}}, {"focus", {"line\nbreak"}}}})}},
             Context());
     Expect(!bad_focus.ok, "newline in focus must be rejected");
     auto bad_findings = provider.Execute(
             "review_scout",
-            {{"tasks", nlohmann::json::array({Task("a", "a.cpp")})},
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({Task("a", "a.cpp")})},
              {"max_findings_per_task", 9}},
             Context());
     Expect(!bad_findings.ok, "max_findings_per_task should be bounded");
+    auto missing_pack = provider.Execute(
+            "review_scout",
+            {{"tasks", nlohmann::json::array({Task("a", "a.cpp")})}}, Context());
+    Expect(!missing_pack.ok &&
+                   missing_pack.error.find("requires pack") != std::string::npos,
+           "default main_review must require pack: " + missing_pack.error);
+    nlohmann::json too_many_files = Task("big", "f0.cpp");
+    too_many_files["files"] = nlohmann::json::array();
+    for (int i = 0; i < 21; ++i) {
+        too_many_files["files"].push_back("f" + std::to_string(i) + ".cpp");
+    }
+    auto oversized = provider.Execute(
+            "review_scout",
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({too_many_files})}},
+            Context());
+    Expect(!oversized.ok &&
+                   oversized.error.find("1–20") != std::string::npos,
+           "task with more than 20 files must be rejected: " + oversized.error);
+    auto candidate_groups = provider.Execute(
+            "review_scout",
+            {{"mode", "candidate"}, {"group_ids", {"review"}}}, Context());
+    Expect(!candidate_groups.ok &&
+                   candidate_groups.error.find("requires mode=main_review") !=
+                           std::string::npos,
+           "group_ids must be main_review only");
 
     tools::ReviewScoutToolProvider disabled(runner, 0);
     auto unavailable = disabled.Execute(

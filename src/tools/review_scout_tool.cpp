@@ -9,6 +9,7 @@
 #include "aiagent/platform/paths.hpp"
 #include "aiagent/review/project_verify_config.hpp"
 #include "aiagent/review/review_pack.hpp"
+#include "aiagent/review/review_plan.hpp"
 #include "aiagent/review/review_state.hpp"
 
 namespace aiagent::tools {
@@ -32,7 +33,7 @@ std::string BuildAssignment(const std::string& name,
                             int max_findings,
                             const std::string& pack_path) {
     std::ostringstream prompt;
-    prompt << "Complete a read-only review scout assignment.\n\n"
+    prompt << "Complete a delegated primary review assignment.\n\n"
            << "# Assignment\n" << name << "\n\n# Files\n";
     for (const auto& file : files) {
         prompt << "- " << file << "\n";
@@ -45,16 +46,23 @@ std::string BuildAssignment(const std::string& name,
         prompt << "\n# Review pack\n" << pack_path << "\n";
     }
     prompt << "\n# Rules\n"
-           << "- Read only. NEVER edit/write files, run commands, or use a shell.\n"
+           << "- You are the primary reviewer for this bounded slice. Review every "
+              "assigned file as if you were the only reviewer for it.\n"
+           << "- Read only. NEVER edit/write files, run commands, or use a shell. Do not "
+              "write the formal report; the parent owns it.\n"
            << "- Use review_read/review_context/review_git only for assigned files and "
               "their callers/consumers; generic read does not count as review coverage.\n"
            << "- For every assigned file, call review_read (full file) or "
               "review_context(mode=diff/untracked, pack=...) so the backend records a "
               "coverage receipt.\n"
-           << "- Each finding MUST have path:line, evidence, impact, trigger, suggestion, "
-              "severity (blocker/major/minor), and confidence (high/medium/low).\n"
+           << "- Return findings that are ready for the parent to verify, not vague "
+              "candidates. Each finding MUST have path:line, evidence, impact, trigger, "
+              "suggestion, severity (blocker/major/minor), and confidence "
+              "(high/medium/low).\n"
            << "- At most " << max_findings
            << " findings. If evidence is incomplete, put it in unverified instead.\n"
+           << "- If you cannot cover a file or your output is truncated, say so "
+              "explicitly; the parent will treat missing coverage as a failed slice.\n"
            << "- Return ONLY a JSON object with this shape:\n"
            << "{\"findings\":[{\"severity\":\"major\",\"file\":\"path\",\"line\":12,"
               "\"title\":\"...\",\"evidence\":\"...\",\"impact\":\"...\","
@@ -134,6 +142,12 @@ std::string PackRelative(const review::ReviewPack& pack, const std::string& abs_
                     aiagent::platform::FromUtf8(pack.repo_root)));
 }
 
+struct ScoutTaskSpec {
+    std::string name;
+    std::vector<std::string> files;
+    std::vector<std::string> focus;
+};
+
 std::vector<std::string> Normalized(const std::vector<std::string>& paths) {
     std::vector<std::string> out;
     std::set<std::string> seen;
@@ -160,22 +174,23 @@ std::vector<llm::ToolSpec> ReviewScoutToolProvider::ListTools() {
     llm::ToolSpec tool;
     tool.name = kReviewScoutToolName;
     tool.description =
-            "Fan out bounded read-only review slices to review-scout sub-agents. "
-            "Each scout sees only its files/focus, cannot write or execute commands, "
-            "and returns candidate findings plus tool-level coverage receipts. The "
-            "parent reviewer must still re-read cited evidence before including a "
-            "finding in the final report.";
+            "Fan out bounded read-only primary-review slices to review-scout "
+            "sub-agents. Each scout sees only its files/focus, reviews them as the "
+            "primary reviewer, cannot write or execute commands, and returns findings "
+            "ready for parent verification plus tool-level coverage receipts. The "
+            "parent remains the only formal report writer and must re-read cited "
+            "path:line evidence before including a finding.";
     tool.prompt_snippet =
-            "Delegate 1–4 bounded read-only review slices to review scouts";
+            "Delegate 1–4 bounded primary-review slices to review scouts";
     tool.prompt_guidelines = {
-            "Use review_scout only for large or independent slices; do not send the whole "
-            "branch in one task.",
+            "Use review_scout(mode=main_review, pack=..., group_ids=[...]) after "
+            "review_context(mode=plan); do not invent files outside the pack scope.",
+            "Scouts are delegated primary reviewers: do not re-read every file assigned "
+            "to a successful slice; only re-read each finding's cited path:line/evidence.",
             "Scouts must use review_read/review_context so their coverage is recorded by "
-            "the backend; generic read does not count as coverage.",
-            "After review_scout returns, re-read every cited path:line yourself. Scout "
-            "findings are candidates, not verified report entries.",
-            "If a scout task is partial/failed, its missing assigned files remain "
-            "uncovered and must be read by the parent or recorded as blocked."};
+            "the backend; model-claimed coverage is display-only.",
+            "If a slice is partial/failed, cover its missing files yourself or write a "
+            "blocked final report; failed slices cannot pass the final gate."};
     const nlohmann::json task_item = {
             {"type", "object"},
             {"properties",
@@ -190,14 +205,27 @@ std::vector<llm::ToolSpec> ReviewScoutToolProvider::ListTools() {
     tool.parameters = {
             {"type", "object"},
             {"properties",
-             {{"tasks", {{"type", "array"},
+             {{"pack", {{"type", "string"},
+                        {"description", "Review pack path; required for main_review."}}},
+              {"mode",
+               {{"type", "string"},
+                {"enum", {"main_review", "candidate"}},
+                {"description",
+                 "main_review = delegated primary slices (default); candidate = "
+                 "targeted parent checks only."}}},
+              {"group_ids",
+               {{"type", "array"},
+                {"items", {{"type", "string"}}},
+                {"description",
+                 "Group ids from review_context(mode=plan); main_review only."}}},
+              {"tasks", {{"type", "array"},
                          {"items", task_item},
                          {"description",
-                          "Bounded review slices (max " + std::to_string(max_tasks_) + ")."}}},
+                          "Manual bounded slices (max " + std::to_string(max_tasks_) +
+                                  "); main_review requires pack scope."}}},
               {"max_findings_per_task",
                {{"type", "integer"},
-                {"description", "1–8; default " + std::to_string(kMaxScoutFindings) + "."}}}}},
-            {"required", nlohmann::json::array({"tasks"})}};
+                {"description", "1–8; default " + std::to_string(kMaxScoutFindings) + "."}}}}}};
     return {tool};
 }
 
@@ -217,20 +245,6 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
         result.error = "permission denied: read is disabled";
         return result;
     }
-    if (!arguments.contains("tasks") || !arguments["tasks"].is_array()) {
-        result.error = "review_scout requires tasks[]";
-        return result;
-    }
-    const auto& items = arguments["tasks"];
-    if (items.empty()) {
-        result.error = "review_scout requires a non-empty tasks[] array";
-        return result;
-    }
-    if (static_cast<int>(items.size()) > max_tasks_) {
-        result.error = "too many review_scout tasks: " + std::to_string(items.size()) +
-                       " (max " + std::to_string(max_tasks_) + ")";
-        return result;
-    }
     int max_findings = kMaxScoutFindings;
     if (arguments.contains("max_findings_per_task")) {
         if (!arguments["max_findings_per_task"].is_number_integer()) {
@@ -244,91 +258,226 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
         }
     }
 
+    const std::string mode = arguments.value("mode", std::string("main_review"));
+    if (mode != "main_review" && mode != "candidate") {
+        result.error = "review_scout mode must be main_review or candidate";
+        return result;
+    }
+    const bool main_review = mode == "main_review";
+    const std::string pack_arg = arguments.value("pack", std::string());
+    if (main_review && pack_arg.empty()) {
+        result.error = "review_scout mode=main_review requires pack";
+        return result;
+    }
+
     std::string pack_path;
     review::ReviewPack pack;
     bool state_ready = false;
-    if (current_pack_path_) {
+    if (!pack_arg.empty()) {
+        const auto resolved = aiagent::platform::ResolveCanonicalPath(
+                aiagent::platform::FromUtf8(context.working_directory), pack_arg);
+        pack_path = aiagent::platform::ToUtf8(resolved);
+        std::string pack_error;
+        if (!review::LoadReviewPack(pack_path, &pack, &pack_error)) {
+            result.error = "cannot load review pack: " + pack_error;
+            return result;
+        }
+        state_ready = true;
+    } else if (current_pack_path_) {
         pack_path = current_pack_path_();
         if (!pack_path.empty()) {
             std::string pack_error;
             state_ready = review::LoadReviewPack(pack_path, &pack, &pack_error);
         }
     }
+    if (main_review && !state_ready) {
+        result.error = "cannot load review pack for mode=main_review";
+        return result;
+    }
+
+    review::ReviewScope scope;
+    if (main_review) {
+        scope = review::BuildReviewScope(pack);
+        review::ReviewState scope_state;
+        std::string state_error;
+        review::LoadReviewState(config_, pack.repo_root, pack.review_id, &scope_state,
+                                &state_error);
+        const auto owned =
+                review::ReviewerOwnedTestPaths(scope_state, pack.repo_root);
+        const review::ReviewStaleResult stale =
+                review::CheckReviewStale(pack, config_, pack.repo_root, owned);
+        if (stale.stale) {
+            result.error =
+                    "review pack is stale; refresh review_context(mode=manifest) "
+                    "before review_scout(mode=main_review)";
+            return result;
+        }
+    }
+
+    std::vector<ScoutTaskSpec> specs;
+    if (arguments.contains("group_ids")) {
+        if (!main_review) {
+            result.error = "review_scout group_ids requires mode=main_review";
+            return result;
+        }
+        if (arguments.contains("tasks")) {
+            result.error = "review_scout accepts either group_ids or tasks, not both";
+            return result;
+        }
+        if (!arguments["group_ids"].is_array() || arguments["group_ids"].empty()) {
+            result.error = "review_scout requires a non-empty group_ids array";
+            return result;
+        }
+        const std::vector<review::ReviewPlanGroup> groups =
+                review::BuildReviewPlanGroups(scope.required);
+        std::set<std::string> seen_groups;
+        for (const auto& value : arguments["group_ids"]) {
+            if (!value.is_string()) {
+                result.error = "review_scout group_ids must be strings";
+                return result;
+            }
+            const std::string group_id = value.get<std::string>();
+            if (!seen_groups.insert(group_id).second) {
+                result.error = "duplicate review_scout group id: " + group_id;
+                return result;
+            }
+            const review::ReviewPlanGroup* selected = nullptr;
+            for (const auto& group : groups) {
+                if (group.group_id == group_id) {
+                    selected = &group;
+                    break;
+                }
+            }
+            if (selected == nullptr) {
+                result.error = "unknown review_scout group id: " + group_id;
+                return result;
+            }
+            specs.push_back({selected->group_id, selected->files, selected->focus});
+        }
+    } else {
+        if (!arguments.contains("tasks") || !arguments["tasks"].is_array()) {
+            result.error = "review_scout requires group_ids[] or tasks[]";
+            return result;
+        }
+        const auto& items = arguments["tasks"];
+        if (items.empty()) {
+            result.error = "review_scout requires a non-empty tasks[] array";
+            return result;
+        }
+        std::set<std::string> required;
+        if (main_review) {
+            required.insert(scope.required.begin(), scope.required.end());
+        }
+        std::set<std::string> seen_files;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            if (!item.is_object()) {
+                result.error = "tasks[" + std::to_string(i) + "] must be an object";
+                return result;
+            }
+            const std::string task_name = item.value("name", std::string());
+            if (!ValidText(task_name, 64)) {
+                result.error = "tasks[" + std::to_string(i) + "].name must be 1–64 bytes";
+                return result;
+            }
+            if (!item.contains("files") || !item["files"].is_array()) {
+                result.error = "tasks[" + std::to_string(i) + "].files must be an array";
+                return result;
+            }
+            if (item["files"].empty() ||
+                static_cast<int>(item["files"].size()) > kMaxScoutFiles) {
+                result.error = "tasks[" + std::to_string(i) + "].files must have 1–" +
+                               std::to_string(kMaxScoutFiles) + " items";
+                return result;
+            }
+            std::vector<std::string> files;
+            for (const auto& value : item["files"]) {
+                if (!value.is_string()) {
+                    result.error = "review_scout files must be strings";
+                    return result;
+                }
+                const std::string file = value.get<std::string>();
+                if (!aiagent::review::IsSafeRelativePath(file, false)) {
+                    result.error = "review_scout file must be repo-relative: " + file;
+                    return result;
+                }
+                if (main_review) {
+                    const std::string normalized =
+                            review::NormalizeRelativePath(file);
+                    if (required.count(normalized) == 0) {
+                        result.error =
+                                "review_scout file is not in pack scope: " + file;
+                        return result;
+                    }
+                    if (!seen_files.insert(normalized).second) {
+                        result.error = "review_scout files overlap: " + file;
+                        return result;
+                    }
+                }
+                files.push_back(file);
+            }
+            if (!item.contains("focus") || !item["focus"].is_array() ||
+                item["focus"].empty() ||
+                static_cast<int>(item["focus"].size()) > kMaxScoutFocus) {
+                result.error = "tasks[" + std::to_string(i) + "].focus must have 1–" +
+                               std::to_string(kMaxScoutFocus) + " items";
+                return result;
+            }
+            std::vector<std::string> focus;
+            for (const auto& value : item["focus"]) {
+                if (!value.is_string()) {
+                    result.error = "review_scout focus must be strings";
+                    return result;
+                }
+                const std::string text = value.get<std::string>();
+                if (!ValidText(text, 256)) {
+                    result.error = "review_scout focus must be 1–256 bytes";
+                    return result;
+                }
+                focus.push_back(text);
+            }
+            specs.push_back({task_name, files, focus});
+        }
+    }
+
+    if (static_cast<int>(specs.size()) > max_tasks_) {
+        result.error = "too many review_scout slices: " + std::to_string(specs.size()) +
+                       " (max " + std::to_string(max_tasks_) + ")";
+        return result;
+    }
+    std::size_t total_files = 0;
+    for (const auto& spec : specs) {
+        total_files += spec.files.size();
+    }
+    if (main_review && total_files > scope.required.size()) {
+        result.error = "review_scout assigned more files than the pack scope";
+        return result;
+    }
 
     std::vector<agent::SubAgentRequest> requests;
     std::vector<std::string> names;
     std::vector<review::ReviewCoverageSlice> seeds;
     std::set<std::string> used_slice_ids;
-    for (std::size_t i = 0; i < items.size(); ++i) {
-        const auto& item = items[i];
-        if (!item.is_object()) {
-            result.error = "tasks[" + std::to_string(i) + "] must be an object";
-            return result;
-        }
-        const std::string task_name = item.value("name", std::string());
-        if (!ValidText(task_name, 64)) {
-            result.error = "tasks[" + std::to_string(i) + "].name must be 1–64 bytes";
-            return result;
-        }
-        if (!item.contains("files") || !item["files"].is_array()) {
-            result.error = "tasks[" + std::to_string(i) + "].files must be an array";
-            return result;
-        }
-        if (item["files"].empty() ||
-            static_cast<int>(item["files"].size()) > kMaxScoutFiles) {
-            result.error = "tasks[" + std::to_string(i) + "].files must have 1–" +
-                           std::to_string(kMaxScoutFiles) + " items";
-            return result;
-        }
-        std::vector<std::string> files;
-        for (const auto& value : item["files"]) {
-            if (!value.is_string()) {
-                result.error = "review_scout files must be strings";
-                return result;
-            }
-            const std::string file = value.get<std::string>();
-            if (!aiagent::review::IsSafeRelativePath(file, false)) {
-                result.error = "review_scout file must be repo-relative: " + file;
-                return result;
-            }
-            files.push_back(file);
-        }
-        if (!item.contains("focus") || !item["focus"].is_array() ||
-            item["focus"].empty() ||
-            static_cast<int>(item["focus"].size()) > kMaxScoutFocus) {
-            result.error = "tasks[" + std::to_string(i) + "].focus must have 1–" +
-                           std::to_string(kMaxScoutFocus) + " items";
-            return result;
-        }
-        std::vector<std::string> focus;
-        for (const auto& value : item["focus"]) {
-            if (!value.is_string()) {
-                result.error = "review_scout focus must be strings";
-                return result;
-            }
-            const std::string text = value.get<std::string>();
-            if (!ValidText(text, 256)) {
-                result.error = "review_scout focus must be 1–256 bytes";
-                return result;
-            }
-            focus.push_back(text);
-        }
-        std::string slice_id = task_name;
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const ScoutTaskSpec& spec = specs[i];
+        std::string slice_id = spec.name;
         if (!used_slice_ids.insert(slice_id).second) {
-            slice_id = task_name + "#" + std::to_string(i + 1);
+            slice_id = spec.name + "#" + std::to_string(i + 1);
             used_slice_ids.insert(slice_id);
         }
         review::ReviewCoverageSlice seed;
         seed.slice_id = slice_id;
-        seed.name = task_name;
+        seed.name = spec.name;
         seed.status = "running";
-        seed.assigned_files = Normalized(files);
+        seed.assigned_files = Normalized(spec.files);
         seed.started_at = review::LocalTimestampIso();
         seeds.push_back(seed);
 
         agent::SubAgentRequest request;
         request.agent_type = "review-scout";
-        request.prompt = BuildAssignment(task_name, files, focus, max_findings, pack_path);
+        request.prompt =
+                BuildAssignment(spec.name, spec.files, spec.focus, max_findings,
+                                pack_path);
         request.parent_session_id = context.session_id;
         request.working_directory = context.working_directory;
         request.parent_tool_call_id = context.tool_call_id;
@@ -337,7 +486,7 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
         request.emit = context.emit;
         request.should_cancel = context.should_cancel;
         requests.push_back(std::move(request));
-        names.push_back(task_name);
+        names.push_back(spec.name);
     }
 
     if (state_ready) {
@@ -414,11 +563,20 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
                 status = "partial";
             }
         }
+        task["mode"] = mode;
         task["status"] = status;
         task["ok"] = status == "done";
         task["partial"] = status != "done";
         task["covered_files"] = covered;
         task["missing_files"] = missing;
+        for (auto& finding : task["findings"]) {
+            if (!finding.contains("origin")) {
+                finding["origin"] = "scout:" + seeds[i].slice_id;
+            }
+            if (!finding.contains("parent_verified")) {
+                finding["parent_verified"] = false;
+            }
+        }
         if (!task.contains("error")) {
             task["error"] = std::string();
         }

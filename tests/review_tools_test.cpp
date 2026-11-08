@@ -1,12 +1,16 @@
+#include <algorithm>
 #include <ctime>
 #include <filesystem>
 #include <iostream>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "aiagent/review/project_verify_config.hpp"
 #include "aiagent/review/review_pack.hpp"
+#include "aiagent/review/review_plan.hpp"
 #include "aiagent/review/review_tools.hpp"
+#include "aiagent/tools/review_scout_tool.hpp"
 #include "aiagent/tools/tool_context.hpp"
 
 #include "review_test_support.hpp"
@@ -239,6 +243,23 @@ int main() {
         }
         Expect(failed_slice_file_listed,
                "failed slice details must list missing assigned files");
+        {
+            std::string cleanup_error;
+            Expect(review::UpdateReviewState(
+                           options.config, repo, created.review_id, created.pack_path,
+                           [](review::ReviewState* state) {
+                               auto& slices = state->coverage_ledger.slices;
+                               slices.erase(
+                                       std::remove_if(
+                                               slices.begin(), slices.end(),
+                                               [](const review::ReviewCoverageSlice& slice) {
+                                                   return slice.slice_id == "slice-failed";
+                                               }),
+                                       slices.end());
+                           },
+                           &cleanup_error),
+                   "remove seeded failed slice: " + cleanup_error);
+        }
 
         auto plan = Parse(reviewer.Execute(
                 "review_context", {{"pack", pack_path}, {"mode", "plan"}}, context));
@@ -252,6 +273,149 @@ int main() {
             }
         }
         Expect(plan_has_focus, "plan groups should include focus items");
+
+        // P1 main_review：group_ids 来自 plan、必须在 pack scope 内且互不重叠。
+        {
+            std::vector<aiagent::agent::SubAgentRequest> scout_requests;
+            auto scout_runner =
+                    [&scout_requests](
+                            const std::vector<aiagent::agent::SubAgentRequest>& requests,
+                            int) {
+                        scout_requests = requests;
+                        std::vector<aiagent::agent::SubAgentResult> results;
+                        for (std::size_t i = 0; i < requests.size(); ++i) {
+                            aiagent::agent::SubAgentResult result;
+                            result.ok = true;
+                            result.text =
+                                    "{\"findings\":[],\"unverified\":[],\"coverage\":{}}";
+                            results.push_back(std::move(result));
+                        }
+                        return results;
+                    };
+            aiagent::tools::ReviewScoutToolProvider scout_provider(
+                    scout_runner, 4, options.config,
+                    [pack_path]() { return pack_path; });
+            auto cleanup_slice = [&](const std::string& slice_id) {
+                std::string cleanup_error;
+                review::UpdateReviewState(
+                        options.config, repo, created.review_id, created.pack_path,
+                        [&slice_id](review::ReviewState* state) {
+                            auto& slices = state->coverage_ledger.slices;
+                            slices.erase(
+                                    std::remove_if(
+                                            slices.begin(), slices.end(),
+                                            [&slice_id](
+                                                    const review::ReviewCoverageSlice& slice) {
+                                                return slice.slice_id == slice_id;
+                                            }),
+                                    slices.end());
+                        },
+                        &cleanup_error);
+            };
+            const std::string group_id = plan["groups"][0]["group_id"].get<std::string>();
+            auto main_review = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"group_ids", nlohmann::json::array({group_id})}},
+                    context));
+            Expect(!main_review.contains("__error") &&
+                           main_review["tasks"].size() == 1 &&
+                           scout_requests.size() == 1 &&
+                           scout_requests[0].review_slice_id == group_id &&
+                           scout_requests[0].review_pack_path == pack_path &&
+                           scout_requests[0].prompt.find("delegated primary") !=
+                                   std::string::npos,
+                   "main_review group slice should be delegated: " +
+                           main_review.dump());
+            cleanup_slice(group_id);
+
+            auto unknown_group = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"group_ids", nlohmann::json::array({"no-such-group"})}},
+                    context));
+            Expect(unknown_group.contains("__error") &&
+                           unknown_group["__error"].get<std::string>().find("unknown") !=
+                                   std::string::npos,
+                   "unknown group id must be rejected: " + unknown_group.dump());
+            auto duplicate_group = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"group_ids", nlohmann::json::array({group_id, group_id})}},
+                    context));
+            Expect(duplicate_group.contains("__error") &&
+                           duplicate_group["__error"].get<std::string>().find("duplicate") !=
+                                   std::string::npos,
+                   "duplicate group id must be rejected");
+            auto both = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"group_ids", nlohmann::json::array({group_id})},
+                     {"tasks", nlohmann::json::array(
+                                       {{{"name", "x"},
+                                         {"files", {"src/foo.cpp"}},
+                                         {"focus", {"x"}}}})}},
+                    context));
+            Expect(both.contains("__error") &&
+                           both["__error"].get<std::string>().find("either") !=
+                                   std::string::npos,
+                   "group_ids and tasks must be mutually exclusive");
+
+            const std::string first_file =
+                    plan["groups"][0]["files"][0]["path"].get<std::string>();
+            auto out_of_scope = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"tasks", nlohmann::json::array(
+                                       {{{"name", "x"},
+                                         {"files", {"src/not-in-pack.cpp"}},
+                                         {"focus", {"x"}}}})}},
+                    context));
+            Expect(out_of_scope.contains("__error") &&
+                           out_of_scope["__error"].get<std::string>().find(
+                                   "not in pack scope") != std::string::npos,
+                   "out-of-scope task file must be rejected: " +
+                           out_of_scope.dump());
+            auto overlap = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"tasks", nlohmann::json::array(
+                                       {{{"name", "a"},
+                                         {"files", {first_file}},
+                                         {"focus", {"x"}}},
+                                        {{"name", "b"},
+                                         {"files", {first_file}},
+                                         {"focus", {"x"}}}})}},
+                    context));
+            Expect(overlap.contains("__error") &&
+                           overlap["__error"].get<std::string>().find("overlap") !=
+                                   std::string::npos,
+                   "overlapping task files must be rejected");
+
+            scout_requests.clear();
+            auto task_slice = Parse(scout_provider.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"tasks", nlohmann::json::array(
+                                       {{{"name", "tasks-valid"},
+                                         {"files", {first_file}},
+                                         {"focus", {"x"}}}})}},
+                    context));
+            Expect(!task_slice.contains("__error") &&
+                           scout_requests.size() == 1 &&
+                           scout_requests[0].prompt.find(first_file) !=
+                                   std::string::npos,
+                   "in-scope manual task should run: " + task_slice.dump());
+            cleanup_slice("tasks-valid");
+        }
+
         auto incomplete = reviewer.Execute(
                 "review_report",
                 {{"pack", pack_path},
@@ -457,13 +621,27 @@ int main() {
                 context);
         Expect(project_verified.ok, "project verification executed: " + project_verified.error);
 
+        nlohmann::json scout_finding = finding;
+        scout_finding["id"] = "R2";
+        scout_finding["severity"] = "minor";
+        scout_finding["title"] = "scout-reported minor issue";
+        scout_finding["origin"] = "scout:slice-manual";
+        scout_finding["parent_verified"] = true;
+        nlohmann::json unverified_scout = finding;
+        unverified_scout["id"] = "R3";
+        unverified_scout["severity"] = "minor";
+        unverified_scout["title"] = "scout finding without parent verification";
+        unverified_scout["origin"] = "scout:slice-manual";
+        unverified_scout["parent_verified"] = false;
+
         auto final = reviewer.Execute(
                 "review_report",
                 {{"pack", pack_path},
                  {"status", "final"},
                  {"verdict", "changes_requested"},
                  {"summary", "one major issue"},
-                 {"findings", nlohmann::json::array({finding})},
+                 {"findings",
+                  nlohmann::json::array({finding, scout_finding, unverified_scout})},
                  {"checked", {"manifest", "diff"}},
                  {"verification", {"pack:v1", "project:test"}},
                  {"test_files", {"tests/review_owned_test.cpp"}},
@@ -477,18 +655,89 @@ int main() {
         Expect(report.find("verdict: changes_requested") != std::string::npos,
                "report frontmatter verdict");
         Expect(report.find("### R1 [major]") != std::string::npos, "report finding");
+        Expect(report.find("### R2 [minor]") != std::string::npos &&
+                       report.find("来源：scout:slice-manual（父级已核验）") !=
+                               std::string::npos,
+               "verified scout finding should retain origin");
+        Expect(report.find("### R3") == std::string::npos &&
+                       report.find("R3 from scout:slice-manual is not "
+                                   "parent-verified") != std::string::npos,
+               "unverified scout finding must move to unverified");
+        Expect(report.find("parent_verified_findings: 2") != std::string::npos,
+               "parent_verified_findings should count only accepted findings");
         Expect(report.find("pack:v1") != std::string::npos, "report verification");
         Expect(report.find("tests/review_owned_test.cpp") != std::string::npos,
                "report test files");
         Expect(report.find("coverage:\n") != std::string::npos &&
                        report.find("required_files:") != std::string::npos &&
                        report.find("scout_covered_files:") != std::string::npos &&
-                       report.find("failed_slices: 1") != std::string::npos,
-               "report should include coverage/failed slice frontmatter");
+                       report.find("failed_slices: 0") != std::string::npos,
+               "report should include coverage frontmatter");
         Expect(report.find("usage:\n") != std::string::npos &&
                        report.find("prompt_tokens: 123") != std::string::npos &&
                        report.find("estimated_cost_usd") == std::string::npos,
                "report should include usage without fabricating cost");
+
+        // P1 final gate：失败/部分失败 slice 只能写 blocked，并自动列出恢复动作。
+        {
+            std::string seed_error;
+            Expect(review::UpdateReviewState(
+                           options.config, repo, created.review_id,
+                           created.pack_path,
+                           [](review::ReviewState* state) {
+                               review::ReviewCoverageSlice slice;
+                               slice.slice_id = "gate-failed";
+                               slice.name = "gate-failed";
+                               slice.status = "timed_out";
+                               slice.assigned_files = {"CMakeLists.txt"};
+                               slice.error = "timeout";
+                               state->coverage_ledger.slices.push_back(std::move(slice));
+                           },
+                           &seed_error),
+                   "seed gate failed slice: " + seed_error);
+            auto gate_reject = reviewer.Execute(
+                    "review_report",
+                    {{"pack", pack_path},
+                     {"status", "final"},
+                     {"verdict", "changes_requested"},
+                     {"summary", "coverage complete but a slice failed"}},
+                    context);
+            Expect(!gate_reject.ok &&
+                           gate_reject.error.find("require") != std::string::npos,
+                   "failed slice must reject non-blocked final: " +
+                           gate_reject.error);
+            auto gate_blocked = reviewer.Execute(
+                    "review_report",
+                    {{"pack", pack_path},
+                     {"status", "final"},
+                     {"verdict", "blocked"},
+                     {"summary", "slice failed"},
+                     {"unverified", {"review_scout timed out"}}},
+                    context);
+            Expect(gate_blocked.ok, "failed slice blocked report: " + gate_blocked.error);
+            const std::string blocked_report = review_test_support::ReadFile(
+                    repo + "/" + Parse(gate_blocked)["path"].get<std::string>());
+            Expect(blocked_report.find("gate-failed") != std::string::npos &&
+                           blocked_report.find("recovery:") != std::string::npos &&
+                           blocked_report.find("failed_slices: 1") != std::string::npos,
+                   "blocked report must list failed slice and recovery action");
+            std::string cleanup_error;
+            Expect(review::UpdateReviewState(
+                           options.config, repo, created.review_id,
+                           created.pack_path,
+                           [](review::ReviewState* state) {
+                               auto& slices = state->coverage_ledger.slices;
+                               slices.erase(
+                                       std::remove_if(
+                                               slices.begin(), slices.end(),
+                                               [](const review::ReviewCoverageSlice& slice) {
+                                                   return slice.slice_id == "gate-failed";
+                                               }),
+                                       slices.end());
+                           },
+                           &cleanup_error),
+                   "remove gate failed slice: " + cleanup_error);
+        }
 
         // reviewer-owned 测试不触发 stale；源码变更触发 stale；stale 只能 blocked。
         auto fresh = Parse(reviewer.Execute(

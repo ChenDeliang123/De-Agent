@@ -18,6 +18,7 @@
 #include "aiagent/platform/paths.hpp"
 #include "aiagent/platform/text_file.hpp"
 #include "aiagent/review/project_verify_config.hpp"
+#include "aiagent/review/review_plan.hpp"
 #include "aiagent/review/review_process.hpp"
 #include "aiagent/review/review_report.hpp"
 #include "aiagent/review/review_state.hpp"
@@ -70,6 +71,7 @@ struct FailedSliceSummary {
     std::string name;
     std::string status;
     std::string error;
+    std::string last_receipt_at;
     std::vector<std::string> files;  // 仍未被任何 receipt 覆盖的 assigned files
 };
 
@@ -87,42 +89,20 @@ std::string NormalizeReviewPath(const std::string& path) {
     return NormalizeRelativePath(path);
 }
 
+std::string LowerAscii(std::string value) {
+    for (char& c : value) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return value;
+}
+
 ReviewCoverageSummary BuildReviewCoverage(const ReviewPack& pack,
                                           const ReviewState& state) {
-    std::set<std::string> required;
-    std::set<std::string> omitted;
-    for (const auto& file : pack.omitted) {
-        const std::string path = NormalizeReviewPath(file.path);
-        if (!path.empty()) {
-            omitted.insert(path);
-        }
-    }
-    for (const auto& file : pack.changed_files) {
-        const std::string path = NormalizeReviewPath(file.path);
-        if (path.empty()) {
-            continue;
-        }
-        if (file.binary) {
-            omitted.insert(path);
-            continue;
-        }
-        if (omitted.count(path) == 0) {
-            required.insert(path);
-        }
-    }
-    for (const auto& file : pack.untracked) {
-        const std::string path = NormalizeReviewPath(file.path);
-        if (path.empty()) {
-            continue;
-        }
-        if (file.redacted || !file.reason.empty()) {
-            omitted.insert(path);
-            continue;
-        }
-        if (omitted.count(path) == 0) {
-            required.insert(path);
-        }
-    }
+    const ReviewScope scope = BuildReviewScope(pack);
+    const std::set<std::string> required(scope.required.begin(), scope.required.end());
+    const std::set<std::string> omitted(scope.omitted.begin(), scope.omitted.end());
 
     std::set<std::string> parent;
     for (const auto& path : ParentVerifiedFiles(state)) {
@@ -172,6 +152,9 @@ ReviewCoverageSummary BuildReviewCoverage(const ReviewPack& pack,
         summary.name = slice.name;
         summary.status = slice.status;
         summary.error = slice.error;
+        summary.last_receipt_at = slice.finished_at.empty()
+                                          ? state.coverage_ledger.updated_at
+                                          : slice.finished_at;
         for (const auto& path : slice.assigned_files) {
             const std::string normalized = NormalizeReviewPath(path);
             if (!normalized.empty() && covered.count(normalized) == 0) {
@@ -181,156 +164,6 @@ ReviewCoverageSummary BuildReviewCoverage(const ReviewPack& pack,
         coverage.failed_slices.push_back(std::move(summary));
     }
     return coverage;
-}
-
-std::vector<std::string> SplitReviewPath(const std::string& path) {
-    std::vector<std::string> parts;
-    std::string current;
-    for (const char c : path) {
-        if (c == '/') {
-            if (!current.empty()) {
-                parts.push_back(current);
-                current.clear();
-            }
-        } else {
-            current.push_back(c);
-        }
-    }
-    if (!current.empty()) {
-        parts.push_back(current);
-    }
-    return parts;
-}
-
-std::string ReviewGroupKey(const std::string& path) {
-    const auto parts = SplitReviewPath(path);
-    if (parts.empty()) {
-        return "other";
-    }
-    if (parts[0] == "src" && parts.size() > 1) {
-        return parts[1];
-    }
-    if (parts[0] == "include" && parts.size() > 2 && parts[1] == "aiagent") {
-        return parts[2];
-    }
-    if (parts[0] == "tests" && parts.size() > 1) {
-        const std::string& second = parts[1];
-        if (second.rfind("review", 0) == 0) {
-            return "review";
-        }
-        if (second.rfind("skill", 0) == 0) {
-            return "skills";
-        }
-        if (second.rfind("web", 0) == 0) {
-            return "web";
-        }
-        return "tests";
-    }
-    if (parts[0] == "cli") {
-        return "cli";
-    }
-    if (parts[0] == "docs" || parts[0] == "conf") {
-        return "docs-config";
-    }
-    if (parts[0] == "vendor") {
-        return "vendor";
-    }
-    if (parts[0] == "CMakeLists.txt" || parts[0] == "README.md" ||
-        parts[0] == "AGENTS.md" || parts[0] == ".gitignore") {
-        return "build-docs";
-    }
-    return "other";
-}
-
-std::vector<std::string> ReviewGroupFocus(const std::string& group) {
-    if (group == "review") {
-        return {"producer->consumer dispatch", "path traversal/symlink/TOCTOU",
-                "argv/shell/allowlist", "state/report atomic write",
-                "lifetime/cancel/join"};
-    }
-    if (group == "skills") {
-        return {"discovery precedence", "frontmatter/limits", "path/symlink",
-                "cache/TTL", "prompt injection"};
-    }
-    if (group == "agent") {
-        return {"prompt assembly", "lifetime/concurrency", "tool visibility",
-                "permissions", "UTF-8/truncation"};
-    }
-    if (group == "web") {
-        return {"auth/role", "route/consumer", "background lifetime", "path/JSON",
-                "error mapping"};
-    }
-    if (group == "cli") {
-        return {"argv/shell", "path normalization", "review dir", "job state",
-                "Windows quoting"};
-    }
-    if (group == "tools") {
-        return {"path sandbox", "command allowlist", "output caps", "cache",
-                "error paths"};
-    }
-    if (group == "tests") {
-        return {"assert behavior", "negative paths", "fixtures", "platform"};
-    }
-    if (group == "docs-config") {
-        return {"config consumed", "defaults", "docs/impl consistency", "examples"};
-    }
-    if (group == "build-docs") {
-        return {"build/test wiring", "config", "docs"};
-    }
-    return {"contracts/callers", "boundaries/UTF-8", "lifetime/concurrency",
-            "error paths"};
-}
-
-struct ReviewPlanGroup {
-    std::string group_id;
-    std::vector<std::string> files;
-    std::vector<std::string> focus;
-};
-
-std::vector<ReviewPlanGroup> BuildReviewPlanGroups(
-        const std::vector<std::string>& required) {
-    std::map<std::string, std::vector<std::string>> buckets;
-    for (const auto& path : required) {
-        buckets[ReviewGroupKey(path)].push_back(path);
-    }
-    while (buckets.size() > 8) {
-        auto smallest = buckets.end();
-        for (auto it = buckets.begin(); it != buckets.end(); ++it) {
-            if (it->first == "other") {
-                continue;
-            }
-            if (smallest == buckets.end() || it->second.size() < smallest->second.size()) {
-                smallest = it;
-            }
-        }
-        if (smallest == buckets.end()) {
-            break;
-        }
-        auto& other = buckets["other"];
-        other.insert(other.end(), smallest->second.begin(), smallest->second.end());
-        buckets.erase(smallest);
-    }
-
-    std::vector<ReviewPlanGroup> groups;
-    for (auto& [key, files] : buckets) {
-        std::sort(files.begin(), files.end());
-        for (std::size_t start = 0; start < files.size(); start += 20) {
-            ReviewPlanGroup group;
-            group.group_id = key;
-            if (files.size() > 20) {
-                group.group_id += "#" + std::to_string(start / 20 + 1);
-            }
-            const std::size_t end = std::min<std::size_t>(files.size(), start + 20);
-            group.files.assign(files.begin() + start, files.begin() + end);
-            group.focus = ReviewGroupFocus(key);
-            groups.push_back(std::move(group));
-        }
-    }
-    std::sort(groups.begin(), groups.end(),
-              [](const ReviewPlanGroup& a, const ReviewPlanGroup& b) {
-                  return a.group_id < b.group_id;
-              });
-    return groups;
 }
 
 bool MarkReviewCovered(ReviewState* state, const std::string& slice_id,
@@ -1266,6 +1099,7 @@ tools::ToolExecutionResult ReviewTools::Context(const nlohmann::json& arguments,
                                {"name", failed.name},
                                {"status", failed.status},
                                {"error", failed.error},
+                               {"last_receipt_at", failed.last_receipt_at},
                                {"files", failed.files}});
         }
         return nlohmann::json{
@@ -2506,6 +2340,9 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
             finding.suggestion = item.value("suggestion", std::string());
             finding.confidence = item.value("confidence", std::string());
             finding.status = item.value("status", std::string("open"));
+            finding.origin = item.value("origin", std::string("parent"));
+            finding.parent_verified =
+                    item.value("parent_verified", finding.origin == "parent");
             input.findings.push_back(std::move(finding));
         }
     }
@@ -2517,6 +2354,52 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
             }
             input.verification.push_back(*ref);
         }
+    }
+
+    // 分片 finding 只能以“父级核验过”的形态进入正式报告；未核验/未知 slice/重复
+    // 一律移入 unverified，不能让模型自报直接污染报告。
+    {
+        std::vector<ReviewFinding> kept;
+        std::set<std::string> seen;
+        for (auto& finding : input.findings) {
+            if (finding.origin.empty()) {
+                finding.origin = "parent";
+            }
+            if (finding.origin == "parent") {
+                finding.parent_verified = true;
+            } else if (finding.origin.rfind("scout:", 0) == 0) {
+                const std::string slice_id = finding.origin.substr(6);
+                if (FindCoverageSlice(state.coverage_ledger, slice_id) == nullptr) {
+                    input.unverified.push_back(
+                            "finding " + finding.id + " references unknown scout slice " +
+                            slice_id + "; excluded");
+                    continue;
+                }
+                if (!finding.parent_verified) {
+                    input.unverified.push_back(
+                            "finding " + finding.id + " from " + finding.origin +
+                            " is not parent-verified; excluded");
+                    continue;
+                }
+            } else {
+                input.unverified.push_back(
+                        "finding " + finding.id + " has invalid origin " +
+                        finding.origin + "; excluded");
+                continue;
+            }
+            const std::string key =
+                    NormalizeReviewPath(finding.file) + ":" +
+                    std::to_string(finding.line) + "|" +
+                    LowerAscii(finding.title);
+            if (!seen.insert(key).second) {
+                input.unverified.push_back(
+                        "duplicate finding " + finding.id + " at " + finding.file +
+                        ":" + std::to_string(finding.line) + "; excluded");
+                continue;
+            }
+            kept.push_back(std::move(finding));
+        }
+        input.findings = std::move(kept);
     }
 
     if (timed_out) {
@@ -2532,13 +2415,16 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     }
 
     const ReviewCoverageSummary coverage = BuildReviewCoverage(pack, state);
-    if (input.status == "final" && !coverage.failed_slices.empty()) {
+    if (input.status == "final") {
         for (const auto& failed : coverage.failed_slices) {
             std::ostringstream note;
             note << "review_scout slice " << failed.slice_id << " status="
                  << failed.status;
             if (!failed.error.empty()) {
                 note << " error=" << failed.error;
+            }
+            if (!failed.last_receipt_at.empty()) {
+                note << " last_receipt_at=" << failed.last_receipt_at;
             }
             if (!failed.files.empty()) {
                 note << " missing_assigned=";
@@ -2551,28 +2437,57 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
             }
             input.unverified.push_back(note.str());
         }
+        if (input.verdict == "blocked") {
+            const std::size_t shown =
+                    std::min<std::size_t>(coverage.uncovered.size(), 10);
+            for (std::size_t i = 0; i < shown; ++i) {
+                input.unverified.push_back("uncovered: " + coverage.uncovered[i]);
+            }
+            input.unverified.push_back(
+                    "recovery: read uncovered files with review_read/"
+                    "review_context or rerun review_scout, then write a new final "
+                    "report");
+        }
     }
-    if (input.status == "final" && input.verdict != "blocked" &&
-        !coverage.uncovered.empty()) {
-        std::ostringstream message;
-        message << "review coverage incomplete: " << coverage.uncovered.size()
-                << " file(s) not covered; read them with review_read or "
-                   "review_context(diff/untracked), or write verdict=blocked. First: ";
-        const std::size_t shown = std::min<std::size_t>(coverage.uncovered.size(), 10);
-        for (std::size_t i = 0; i < shown; ++i) {
-            if (i > 0) {
-                message << ", ";
+    if (input.status == "final" && input.verdict != "blocked") {
+        if (!coverage.uncovered.empty()) {
+            std::ostringstream message;
+            message << "review coverage incomplete: " << coverage.uncovered.size()
+                    << " file(s) not covered; read them with review_read or "
+                       "review_context(diff/untracked), or write verdict=blocked. First: ";
+            const std::size_t shown =
+                    std::min<std::size_t>(coverage.uncovered.size(), 10);
+            for (std::size_t i = 0; i < shown; ++i) {
+                if (i > 0) {
+                    message << ", ";
+                }
+                message << coverage.uncovered[i];
             }
-            message << coverage.uncovered[i];
-        }
-        for (const auto& failed : coverage.failed_slices) {
-            if (!failed.files.empty()) {
-                message << " [failed slice " << failed.slice_id
-                        << " missing assigned files]";
-                break;
+            for (const auto& failed : coverage.failed_slices) {
+                if (!failed.files.empty()) {
+                    message << " [failed slice " << failed.slice_id
+                            << " missing assigned files]";
+                    break;
+                }
             }
+            return Fail(message.str());
         }
-        return Fail(message.str());
+        if (!coverage.failed_slices.empty()) {
+            std::ostringstream message;
+            message << "review_scout failed or incomplete slice(s) require "
+                       "verdict=blocked: ";
+            const std::size_t shown =
+                    std::min<std::size_t>(coverage.failed_slices.size(), 10);
+            for (std::size_t i = 0; i < shown; ++i) {
+                if (i > 0) {
+                    message << ", ";
+                }
+                message << coverage.failed_slices[i].slice_id << "("
+                        << coverage.failed_slices[i].status << ")";
+            }
+            message << "; cover missing assigned files or write a blocked report.";
+            return Fail(message.str());
+        }
     }
     input.coverage.required_files = static_cast<int>(coverage.required.size());
     input.coverage.covered_files = static_cast<int>(coverage.covered.size());
@@ -2583,6 +2498,11 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
     input.coverage.omitted_files = static_cast<int>(coverage.omitted.size());
     input.coverage.failed_slices =
             static_cast<int>(coverage.failed_slices.size());
+    for (const auto& finding : input.findings) {
+        if (finding.parent_verified) {
+            ++input.coverage.parent_verified_findings;
+        }
+    }
     const ReviewUsage total_usage = TotalUsage(state);
     input.coverage.has_usage =
             state.has_run_usage || !ScoutUsage(state.coverage_ledger).Empty();
@@ -2631,6 +2551,8 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
             << " uncovered=" << coverage.uncovered.size()
             << " omitted=" << coverage.omitted.size()
             << " failed_slices=" << coverage.failed_slices.size()
+            << " parent_verified_findings="
+            << input.coverage.parent_verified_findings
             << " prompt_tokens=" << total_usage.prompt_tokens
             << " completion_tokens=" << total_usage.completion_tokens
             << " cache_hit_tokens=" << total_usage.cache_hit_tokens
@@ -2665,7 +2587,9 @@ tools::ToolExecutionResult ReviewTools::Report(const nlohmann::json& arguments,
                  {"covered_files", coverage.covered.size()},
                  {"uncovered_files", coverage.uncovered.size()},
                  {"omitted_files", coverage.omitted.size()},
-                 {"failed_slices", coverage.failed_slices.size()}}},
+                 {"failed_slices", coverage.failed_slices.size()},
+                 {"parent_verified_findings",
+                  input.coverage.parent_verified_findings}}},
                {"usage",
                 {{"prompt_tokens", total_usage.prompt_tokens},
                  {"completion_tokens", total_usage.completion_tokens},
