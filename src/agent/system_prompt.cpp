@@ -371,8 +371,11 @@ std::string BuildReviewerSystemPrompt(const std::vector<llm::ToolSpec>& tools) {
     }
     if (HasTool(tools, "review_scout")) {
         rules.Add(
-                "Use `review_scout(mode=main_review, pack=..., group_ids=[...])` after "
-                "`review_context(mode=plan)`; max 4 slices. Scouts are delegated primary "
+                "Use `review_scout(mode=main_review, pack=...)` after "
+                "`review_context(mode=plan)`; omit group_ids to let the backend adaptively "
+                "select up to the plan budget's slice_total_max groups, and pass explicit "
+                "group_ids only for targeted supplements. Do not arbitrarily reduce the "
+                "slice count when the pack is large. Scouts are delegated primary "
                 "reviewers, not candidate searchers: do not re-read every file assigned to "
                 "a successful slice. For every finding you include, re-read the cited "
                 "path:line and verify the quoted evidence; set origin=scout:<slice_id> and "

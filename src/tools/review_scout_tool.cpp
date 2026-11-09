@@ -6,6 +6,7 @@
 #include <set>
 #include <sstream>
 
+#include "aiagent/log.hpp"
 #include "aiagent/platform/paths.hpp"
 #include "aiagent/review/project_verify_config.hpp"
 #include "aiagent/review/review_pack.hpp"
@@ -71,6 +72,49 @@ std::string BuildAssignment(const std::string& name,
     return prompt.str();
 }
 
+std::string ExtractJsonObject(std::string text) {
+    const auto trim = [](std::string& value) {
+        while (!value.empty() &&
+               (value.front() == ' ' || value.front() == '\t' ||
+                value.front() == '\r' || value.front() == '\n')) {
+            value.erase(value.begin());
+        }
+        while (!value.empty() &&
+               (value.back() == ' ' || value.back() == '\t' ||
+                value.back() == '\r' || value.back() == '\n')) {
+            value.pop_back();
+        }
+    };
+    trim(text);
+    if (text.rfind("```", 0) == 0) {
+        const std::size_t first_newline = text.find('\n');
+        if (first_newline != std::string::npos) {
+            text.erase(0, first_newline + 1);
+        }
+        const std::size_t fence = text.rfind("```");
+        if (fence != std::string::npos) {
+            text.erase(fence);
+        }
+        trim(text);
+    }
+    if (!text.empty() && text.front() == '{') {
+        return text;
+    }
+    const std::size_t start = text.find('{');
+    const std::size_t end = text.rfind('}');
+    if (start != std::string::npos && end != std::string::npos && end > start) {
+        return text.substr(start, end - start + 1);
+    }
+    return text;
+}
+
+std::string RawExcerpt(const std::string& text, std::size_t limit = 512) {
+    if (text.size() <= limit) {
+        return text;
+    }
+    return text.substr(0, limit) + "...";
+}
+
 review::ReviewUsage UsageFromResult(const agent::SubAgentResult& result) {
     review::ReviewUsage usage;
     usage.prompt_tokens = result.prompt_tokens;
@@ -108,15 +152,24 @@ nlohmann::json ParseScoutText(const agent::SubAgentResult& result,
     if (result.text.empty()) {
         task["status"] = "invalid";
         task["error"] = "review_scout returned empty output";
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "review_scout",
+                "event=scout_result_invalid agent_id=" + result.agent_id +
+                        " bytes=0 reason=empty");
         return task;
     }
     try {
-        const auto parsed = nlohmann::json::parse(result.text);
+        const auto parsed = nlohmann::json::parse(ExtractJsonObject(result.text));
         if (!parsed.is_object() || !parsed.contains("findings") ||
             !parsed["findings"].is_array()) {
             task["status"] = "invalid";
             task["error"] = "review_scout output is not a findings JSON object";
-            task["raw"] = result.text;
+            task["raw"] = RawExcerpt(result.text);
+            aiagent::DefaultLogger().Log(
+                    aiagent::LogLevel::kWarning, "review_scout",
+                    "event=scout_result_invalid agent_id=" + result.agent_id +
+                            " bytes=" + std::to_string(result.text.size()) +
+                            " reason=shape raw_excerpt=" + RawExcerpt(result.text));
             return task;
         }
         task["findings"] = parsed["findings"];
@@ -131,7 +184,12 @@ nlohmann::json ParseScoutText(const agent::SubAgentResult& result,
     } catch (const nlohmann::json::exception&) {
         task["status"] = "invalid";
         task["error"] = "review_scout output is not valid JSON";
-        task["raw"] = result.text;
+        task["raw"] = RawExcerpt(result.text);
+        aiagent::DefaultLogger().Log(
+                aiagent::LogLevel::kWarning, "review_scout",
+                "event=scout_result_invalid agent_id=" + result.agent_id +
+                        " bytes=" + std::to_string(result.text.size()) +
+                        " reason=json raw_excerpt=" + RawExcerpt(result.text));
     }
     return task;
 }
@@ -697,6 +755,13 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
     payload["max_findings_per_task"] = max_findings;
     payload["auto_selected"] = auto_selected ? static_cast<int>(seeds.size()) : 0;
     payload["total_usage"] = review::ReviewUsageToJson(total_usage);
+    aiagent::DefaultLogger().Log(
+            aiagent::LogLevel::kInfo, "review_scout",
+            "event=review_scout_done mode=" + mode + " tasks=" +
+                    std::to_string(seeds.size()) + " findings=" +
+                    std::to_string(findings) + " failed=" +
+                    std::to_string(failed) + " auto=" +
+                    std::to_string(auto_selected ? seeds.size() : 0));
     result.text = payload.dump(2, ' ', false,
                                nlohmann::json::error_handler_t::replace);
     return result;

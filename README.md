@@ -631,8 +631,9 @@ reviewer 工具集固定为 `read`/`grep`/`glob`/`ls` + 审核工具：
 - `review_git`：只读 `diff/log/show/blame/rev-parse/ls-files/status`；拒绝 shell、
   checkout/reset/restore/stash/clean、reflog 与其他分支/未来提交。
 - `review_scout`（默认开启，`[review] slice_total_max=1–8`）：
-  `mode=main_review` + `pack` + `group_ids`（来自 `review_context(mode=plan)`）
-  把分片作为**委派主审**派发；也兼容 `pack` + `tasks` 的手工分片，但文件必须在
+  `mode=main_review` + `pack` 把分片作为**委派主审**派发；省略 `group_ids` 时后端
+  按 pack 规模/`slice_total_max` 自适应选择，定向补查才显式传 `group_ids`（来自
+  `review_context(mode=plan)`）。也兼容 `pack` + `tasks` 的手工分片，但文件必须在
   pack scope 内且互不重叠。scout 必须用 `review_read`/`review_context` 读
   assigned files 才会产生覆盖回执，普通 `read` 只用于调用方辅助判断。
   分片失败/超时/截断/缺文件会进入 `failed_slices`，其未覆盖文件仍由父 reviewer

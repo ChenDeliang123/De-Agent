@@ -167,6 +167,33 @@ int main() {
                    all_failed_json["tasks"][0]["assigned_files"].size() == 1,
            "all-failed result must preserve reasons and assigned files");
 
+    auto fenced_runner = [](const std::vector<agent::SubAgentRequest>& requests, int) {
+        std::vector<agent::SubAgentResult> results;
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+            agent::SubAgentResult result;
+            result.ok = true;
+            result.text =
+                    "Here is the result:\n```json\n"
+                    "{\"findings\":[{\"severity\":\"minor\",\"file\":\"a.cpp\","
+                    "\"line\":1,\"title\":\"t\",\"evidence\":\"e\",\"impact\":\"i\","
+                    "\"trigger\":\"x\",\"suggestion\":\"s\",\"confidence\":\"high\"}],"
+                    "\"unverified\":[],\"coverage\":{}}\n```";
+            results.push_back(std::move(result));
+        }
+        return results;
+    };
+    tools::ReviewScoutToolProvider fenced(fenced_runner, 4);
+    auto fenced_result = fenced.Execute(
+            "review_scout",
+            {{"mode", "candidate"},
+             {"tasks", nlohmann::json::array({Task("a", "a.cpp")})}},
+            Context());
+    auto fenced_json = Parse(fenced_result);
+    Expect(fenced_result.ok && fenced_json["tasks"][0]["findings"].size() == 1 &&
+                   fenced_json["tasks"][0]["status"] != "invalid" &&
+                   !fenced_json["tasks"][0].contains("raw"),
+           "fenced/prose scout output should be parsed: " + fenced_json.dump());
+
     auto too_many = provider.Execute(
             "review_scout",
             {{"mode", "candidate"},

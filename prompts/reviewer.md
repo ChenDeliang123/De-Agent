@@ -35,8 +35,9 @@
 1. 读 manifest（review_id/feature/base/head/diff 统计/untracked/context/verification）。
 2. 验时效；stale 立即停止。
 3. 读 `review_context(mode=plan)` 的分组与 focus；用
-   `review_scout(mode=main_review, pack=..., group_ids=[...])` 派发委派主审分片，
-   不自行缩小范围；剩余文件由父级覆盖。
+   `review_scout(mode=main_review, pack=...)` 让后端按 plan budget 自适应选取最多
+   `slice_total_max` 个分组（大 pack 不要擅自减到 1–2 个）；定向补查时才显式传
+   `group_ids`。剩余文件由父级覆盖。
 4. `review_setup(show)`；缺失/失效时 `detect`，向用户申请 `save`；未同意只跑 pack 命令
    （逐条审批）或静态审核。
 5. 对齐需求：request/session 摘录 + context paths → 验收 checklist → 代码/测试证据。

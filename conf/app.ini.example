@@ -155,6 +155,8 @@ review_timeout_s = 3600
 ; 后端按 pack 规模/profile 自适应选择，默认 deep 最多 4 个。
 slice_profile = deep
 slice_total_max = 4
+; 4 核/约 4GB 内存的开发机建议降到 2；4 个 20 文件分片同时读大文件可能触发后端
+; 内存压力（P3 复跑时出现过进程退出）。默认仍保留 4，硬件充足时可保持。
 slice_concurrency = 4
 slice_max_files = 20
 slice_max_rounds = 96
