@@ -1141,9 +1141,6 @@ int main(int argc, char** argv) {
             return std::make_shared<aiagent::tools::FilteredToolProvider>(
                     reviewer_composite, review_allow, std::vector<std::string>{});
         };
-        auto make_reviewer_provider = [&]() -> std::shared_ptr<aiagent::tools::IToolProvider> {
-            return make_reviewer_provider_ex(nullptr);
-        };
         std::shared_ptr<aiagent::tools::IToolProvider> reviewer_tool_provider =
                 make_reviewer_provider_ex(&main_review_tools);
 
@@ -1430,6 +1427,11 @@ int main(int argc, char** argv) {
                         const std::string prompt =
                                 "Review the change described in " + job.pack_path +
                                 ". Start with review_context(mode=manifest). "
+                                "After review_context(mode=plan), if review_scout is "
+                                "available, call review_scout(mode=main_review, pack=" +
+                                job.pack_path +
+                                ", omit group_ids) to delegate primary review slices; "
+                                "do not skip delegation for a large pack. "
                                 "This is a background review: do not ask questions. "
                                 "Do not call review_setup or review_test_write. "
                                 "Use review_verify only for project commands with valid "

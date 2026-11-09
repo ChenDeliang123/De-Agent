@@ -348,6 +348,32 @@ int main() {
                            main_review.dump());
             cleanup_slice(group_id);
 
+            // slice_total_max 是 review 级总上限，跨多次 review_scout 调用也不能突破。
+            // state 里已有 slice-manual（前面的 scout receipt），所以总上限用 2。
+            aiagent::tools::ReviewScoutToolProvider capped(
+                    scout_runner, 2, options.config,
+                    [pack_path]() { return pack_path; });
+            auto capped_first = Parse(capped.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"group_ids", nlohmann::json::array({group_id})}},
+                    context));
+            Expect(!capped_first.contains("__error"),
+                   "first capped slice should run: " + capped_first.dump());
+            auto capped_second = Parse(capped.Execute(
+                    "review_scout",
+                    {{"mode", "main_review"},
+                     {"pack", pack_path},
+                     {"group_ids", nlohmann::json::array({group_id})}},
+                    context));
+            Expect(capped_second.contains("__error") &&
+                           capped_second["__error"].get<std::string>().find(
+                                   "slice_total_max") != std::string::npos,
+                   "second call beyond total cap must be rejected: " +
+                           capped_second.dump());
+            cleanup_slice(group_id);
+
             auto unknown_group = Parse(scout_provider.Execute(
                     "review_scout",
                     {{"mode", "main_review"},

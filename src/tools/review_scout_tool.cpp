@@ -366,6 +366,26 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
         return result;
     }
 
+    std::size_t existing_slices = 0;
+    if (main_review && state_ready) {
+        review::ReviewState slice_state;
+        std::string slice_error;
+        if (review::LoadReviewState(config_, pack.repo_root, pack.review_id,
+                                    &slice_state, &slice_error)) {
+            existing_slices = slice_state.coverage_ledger.slices.size();
+        }
+    }
+    const std::size_t remaining_slices =
+            existing_slices >= static_cast<std::size_t>(max_tasks_)
+                    ? 0
+                    : static_cast<std::size_t>(max_tasks_) - existing_slices;
+    if (main_review && remaining_slices == 0) {
+        result.error = "review_scout slice_total_max reached: existing=" +
+                       std::to_string(existing_slices) + " max=" +
+                       std::to_string(max_tasks_);
+        return result;
+    }
+
     review::ReviewScope scope;
     if (main_review) {
         scope = review::BuildReviewScope(pack);
@@ -515,10 +535,11 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
         const std::vector<review::ReviewPlanGroup> groups =
                 review::BuildReviewPlanGroups(scope.required);
         const std::size_t target = std::min(
-                review::RecommendedSliceCount(scope.required.size(), groups.size(),
-                                              config_.slice_profile,
-                                              config_.slice_total_max),
-                static_cast<std::size_t>(max_tasks_));
+                std::min(review::RecommendedSliceCount(
+                                 scope.required.size(), groups.size(),
+                                 config_.slice_profile, config_.slice_total_max),
+                         static_cast<std::size_t>(max_tasks_)),
+                remaining_slices);
         if (target == 0) {
             nlohmann::json payload;
             payload["tasks"] = nlohmann::json::array();
@@ -551,6 +572,13 @@ ToolExecutionResult ReviewScoutToolProvider::Execute(const std::string& name,
     if (static_cast<int>(specs.size()) > max_tasks_) {
         result.error = "too many review_scout slices: " + std::to_string(specs.size()) +
                        " (max " + std::to_string(max_tasks_) + ")";
+        return result;
+    }
+    if (main_review && specs.size() > remaining_slices) {
+        result.error = "review_scout slice_total_max exceeded: existing=" +
+                       std::to_string(existing_slices) + " new=" +
+                       std::to_string(specs.size()) + " max=" +
+                       std::to_string(max_tasks_);
         return result;
     }
     std::size_t total_files = 0;
